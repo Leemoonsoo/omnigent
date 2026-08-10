@@ -642,7 +642,17 @@ def register_events_routes(
                     stop_conv.runner_id,
                     getattr(request.app.state, "host_registry", None),
                 )
-                if not teardown_delivered:
+                if teardown_delivered:
+                    # The host confirmed the user-requested teardown. Own the
+                    # terminal state even if the runner disconnect raced a
+                    # generic ``failed`` edge while the host was stopping it.
+                    _publish_status(session_id, "idle", allow_failed_to_idle=True)
+                    await _persist_session_status_error_labels(
+                        session_id,
+                        None,
+                        conversation_store,
+                    )
+                else:
                     # Best-effort stop did not land (host offline / timeout /
                     # failure): no tunnel drop will follow, so the relay won't
                     # reach the disconnect handler that consumes the marker.

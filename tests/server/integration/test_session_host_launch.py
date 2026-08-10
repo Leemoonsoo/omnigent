@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -27,6 +28,7 @@ import pytest
 from asgiref.testing import ApplicationCommunicator
 from fastapi import FastAPI
 
+from omnigent.db.utils import generate_agent_id
 from omnigent.host.frames import (
     HostHelloFrame,
     HostLaunchRunnerFrame,
@@ -256,7 +258,11 @@ async def _serve_one_launch(
     raise AssertionError("host never received a launch frame from the inline path")
 
 
-async def _serve_one_stop(comm: ApplicationCommunicator) -> str:
+async def _serve_one_stop(
+    comm: ApplicationCommunicator,
+    *,
+    before_ack: Callable[[], None] | None = None,
+) -> str:
     """Answer the host's ``host.stop_runner`` round-trip for one Stop.
 
     Reads the host's outbound frames until a
@@ -265,6 +271,8 @@ async def _serve_one_stop(comm: ApplicationCommunicator) -> str:
     and returns the ``runner_id`` the server asked the host to stop.
 
     :param comm: The connected host communicator.
+    :param before_ack: Optional callback invoked after the stop frame arrives
+        but before the host acknowledges it.
     :returns: The ``runner_id`` carried by the stop frame, e.g.
         ``"runner_token_abc123..."``.
     :raises AssertionError: If no stop frame arrives within the frame
@@ -278,6 +286,8 @@ async def _serve_one_stop(comm: ApplicationCommunicator) -> str:
             continue
         frame = decode_host_frame(output["text"])
         if isinstance(frame, HostStopRunnerFrame):
+            if before_ack is not None:
+                before_ack()
             await comm.send_input(
                 {
                     "type": "websocket.receive",
@@ -805,6 +815,8 @@ async def _stop_host_session(
     client: httpx.AsyncClient,
     comm: ApplicationCommunicator,
     session_id: str,
+    *,
+    before_ack: Callable[[], None] | None = None,
 ) -> str:
     """Drive ``stop_session`` and serve the host's stop_runner round-trip.
 
@@ -817,6 +829,8 @@ async def _stop_host_session(
     :param client: Test HTTP client.
     :param comm: Connected host communicator.
     :param session_id: Session to stop, e.g. ``"d1f9214d74c38b9f9a9db17ed8352dc4"``.
+    :param before_ack: Optional callback invoked after the host receives the
+        stop request but before it acknowledges the runner teardown.
     :returns: The ``runner_id`` the host was told to stop.
     """
     from omnigent.runtime import set_runner_client
@@ -831,7 +845,7 @@ async def _stop_host_session(
     )
     set_runner_client(fake_runner)
     try:
-        stop_responder = asyncio.create_task(_serve_one_stop(comm))
+        stop_responder = asyncio.create_task(_serve_one_stop(comm, before_ack=before_ack))
         stop_resp = await client.post(
             f"/v1/sessions/{session_id}/events",
             json={"type": "stop_session", "data": {}},
@@ -875,6 +889,54 @@ async def test_stop_session_stops_host_launched_runner(
         f"host should be told to stop the session's bound runner "
         f"{session['runner_id']!r}, got {stopped_runner_id!r}"
     )
+
+
+async def test_stopped_host_session_settles_idle_after_disconnect_race(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+) -> None:
+    """A confirmed user Stop wins over a racing runner-disconnect failure.
+
+    The runner tunnel can publish ``failed`` while the host is terminating
+    the process but before ``host.stop_runner_result`` reaches the Stop
+    request. Once the host confirms that user-requested teardown, the session
+    must settle to ``idle`` so the Agents rail does not report a successful
+    Stop as a task failure.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+
+    comm = await _connect_host(app)
+    agent = SqlAlchemyAgentStore(db_uri).create(
+        generate_agent_id(),
+        "stop-race-agent",
+        "bundle/stop-race-agent",
+    )
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+    session = conversation_store.create_conversation(
+        agent_id=agent.id,
+        runner_id="runner_stop_race",
+        host_id=_HOST_ID,
+        workspace=_WORKSPACE,
+    )
+    session_id = session.id
+
+    def _race_disconnect_failure() -> None:
+        sessions_module._publish_status(session_id, "failed")
+
+    try:
+        await _stop_host_session(
+            client,
+            comm,
+            session_id,
+            before_ack=_race_disconnect_failure,
+        )
+
+        snap = await client.get(f"/v1/sessions/{session_id}")
+        assert snap.status_code == 200, snap.text
+        assert snap.json()["status"] == "idle"
+    finally:
+        sessions_module._session_status_cache.pop(session_id, None)
 
 
 async def test_stopped_host_session_writes_no_label_and_host_stays_online(

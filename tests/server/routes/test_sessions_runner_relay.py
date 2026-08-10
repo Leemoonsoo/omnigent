@@ -669,6 +669,9 @@ async def test_relay_suppresses_disconnect_error_on_intentional_stop() -> None:
         assert handle is not None
 
         collector = await start_session_stream_collector(session_id)
+        # A concurrent disconnect observer may publish failed before this
+        # intentional relay close is handled. The teardown still owns idle.
+        sessions_module._session_status_cache[session_id] = "failed"
         gate.set()
         await asyncio.wait_for(handle.task, timeout=2.0)
 

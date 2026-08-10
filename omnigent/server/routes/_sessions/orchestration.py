@@ -5887,7 +5887,7 @@ async def _relay_runner_stream(
             # rendering "Error · runner_disconnected". One-shot: discard the
             # marker so a genuine later disconnect surfaces normally.
             _intentional_stop_sessions.discard(session_id)
-            _publish_status(session_id, "idle")
+            _publish_status(session_id, "idle", allow_failed_to_idle=True)
             await _persist_session_status_error_labels(
                 session_id,
                 None,

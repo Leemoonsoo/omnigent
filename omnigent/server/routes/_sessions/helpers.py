@@ -3549,6 +3549,8 @@ def _publish_status(
     response_id: str | None = None,
     background_task_count: int | None = None,
     blocked_on: str | None = None,
+    *,
+    allow_failed_to_idle: bool = False,
 ) -> None:
     """
     Publish a typed :class:`SessionStatusEvent` to the live stream and
@@ -3576,6 +3578,8 @@ def _publish_status(
         a ``response.failed`` event.
     :param response_id: Optional response id for terminal-backed status
         edges, e.g. ``"codex_turn_abc123"``.
+    :param allow_failed_to_idle: Whether an intentional lifecycle teardown may
+        replace a racing ``failed`` edge with ``idle``.
     """
     # ``failed`` is sticky against a trailing ``idle``. A turn error is
     # terminal — it must not be silently downgraded to ``idle`` by a
@@ -3585,11 +3589,15 @@ def _publish_status(
     # trailing ``idle`` ~1s later. Without this guard that ``idle`` would
     # erase the error state before the user could see it. The next
     # ``running`` edge (new activity) clears ``failed`` normally, so the
-    # error persists exactly until the session does real work again. No
-    # in-process flow performs a legitimate ``failed`` → ``idle``
-    # transition (compaction failure publishes ``running`` → ``idle``, not
-    # ``failed``), so this is a safe, harness-agnostic invariant.
-    if status == "idle" and _session_status_cache.get(session_id) == "failed":
+    # error persists exactly until the session does real work again.
+    # An intentional runner teardown is the exception: its tunnel disconnect
+    # can race a generic failure edge, while the lifecycle action owns the
+    # final idle state.
+    if (
+        status == "idle"
+        and _session_status_cache.get(session_id) == "failed"
+        and not allow_failed_to_idle
+    ):
         # Session stays ``failed`` (terminal); the turn is over, so drop any
         # tracked in-flight response id rather than leaving it for the
         # snapshot to reopen a streaming bubble.
