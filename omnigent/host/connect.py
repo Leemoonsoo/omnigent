@@ -325,10 +325,14 @@ def _connection_refused(exc: BaseException) -> bool:
 
 
 _RECONNECT_BASE_S = 0.5
-_RECONNECT_CAP_S = 10.0
+_RECONNECT_CAP_S = 3.0
 _RECONNECT_JITTER = 0.5
+# Keep first startup tolerant of a cold server, but do not spend the library's
+# full default timeout on each reconnect after an established tunnel drops.
+_INITIAL_CONNECT_OPEN_TIMEOUT_S = 10.0
+_RECONNECT_OPEN_TIMEOUT_S = 3.0
 # Consecutive connection-refused failures against a loopback server before the
-# host exits (~5 minutes at the backoff cap). Refused on loopback means no
+# host exits (~90 seconds at the backoff cap). Refused on loopback means no
 # process listens on the port — the local server is gone, not unreachable.
 _LOOPBACK_REFUSED_FATAL_ATTEMPTS = 30
 
@@ -835,6 +839,10 @@ class HostProcess:
         # Per-connection markers feeding the silent-connect streak.
         self._conn_upgrade_accepted = False
         self._conn_frame_received = False
+        # Last readiness snapshot reported to the server. Reconnect hellos use
+        # it immediately; a background refresh replaces stale values later.
+        self._configured_harnesses_cache: dict[str, HarnessAvailability] | None = None
+        self._gateway_inference_cache: dict[str, bool] | None = None
         # Live tunnel connection, set by _serve_frames for the watcher
         # tasks (which outlive any single connection) to report on.
         self._ws: websockets.asyncio.client.ClientConnection | None = None
@@ -2742,6 +2750,11 @@ class HostProcess:
                 additional_headers=headers,
                 max_size=100 * 1024 * 1024,
                 ssl=ssl_ctx,
+                open_timeout=(
+                    _RECONNECT_OPEN_TIMEOUT_S
+                    if self._ever_connected
+                    else _INITIAL_CONNECT_OPEN_TIMEOUT_S
+                ),
                 # Align the host->server tunnel's protocol keepalive to the same
                 # 90 s app-level budget as the runner tunnel (not the 20 s library
                 # default that drops a busy-but-healthy tunnel with 1011 — #1116).
@@ -2887,17 +2900,16 @@ class HostProcess:
                 _tel_install_id = _get_install_id()
         except Exception:  # noqa: BLE001
             pass
-        configured_harnesses = await asyncio.to_thread(configured_harness_map)
-        gateway_inference = await asyncio.to_thread(gateway_inference_map)
         hello = HostHelloFrame(
             version=VERSION,
             frame_protocol_version=1,
             name=self._identity.name,
             runners=self._alive_runner_ids(),
-            # Off the event loop: probes PATH and reads local config.
-            # The loop below refreshes changes; launch remains authoritative.
-            configured_harnesses=configured_harnesses,
-            gateway_inference=gateway_inference,
+            # Never hold registration behind CLI/config probes. A reconnect
+            # carries the last snapshot; first startup reports unknown until
+            # the background readiness task sends its initial refresh.
+            configured_harnesses=self._configured_harnesses_cache,
+            gateway_inference=self._gateway_inference_cache,
             telemetry_opt_out=_tel_opt_out,
             installation_id=_tel_install_id,
         )
@@ -2926,7 +2938,11 @@ class HostProcess:
         # the server's watchdog counts as liveness, or it closes the tunnel
         # with ``4003 ping timeout``.
         readiness_task = asyncio.create_task(
-            self._harness_readiness_loop(ws, configured_harnesses)
+            self._harness_readiness_loop(
+                ws,
+                self._configured_harnesses_cache,
+                self._gateway_inference_cache,
+            )
         )
         try:
             while True:
@@ -2952,7 +2968,8 @@ class HostProcess:
     async def _harness_readiness_loop(
         self,
         ws: websockets.asyncio.client.ClientConnection,
-        initial: dict[str, HarnessAvailability],
+        initial: dict[str, HarnessAvailability] | None,
+        initial_gateway: dict[str, bool] | None = None,
     ) -> None:
         """
         Push harness-readiness updates on a timer, off the receive loop.
@@ -2966,15 +2983,38 @@ class HostProcess:
         :class:`HostHarnessReadinessFrame` only when the map changes.
 
         :param ws: The open tunnel connection used to send update frames.
-        :param initial: The readiness map already reported in ``host.hello``;
-            the baseline the first update diffs against.
+        :param initial: The cached readiness map reported in ``host.hello``, or
+            ``None`` on first startup.
+        :param initial_gateway: Cached gateway-inference map, if available.
         :returns: None. Runs until cancelled when the connection ends.
         """
         configured = initial
-        # Gateway-backing baseline, recomputed with readiness: a flip alone
-        # (same binaries, new credentials) must reach the server without a
-        # reconnect.
-        gateway = await asyncio.to_thread(gateway_inference_map)
+        gateway = initial_gateway
+
+        # Populate or validate the cached hello snapshot immediately, but off
+        # the receive loop. Running both independent probes concurrently keeps
+        # the first refresh bounded by the slower one rather than their sum.
+        latest, latest_gateway = await asyncio.gather(
+            asyncio.to_thread(configured_harness_map),
+            asyncio.to_thread(gateway_inference_map),
+        )
+        if initial is not None and initial_gateway is None:
+            # Compatibility for direct callers that supplied only the
+            # readiness baseline before gateway inference joined this loop.
+            gateway = latest_gateway
+        if latest != configured or latest_gateway != gateway:
+            await ws.send(
+                encode_host_frame(
+                    HostHarnessReadinessFrame(
+                        configured_harnesses=latest,
+                        gateway_inference=latest_gateway,
+                    )
+                )
+            )
+        configured = latest
+        gateway = latest_gateway
+        self._configured_harnesses_cache = latest
+        self._gateway_inference_cache = latest_gateway
         loop = asyncio.get_running_loop()
         next_quick = loop.time() + HARNESS_READINESS_REFRESH_INTERVAL_S
         next_full = loop.time() + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
@@ -2990,8 +3030,10 @@ class HostProcess:
                     )
             if not refresh_full:
                 continue
-            latest = await asyncio.to_thread(configured_harness_map)
-            latest_gateway = await asyncio.to_thread(gateway_inference_map)
+            latest, latest_gateway = await asyncio.gather(
+                asyncio.to_thread(configured_harness_map),
+                asyncio.to_thread(gateway_inference_map),
+            )
             next_full = now + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
             if latest != configured or latest_gateway != gateway:
                 await ws.send(
@@ -3004,6 +3046,8 @@ class HostProcess:
                 )
                 configured = latest
                 gateway = latest_gateway
+                self._configured_harnesses_cache = latest
+                self._gateway_inference_cache = latest_gateway
 
     def _start_frame_task(self, ws: websockets.asyncio.client.ClientConnection, raw: str) -> None:
         """Handle one inbound frame on its own task, off the receive loop.

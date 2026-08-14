@@ -1447,6 +1447,51 @@ async def test_hello_advertises_installed_version() -> None:
     assert hello.version != "0.1.0"
 
 
+async def test_hello_does_not_wait_for_readiness_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration starts before potentially slow local CLI/config probes."""
+    probes_release = threading.Event()
+
+    def _readiness() -> dict[str, bool]:
+        probes_release.wait(timeout=10.0)
+        return {"codex": True}
+
+    def _gateway() -> dict[str, bool]:
+        probes_release.wait(timeout=10.0)
+        return {"codex": True}
+
+    class _OpenTunnel(_RecordingWS):
+        """Recording tunnel whose receive side remains connected."""
+
+        async def recv(self) -> str:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", _readiness)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", _gateway)
+    host = _make_host_process()
+    tunnel = _OpenTunnel()
+    task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
+    try:
+        await asyncio.wait_for(tunnel.first_send.wait(), timeout=2.0)
+        hello = decode_host_frame(tunnel.sent[0])
+        assert isinstance(hello, HostHelloFrame)
+        assert hello.configured_harnesses is None
+
+        probes_release.set()
+        async with asyncio.timeout(2.0):
+            while len(tunnel.sent) < 2:
+                await asyncio.sleep(0)
+        refresh = decode_host_frame(tunnel.sent[1])
+        assert isinstance(refresh, HostHarnessReadinessFrame)
+        assert refresh.configured_harnesses == {"codex": True}
+    finally:
+        probes_release.set()
+        await _cancel(task)
+        _cleanup_host(host)
+
+
 async def test_handle_stop_terminates_process(tmp_path: Path) -> None:
     """
     Verify that _handle_stop terminates a tracked runner and
@@ -3249,16 +3294,18 @@ class _ConnectSpy:
         """
         self._exceptions = exceptions
         self.call_count = 0
+        self.calls: list[dict[str, object]] = []
 
     def __call__(self, url: str, **kwargs: object) -> _HandshakeFailingConnect | _AcceptingConnect:
         """Return an async-CM scripting the handshake for this call.
 
         :param url: Tunnel URL passed by production (ignored).
-        :param kwargs: Connect kwargs passed by production (ignored).
+        :param kwargs: Connect kwargs passed by production (recorded).
         :returns: A context manager whose ``__aenter__`` raises the
             queued exception, or completes the handshake for a ``None``
             entry.
         """
+        self.calls.append(kwargs)
         exc = self._exceptions[min(self.call_count, len(self._exceptions) - 1)]
         self.call_count += 1
         if exc is None or isinstance(exc, int):
@@ -3797,6 +3844,22 @@ async def test_run_reconnects_on_transient_upgrade_failure(
 
     # 2 = transient attempt + cancel attempt → it genuinely reconnected.
     assert spy.call_count == 2
+
+
+async def test_reconnect_uses_shorter_handshake_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only reconnects use the shorter open timeout; cold startup stays tolerant."""
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    spy = _ConnectSpy([None, asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+    host = _host()
+
+    await host.run()
+
+    assert [call["open_timeout"] for call in spy.calls] == [10.0, 3.0]
 
 
 def _refused_exc() -> ConnectionRefusedError:
