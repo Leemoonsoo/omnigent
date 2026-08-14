@@ -1286,7 +1286,7 @@ class SqlHost(OmnigentBase):
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     # Enum stored as a stable int code (see omnigent.db.enum_codecs
-    # HOST_STATUS: online=1, offline=2).
+    # HOST_STATUS: online=1, offline=2, reconnecting=3).
     status: Mapped[int] = mapped_column(SmallInteger)
     created_at: Mapped[int] = mapped_column(Integer)
     updated_at: Mapped[int] = mapped_column(Integer)
@@ -1299,7 +1299,7 @@ class SqlHost(OmnigentBase):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN (1, 2)",
+            "status IN (1, 2, 3)",
             name="ck_hosts_status",
         ),
         # (workspace_id, user_id, name) was the old PK; keep it unique so the

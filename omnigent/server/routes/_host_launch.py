@@ -28,7 +28,7 @@ from omnigent.server.auth import LEVEL_OWNER
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.permissions import check_session_access
 from omnigent.stores import ConversationStore
-from omnigent.stores.host_store import Host, HostStore, host_is_live
+from omnigent.stores.host_store import Host, HostStore, host_is_live, host_is_reconnecting
 from omnigent.stores.permission_store import PermissionStore
 
 
@@ -137,6 +137,11 @@ def resolve_host_launch(
         # and hosts._host_absent_error.
         if host_is_live(host):
             raise OmnigentError("host is on another replica", code=ErrorCode.WRONG_REPLICA)
+        if host_is_reconnecting(host):
+            raise OmnigentError(
+                "host tunnel is reconnecting; retry shortly",
+                code=ErrorCode.HOST_RECONNECTING,
+            )
         raise OmnigentError("host is offline", code=ErrorCode.CONFLICT)
 
     conv = conversation_store.get_conversation(session_id)

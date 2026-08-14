@@ -6,7 +6,7 @@ export interface Host {
   host_id: string;
   name: string;
   owner: string;
-  status: "online" | "offline";
+  status: "online" | "reconnecting" | "offline";
   /**
    * Sandbox provider backing a server-managed host (e.g. "modal");
    * null for user-connected hosts. Optional because older servers

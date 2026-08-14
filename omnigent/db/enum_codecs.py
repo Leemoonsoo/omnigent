@@ -96,6 +96,7 @@ DEVICE_GRANT_STATUS: dict[str, int] = {
 HOST_STATUS: dict[str, int] = {
     "online": 1,
     "offline": 2,
+    "reconnecting": 3,
 }
 
 AGENT_KIND: dict[str, int] = {

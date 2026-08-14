@@ -104,6 +104,22 @@ class TestResolveHostLaunch:
             )
         assert exc_info.value.code == ErrorCode.CONFLICT
 
+    def test_host_reconnecting_503(self) -> None:
+        host = _FakeHost(host_id="host_1", user_id="alice", status="reconnecting")
+        store = _FakeHostStore(hosts={"host_1": host})
+        registry = _FakeHostRegistry()
+        with pytest.raises(OmnigentError) as exc_info:
+            resolve_host_launch(
+                user_id="alice",
+                host_id="host_1",
+                session_id="s1",
+                host_store=store,
+                host_registry=registry,
+                conversation_store=_FakeConversationStore(),
+                permission_store=None,
+            )
+        assert exc_info.value.code == ErrorCode.HOST_RECONNECTING
+
     def test_missing_session_404(self) -> None:
         host = _FakeHost(host_id="host_1", user_id="alice")
         conn = object()

@@ -8,7 +8,7 @@ import { sandboxOptionLabel } from "@/lib/capabilities";
 import { SwitchHostDialog } from "@/shell/SwitchHostDialog";
 import { cn } from "@/lib/utils";
 
-export type HostBadgeStatus = "online" | "offline" | "unknown";
+export type HostBadgeStatus = "online" | "reconnecting" | "offline" | "unknown";
 
 export interface HostBadgeInfo {
   label: string;
@@ -41,12 +41,19 @@ export function resolveHostBadge(args: {
       : host.name
     : hostId;
   const status: HostBadgeStatus =
-    online === true ? "online" : online === false ? "offline" : "unknown";
+    online === true
+      ? "online"
+      : host?.status === "reconnecting"
+        ? "reconnecting"
+        : online === false
+          ? "offline"
+          : "unknown";
   return { label, status };
 }
 
 const STATUS_DOT_CLASS: Record<HostBadgeStatus, string> = {
   online: "bg-success",
+  reconnecting: "bg-warning",
   offline: "bg-destructive",
   // Neutral while liveness is still settling — avoids a red flash.
   unknown: "bg-muted-foreground/50",
@@ -54,6 +61,7 @@ const STATUS_DOT_CLASS: Record<HostBadgeStatus, string> = {
 
 const STATUS_WORD: Record<HostBadgeStatus, string> = {
   online: "online",
+  reconnecting: "reconnecting",
   offline: "offline",
   unknown: "status unknown",
 };

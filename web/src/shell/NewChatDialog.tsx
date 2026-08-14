@@ -2288,7 +2288,7 @@ export function NewChatLandingScreen() {
 
   const allHosts = hosts ?? [];
   const onlineHosts = allHosts.filter((h) => h.status === "online");
-  const offlineHosts = allHosts.filter((h) => h.status === "offline");
+  const offlineHosts = allHosts.filter((h) => h.status !== "online");
 
   // Identify this machine exactly through Electron. A standalone browser cannot
   // read local host config, so a loopback server with exactly one online host

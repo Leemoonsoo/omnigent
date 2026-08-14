@@ -19,7 +19,7 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_READ
 from omnigent.server.routes._auth_helpers import require_access
 from omnigent.stores import AgentStore, ConversationStore, PermissionStore
-from omnigent.stores.host_store import host_is_live
+from omnigent.stores.host_store import host_is_live, host_is_reconnecting
 
 _logger = logging.getLogger(__name__)
 
@@ -164,6 +164,11 @@ async def validate_existing_host_workspace(
             raise OmnigentError(
                 f"host {host_name or host_id!r} is on another replica; retry",
                 code=ErrorCode.WRONG_REPLICA,
+            )
+        if host_registry.get(host_id) is None and host_is_reconnecting(host):
+            raise OmnigentError(
+                f"host {host_name or host_id!r} is reconnecting; retry shortly",
+                code=ErrorCode.HOST_RECONNECTING,
             )
 
     # Read the agent's os_env.cwd — None when the spec has no os_env block

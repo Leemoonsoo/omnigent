@@ -227,7 +227,7 @@ export function ForkSessionForm({
   const { data: hosts } = useHosts({ enabled: isCodingSource });
   const allHosts = hosts ?? [];
   const onlineHosts = useMemo(() => (hosts ?? []).filter((h) => h.status === "online"), [hosts]);
-  const offlineHosts = useMemo(() => (hosts ?? []).filter((h) => h.status === "offline"), [hosts]);
+  const offlineHosts = useMemo(() => (hosts ?? []).filter((h) => h.status !== "online"), [hosts]);
   const sourceHostOnline = onlineHosts.some((h) => h.host_id === sourceHostId);
   const serverUrl = getCliServerUrl();
 

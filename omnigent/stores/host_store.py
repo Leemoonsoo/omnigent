@@ -46,6 +46,11 @@ from omnigent.harness_availability import HarnessAvailability, is_harness_availa
 # still heart-beating is never falsely aged out.
 HOST_LIVENESS_TTL_S = 90
 
+# A dropped tunnel is not proof that its daemon is gone. Hosts normally
+# reconnect within a few seconds, so expose a bounded transient state before
+# classifying the durable registration as offline.
+HOST_RECONNECT_GRACE_S = 20
+
 
 @dataclass
 class Host:
@@ -57,7 +62,7 @@ class Host:
     :param name: Human-readable name, e.g. ``"corey-laptop"``.
     :param user_id: User ID from the Databricks auth Bearer token,
         e.g. ``"corey.zumar@databricks.com"``.
-    :param status: ``"online"`` or ``"offline"``.
+    :param status: ``"online"``, ``"reconnecting"``, or ``"offline"``.
     :param created_at: Unix epoch seconds of first registration.
     :param updated_at: Unix epoch seconds the row was last touched —
         a status change (connect/disconnect) or a tunnel heartbeat.
@@ -107,6 +112,22 @@ def host_is_live(host: Host, now: int | None = None) -> bool:
     """
     ref = now if now is not None else now_epoch()
     return host.status == "online" and host.updated_at >= ref - HOST_LIVENESS_TTL_S
+
+
+def host_is_reconnecting(host: Host, now: int | None = None) -> bool:
+    """Return whether a host is inside its transient reconnect grace."""
+    ref = now if now is not None else now_epoch()
+    return host.status == "reconnecting" and host.updated_at >= ref - HOST_RECONNECT_GRACE_S
+
+
+def effective_host_status(host: Host, now: int | None = None) -> str:
+    """Resolve stale online/reconnecting records to their effective status."""
+    ref = now if now is not None else now_epoch()
+    if host_is_live(host, now=ref):
+        return "online"
+    if host_is_reconnecting(host, now=ref):
+        return "reconnecting"
+    return "offline"
 
 
 _logger = logging.getLogger(__name__)
@@ -504,6 +525,18 @@ class HostStore:
             ).scalar_one_or_none()
             if row is not None:
                 row.status = encode_host_status("offline")
+                row.updated_at = now_epoch()
+
+    def set_reconnecting(self, host_id: str) -> None:
+        """Mark a host as transiently disconnected while it retries its tunnel."""
+        with self._session("set_host_reconnecting") as session:
+            row = session.execute(
+                select(SqlHost).where(
+                    SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+                )
+            ).scalar_one_or_none()
+            if row is not None:
+                row.status = encode_host_status("reconnecting")
                 row.updated_at = now_epoch()
 
     def update_harness_readiness(

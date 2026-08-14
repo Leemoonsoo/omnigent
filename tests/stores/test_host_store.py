@@ -10,9 +10,12 @@ from omnigent.db.db_models import SqlHost
 from omnigent.db.utils import get_or_create_engine, now_epoch
 from omnigent.stores.host_store import (
     HOST_LIVENESS_TTL_S,
+    HOST_RECONNECT_GRACE_S,
     Host,
     HostStore,
+    effective_host_status,
     host_is_live,
+    host_is_reconnecting,
 )
 
 
@@ -394,6 +397,28 @@ def test_set_offline(host_store: HostStore) -> None:
     fetched = host_store.get_host("7b463227e479b3a677307588a5d9e44f")
     assert fetched is not None
     assert fetched.status == "offline"
+
+
+def test_set_reconnecting_expires_to_effective_offline(
+    host_store: HostStore,
+    db_uri: str,
+) -> None:
+    """A dropped tunnel is retryable only inside the bounded grace window."""
+    host_id = "58f5f832d0434f17bcb89f62ca7e8045"
+    host_store.upsert_on_connect(host_id, "laptop", "carol@example.com")
+    host_store.set_reconnecting(host_id)
+
+    fetched = host_store.get_host(host_id)
+    assert fetched is not None
+    assert fetched.status == "reconnecting"
+    assert host_is_reconnecting(fetched)
+    assert effective_host_status(fetched) == "reconnecting"
+
+    _set_updated_at(db_uri, host_id, now_epoch() - HOST_RECONNECT_GRACE_S - 1)
+    expired = host_store.get_host(host_id)
+    assert expired is not None
+    assert not host_is_reconnecting(expired)
+    assert effective_host_status(expired) == "offline"
 
 
 def test_set_offline_noop_for_unknown_host(

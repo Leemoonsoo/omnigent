@@ -488,7 +488,7 @@ export function CreateScheduledTaskDialog({
                 </SelectItem>
                 {hostOptions.map((host) => (
                   <SelectItem key={host.host_id} value={host.host_id}>
-                    {host.name} {host.status === "offline" ? "(offline)" : ""}
+                    {host.name} {host.status !== "online" ? `(${host.status})` : ""}
                   </SelectItem>
                 ))}
               </SelectContent>

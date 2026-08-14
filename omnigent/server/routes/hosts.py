@@ -53,7 +53,13 @@ from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import resolve_host_launch
 from omnigent.server.schemas import SessionGitOptions
 from omnigent.stores import AgentStore, ConversationStore
-from omnigent.stores.host_store import Host, HostStore, host_is_live
+from omnigent.stores.host_store import (
+    Host,
+    HostStore,
+    effective_host_status,
+    host_is_live,
+    host_is_reconnecting,
+)
 from omnigent.stores.permission_store import PermissionStore
 
 _logger = logging.getLogger(__name__)
@@ -103,6 +109,11 @@ def _host_absent_error(host: Host) -> OmnigentError:
     """
     if host_is_live(host):
         return OmnigentError("host is on another replica", code=ErrorCode.WRONG_REPLICA)
+    if host_is_reconnecting(host):
+        return OmnigentError(
+            "host tunnel is reconnecting; retry shortly",
+            code=ErrorCode.HOST_RECONNECTING,
+        )
     return OmnigentError("host is offline", code=ErrorCode.CONFLICT)
 
 
@@ -618,7 +629,7 @@ def create_hosts_router(
                     "host_id": host.host_id,
                     "name": host.name,
                     "owner": host.user_id,
-                    "status": "online" if host_is_live(host, now=now) else "offline",
+                    "status": effective_host_status(host, now=now),
                     # Non-None marks a server-managed sandbox host (e.g.
                     # "modal"). Clients use it to hide sandbox-backed
                     # hosts from manual host pickers — they are launch
@@ -665,7 +676,7 @@ def create_hosts_router(
             "host_id": host.host_id,
             "name": host.name,
             "owner": host.user_id,
-            "status": "online" if host_is_live(host) else "offline",
+            "status": effective_host_status(host),
             # Same semantics as list_hosts: non-None marks a
             # server-managed sandbox host (e.g. "modal").
             "sandbox_provider": host.sandbox_provider,

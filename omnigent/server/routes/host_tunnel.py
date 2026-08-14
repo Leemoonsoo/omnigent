@@ -228,6 +228,18 @@ def create_host_tunnel_router(
 
         await ws.accept()
         conn: HostConnection | None = None
+        disconnect_code: int | None = None
+
+        async def _persist_disconnect() -> bool:
+            """Deregister this generation and persist its effective state."""
+            if conn is None or not host_registry.deregister(host_id, conn=conn):
+                return False
+            setter = (
+                host_store.set_offline if disconnect_code == 1000 else host_store.set_reconnecting
+            )
+            await asyncio.to_thread(setter, host_id)
+            return True
+
         try:
             raw = await ws.receive_text()
             frame = decode_host_frame(raw)
@@ -321,6 +333,8 @@ def create_host_tunnel_router(
                 for task in done:
                     exc = task.exception() if not task.cancelled() else None
                     if exc is not None:
+                        if isinstance(exc, WebSocketDisconnect):
+                            disconnect_code = exc.code
                         raise exc
             finally:
                 for task in (sender_task, ping_task, receive_task):
@@ -333,8 +347,7 @@ def create_host_tunnel_router(
                 )
                 # If the host already reconnected, this handler's connection
                 # was replaced; only the current one may mark it offline.
-                if host_registry.deregister(host_id, conn=conn):
-                    await asyncio.to_thread(host_store.set_offline, host_id)
+                await _persist_disconnect()
                 if on_host_disconnect is not None:
                     try:
                         await on_host_disconnect(host_id, tunnel_owner)
@@ -344,7 +357,8 @@ def create_host_tunnel_router(
                             host_id,
                         )
 
-        except WebSocketDisconnect:
+        except WebSocketDisconnect as exc:
+            disconnect_code = exc.code
             _logger.warning("Host %s disconnected", host_id)
             # Only run disconnect cleanup if we actually registered this
             # host on THIS connection. A connect that failed before
@@ -352,8 +366,7 @@ def create_host_tunnel_router(
             # connects with another owner's host_id — must not deregister
             # or flip that owner's host offline (cross-user DoS).
             if conn is not None:
-                if host_registry.deregister(host_id, conn=conn):
-                    await asyncio.to_thread(host_store.set_offline, host_id)
+                await _persist_disconnect()
                 if on_host_disconnect is not None:
                     try:
                         await on_host_disconnect(host_id, tunnel_owner)
@@ -366,8 +379,7 @@ def create_host_tunnel_router(
             _logger.exception("Host tunnel error for %s", host_id)
             # Same guard as above: don't touch a host we never registered.
             if conn is not None:
-                if host_registry.deregister(host_id, conn=conn):
-                    await asyncio.to_thread(host_store.set_offline, host_id)
+                await _persist_disconnect()
 
     return router
 

@@ -34,6 +34,8 @@ class ErrorCode:
         §Elicitation completion invariant.
     :cvar RUNNER_UNAVAILABLE: No online runner can serve the
         requested dispatch (HTTP 503).
+    :cvar HOST_RECONNECTING: The host tunnel dropped inside its bounded
+        reconnect grace; retrying may succeed (HTTP 503).
     :cvar WRONG_REPLICA: The session's bound runner exists but its
         tunnel is not registered on the replica that served this request
         (HTTP 400). When replicas are sharded by host, a request keyed for
@@ -65,6 +67,7 @@ class ErrorCode:
     INTERNAL_ERROR = "internal_error"
     HARNESS_PROTOCOL_VIOLATION = "harness_protocol_violation"
     RUNNER_UNAVAILABLE = "runner_unavailable"
+    HOST_RECONNECTING = "host_reconnecting"
     WRONG_REPLICA = "wrong_replica"
     RUNNER_CAPABILITY_MISMATCH = "runner_capability_mismatch"
     # Keep the string equal to frames.HARNESS_NOT_CONFIGURED_ERROR_CODE —
@@ -86,6 +89,7 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # can fix them; investigation needed in the harness wrap).
     ErrorCode.HARNESS_PROTOCOL_VIOLATION: 500,
     ErrorCode.RUNNER_UNAVAILABLE: 503,
+    ErrorCode.HOST_RECONNECTING: 503,
     # 400, not 503: the request reached a replica that can't serve it, but the
     # request is valid — the fix is to re-address it (reissue without the key),
     # not to wait and retry. A 4xx also keeps this expected routing event out of

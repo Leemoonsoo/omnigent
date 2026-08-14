@@ -163,6 +163,15 @@ async def _wait_offline(
         await asyncio.sleep(0.01)
 
 
+async def _wait_reconnecting(store: HostStore, host_id: str) -> None:
+    """Poll until the host's DB status flips to ``"reconnecting"``."""
+    while True:
+        host = store.get_host(host_id)
+        if host is not None and host.status == "reconnecting":
+            return
+        await asyncio.sleep(0.01)
+
+
 async def _wait_updated_at_at_least(
     store: HostStore,
     host_id: str,
@@ -388,6 +397,22 @@ async def test_host_tunnel_sets_offline_on_disconnect(
     host = store.get_host(_HOST_ID)
     assert host is not None
     assert host.status == "offline"
+
+
+async def test_host_tunnel_sets_reconnecting_on_abnormal_disconnect(
+    host_app: tuple[FastAPI, HostRegistry, HostStore],
+) -> None:
+    """An abnormal transport loss enters grace instead of declaring offline."""
+    app, registry, store = host_app
+    comm = await _connect_route(app, _TUNNEL_PATH)
+    await _send_hello_and_wait(comm, registry)
+
+    await comm.send_input({"type": "websocket.disconnect", "code": 1006})
+    await asyncio.wait_for(_wait_reconnecting(store, _HOST_ID), timeout=2.0)
+
+    host = store.get_host(_HOST_ID)
+    assert host is not None
+    assert host.status == "reconnecting"
 
 
 async def test_host_tunnel_rejects_bad_protocol_version(
