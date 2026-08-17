@@ -292,6 +292,34 @@ def pytest_addoption(parser):
             "configured with the credentials/profile the test needs."
         ),
     )
+    parser.addoption(
+        "--omnigent-server-kind",
+        choices=("local", "managed"),
+        default="local",
+        help="Server adapter used by portable black-box E2E contracts.",
+    )
+    parser.addoption(
+        "--omnigent-token-env",
+        default="OMNIGENT_E2E_TOKEN",
+        help="Environment variable containing the managed-server bearer token.",
+    )
+    parser.addoption("--omnigent-org-id", default=None)
+    parser.addoption(
+        "--omnigent-org-routing",
+        choices=("header", "query"),
+        default="header",
+        help="Send the managed workspace/org id in a header or the ?o= query.",
+    )
+    parser.addoption(
+        "--omnigent-traffic-id",
+        default=None,
+        help="Optional x-databricks-traffic-id (for example a LiteSwap route).",
+    )
+    parser.addoption(
+        "--omnigent-managed-agent",
+        default="databricks_coding_agent",
+        help="Built-in agent name used for managed black-box sessions.",
+    )
 
 
 @pytest.fixture(autouse=True)

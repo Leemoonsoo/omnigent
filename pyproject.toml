@@ -481,6 +481,7 @@ timeout_method = "thread"
 # both relative paths here keeps the test suite self-contained.
 pythonpath = [".", "sdks/python-client", "sdks/ui"]
 markers = [
+    "managed_black_box: portable server contract runnable against local OSS or a live managed deployment.",
     "live: end-to-end tests requiring real LLM API key (run with --llm-api-key)",
     "live_app: end-to-end tests requiring a deployed Databricks App server",
     "databricks: requires the `databricks` extra (psycopg / databricks-sdk). Deselected on the standard lanes via -m 'not databricks'; runs only in the Pytest (databricks) lane, which installs the extra. Use for tests that build a postgresql+psycopg engine or call the Databricks SDK.",
