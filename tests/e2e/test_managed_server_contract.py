@@ -24,7 +24,6 @@ from tests.e2e.conftest import (
     create_runner_bound_session,
     register_inline_agent,
     reset_mock_llm,
-    send_user_message_to_session,
 )
 
 
@@ -102,7 +101,7 @@ def _run_streamed_turn(
         with client.stream("GET", f"/v1/sessions/{session_id}/stream", timeout=300) as stream:
             stream.raise_for_status()
             send_future = executor.submit(
-                send_user_message_to_session,
+                _send_user_message,
                 poster,
                 session_id=session_id,
                 content=prompt,
@@ -120,6 +119,31 @@ def _run_streamed_turn(
             response_id = send_future.result(timeout=300)
     assert "response.completed" in event_types, f"turn did not complete; saw {event_types}"
     return event_types, response_id
+
+
+def _send_user_message(
+    client: httpx.Client,
+    *,
+    session_id: str,
+    content: str,
+) -> str:
+    response = client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "message",
+            "data": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": content}],
+            },
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    queued_id = payload.get("item_id") or payload.get("pending_id")
+    assert payload.get("queued") is True and isinstance(queued_id, str), (
+        f"events endpoint did not queue a turn for session {session_id!r}: {payload}"
+    )
+    return queued_id
 
 
 def _wait_until_idle(client: httpx.Client, session_id: str, timeout: float = 60) -> None:
