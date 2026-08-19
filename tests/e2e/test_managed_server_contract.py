@@ -101,15 +101,13 @@ def _run_streamed_turn(
     with ThreadPoolExecutor(max_workers=1) as executor:
         with client.stream("GET", f"/v1/sessions/{session_id}/stream", timeout=300) as stream:
             stream.raise_for_status()
-            send_future = None
+            send_future = executor.submit(
+                send_user_message_to_session,
+                poster,
+                session_id=session_id,
+                content=prompt,
+            )
             for event in _iter_sse(stream):
-                if send_future is None:
-                    send_future = executor.submit(
-                        send_user_message_to_session,
-                        poster,
-                        session_id=session_id,
-                        content=prompt,
-                    )
                 event_type = event.get("type")
                 if isinstance(event_type, str):
                     event_types.append(event_type)
@@ -119,7 +117,6 @@ def _run_streamed_turn(
                         text_chunks.append(delta)
                 if event_type in {"response.completed", "response.failed"}:
                     break
-            assert send_future is not None, "session stream ended before its first SSE frame"
             response_id = send_future.result(timeout=300)
     assert "response.completed" in event_types, f"turn did not complete; saw {event_types}"
     return event_types, response_id

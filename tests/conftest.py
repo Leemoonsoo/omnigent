@@ -317,7 +317,7 @@ def pytest_addoption(parser):
     )
     parser.addoption(
         "--omnigent-managed-agent",
-        default="databricks_coding_agent",
+        default="codex-native-ui",
         help="Built-in agent name used for managed black-box sessions.",
     )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Literal
 
 import httpx
@@ -16,7 +17,7 @@ def _config(*, org_routing: Literal["header", "query"] = "header") -> ManagedSer
         org_id="12345",
         org_routing=org_routing,
         traffic_id="testenv://liteswap/contract",
-        agent_name="databricks_coding_agent",
+        agent_name="codex-native-ui",
     )
 
 
@@ -58,6 +59,30 @@ def test_supports_org_query_routing() -> None:
     assert seen[0].url.params["limit"] == "10"
     assert seen[0].url.params["o"] == "12345"
     assert "X-Databricks-Org-Id" not in seen[0].headers
+
+
+def test_successful_stream_is_not_preconsumed_by_auth() -> None:
+    class RecordingStream(httpx.SyncByteStream):
+        iterated = False
+
+        def __iter__(self) -> Iterator[bytes]:
+            self.iterated = True
+            yield b'data: {"type":"ready"}\n\n'
+
+    stream = RecordingStream()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    config = _config()
+    with httpx.Client(
+        base_url=config.base_url,
+        auth=ManagedServerAuth(config),
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with client.stream("GET", "/v1/sessions/conv_1/stream") as response:
+            assert not stream.iterated
+            assert response.read().startswith(b"data:")
 
 
 def test_managed_create_is_unkeyed_then_session_calls_use_host() -> None:

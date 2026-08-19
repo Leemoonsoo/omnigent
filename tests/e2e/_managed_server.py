@@ -56,8 +56,6 @@ class ManagedServerConfig:
 class ManagedServerAuth(httpx.Auth):
     """Inject managed routing headers and retry wrong-replica responses."""
 
-    requires_response_body = True
-
     def __init__(self, config: ManagedServerConfig) -> None:
         self._config = config
         self._session_hosts: dict[str, str] = {}
@@ -117,6 +115,7 @@ class ManagedServerAuth(httpx.Auth):
         if response.status_code != 400:
             return False
         try:
+            response.read()
             body = response.json()
         except ValueError:
             return False
