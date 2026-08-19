@@ -336,9 +336,9 @@ _RECONNECT_OPEN_TIMEOUT_S = 3.0
 # Established hosts retry auth failures indefinitely to preserve sessions.
 _MAX_CONSECUTIVE_AUTH_ERRORS = 3
 # Consecutive connection-refused failures against a loopback server before the
-# host exits (~90 seconds at the backoff cap). Refused on loopback means no
+# host exits (~5 minutes at the backoff cap). Refused on loopback means no
 # process listens on the port — the local server is gone, not unreachable.
-_LOOPBACK_REFUSED_FATAL_ATTEMPTS = 30
+_LOOPBACK_REFUSED_FATAL_ATTEMPTS = 100
 
 # Consecutive accepted-then-silent connections (upgrade completed, then the
 # socket died without one inbound frame) before the reconnect loop treats the
