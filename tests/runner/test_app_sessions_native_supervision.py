@@ -539,6 +539,8 @@ async def test_external_session_status_running_fans_out_child_busy_to_parent() -
         entry = runner_app.get_subagent_work(child_id)
         assert entry is not None
         assert entry.status == "running"
+        assert pm.has_active_turn(child_id)
+        assert pm.native_turns_marked == [child_id]
 
         events = _drain_session_event_queue(runner_app._session_event_queues_ref.get(parent_id))
     finally:
@@ -663,6 +665,9 @@ async def test_external_status_sequence_coalesces_duplicates_but_emits_task_stat
             },
         },
     ]
+    assert pm.native_turns_marked == [child_id]
+    assert pm.native_turns_cleared == [child_id]
+    assert not pm.has_active_turn(child_id)
 
 
 @pytest.mark.asyncio

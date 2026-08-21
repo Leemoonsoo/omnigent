@@ -249,6 +249,9 @@ class _FakeProcessManager:
         # idle reaper's guard is actually populated for a live turn.
         self.marked_in_flight: list[tuple[str, str]] = []
         self.cleared_in_flight: list[str] = []
+        self.native_turns_marked: list[str] = []
+        self.native_turns_cleared: list[str] = []
+        self._native_active_turns: set[str] = set()
 
     async def get_client(
         self, conversation_id: str, harness: str, env: Any = None
@@ -264,7 +267,23 @@ class _FakeProcessManager:
 
     def has_active_turn(self, conversation_id: str) -> bool:
         """Check if a turn is marked active for this conversation."""
-        return conversation_id in self._active_turns
+        return (
+            conversation_id in self._active_turns or conversation_id in self._native_active_turns
+        )
+
+    def mark_native_turn_active(self, conversation_id: str) -> None:
+        """Record semantic native turn start."""
+        if conversation_id in self._native_active_turns:
+            return
+        self.native_turns_marked.append(conversation_id)
+        self._native_active_turns.add(conversation_id)
+
+    def clear_native_turn_active(self, conversation_id: str) -> None:
+        """Record semantic native turn completion."""
+        if conversation_id not in self._native_active_turns:
+            return
+        self.native_turns_cleared.append(conversation_id)
+        self._native_active_turns.discard(conversation_id)
 
     def mark_turn_active(self, conversation_id: str) -> None:
         """Mark a conversation as having an active turn (test helper)."""
@@ -289,6 +308,7 @@ class _FakeProcessManager:
         """Record a release and remove the session."""
         self.released.append(conversation_id)
         self._sessions.discard(conversation_id)
+        self._native_active_turns.discard(conversation_id)
 
 
 class _ReadTimeoutTransport(httpx.AsyncBaseTransport):

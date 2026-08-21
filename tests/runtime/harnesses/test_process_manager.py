@@ -745,6 +745,57 @@ async def test_idle_reaper_skips_in_flight_turn(
         await fast.shutdown()
 
 
+async def test_idle_reaper_skips_active_native_turn(tmp_path: Path) -> None:
+    """Semantic native turn status protects work without trusting pane repaint."""
+    mgr = HarnessProcessManager(idle_timeout_s=0.5, reaper_interval_s=0.05, tmp_parent=tmp_path)
+    entry = _SubprocessEntry(
+        _FakeReapProc(),
+        _SlowCloseClient(0.0),
+        _FakeEndpoint(),
+        "codex-native",
+    )  # type: ignore[arg-type]
+    entry.last_used_at = time.monotonic() - 100.0
+    mgr._entries = {"conv_native": entry}
+    mgr.mark_native_turn_active("conv_native")
+
+    reaper = asyncio.create_task(mgr._idle_reaper_loop())
+    try:
+        await asyncio.sleep(1.0)
+        assert mgr.has_active_turn("conv_native")
+        assert not entry.process.killed, "active native turn was reaped"
+
+        turn_ended_at = time.monotonic()
+        mgr.clear_native_turn_active("conv_native")
+        lease_after_turn = entry.last_used_at
+        assert lease_after_turn >= turn_ended_at
+        assert not mgr.has_active_turn("conv_native")
+
+        mgr.clear_native_turn_active("conv_native")
+        assert entry.last_used_at == lease_after_turn, "duplicate idle edge extended the lease"
+
+        deadline = time.monotonic() + 2.0
+        while not entry.process.killed:
+            assert time.monotonic() < deadline, "completed native turn was never reaped"
+            await asyncio.sleep(0.02)
+    finally:
+        reaper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reaper
+
+
+def test_native_turn_status_does_not_clear_proxy_response_guard(tmp_path: Path) -> None:
+    """Native status bookkeeping stays separate from proxy cancellation state."""
+    mgr = HarnessProcessManager(tmp_parent=tmp_path)
+    mgr.mark_in_flight("conv_mixed", "resp_live")
+    mgr.mark_native_turn_active("conv_mixed")
+
+    mgr.clear_native_turn_active("conv_mixed")
+    assert mgr.has_active_turn("conv_mixed")
+
+    mgr.clear_in_flight("conv_mixed")
+    assert not mgr.has_active_turn("conv_mixed")
+
+
 class _FakeReapProc:
     """Minimal process stand-in recording whether the reaper killed it."""
 

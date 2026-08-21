@@ -574,6 +574,9 @@ class HarnessProcessManager:
         # and the idle reaper skips any conversation present here so an
         # actively-streaming turn is never reaped mid-flight.
         self._in_flight_response_ids: dict[str, str] = {}
+        # Native harness injection responses finish before the terminal turn.
+        # Runner status edges keep those real turns protected independently.
+        self._native_active_turns: set[str] = set()
         # Per-conversation spawn lock — see §Process management:
         # Spawn lock. The lock guards the lazy-init window in
         # ``get_client``; uncontested after the first spawn for a
@@ -979,15 +982,42 @@ class HarnessProcessManager:
 
     def has_active_turn(self, conversation_id: str) -> bool:
         """
-        Check whether the given conversation has an in-flight
-        harness response (i.e. a turn is currently streaming).
+        Check whether the given conversation has an active harness turn.
 
         :param conversation_id: AP-allocated conversation id,
             e.g. ``"conv_abc123"``.
-        :returns: ``True`` if an in-flight response id is
-            registered.
+        :returns: ``True`` if a proxy response is streaming or a native
+            terminal turn is running.
         """
-        return conversation_id in self._in_flight_response_ids
+        return (
+            conversation_id in self._in_flight_response_ids
+            or conversation_id in self._native_active_turns
+        )
+
+    def mark_native_turn_active(self, conversation_id: str) -> None:
+        """Protect a native terminal turn from idle reaping.
+
+        Native injection returns before the terminal turn completes, so it
+        cannot use the proxy response-id guard.
+
+        :param conversation_id: AP-allocated conversation id.
+        """
+        self._native_active_turns.add(conversation_id)
+
+    def clear_native_turn_active(self, conversation_id: str) -> None:
+        """End native turn protection and start a fresh idle lease.
+
+        Duplicate terminal status edges are a no-op, so they cannot extend an
+        already-idle subprocess's lease.
+
+        :param conversation_id: AP-allocated conversation id.
+        """
+        if conversation_id not in self._native_active_turns:
+            return
+        self._native_active_turns.discard(conversation_id)
+        entry = self._entries.get(conversation_id)
+        if entry is not None:
+            entry.last_used_at = time.monotonic()
 
     def mark_in_flight(self, conversation_id: str, response_id: str) -> None:
         """
@@ -1075,7 +1105,7 @@ class HarnessProcessManager:
                     if (
                         current is None
                         or current.last_used_at > only_if_idle_cutoff
-                        or conversation_id in self._in_flight_response_ids
+                        or self.has_active_turn(conversation_id)
                     ):
                         _logger.info(
                             "skipping idle reap for conversation %s: entry became "
@@ -1086,6 +1116,7 @@ class HarnessProcessManager:
                 self._release_generations[conversation_id] = (
                     self._release_generations.get(conversation_id, 0) + 1
                 )
+                self._native_active_turns.discard(conversation_id)
                 entry = self._entries.pop(conversation_id, None)
                 # NOTE: ``_spawn_locks[conversation_id]`` intentionally
                 # NOT popped — see this method's docstring for the
@@ -1118,10 +1149,13 @@ class HarnessProcessManager:
         # Include spawn-lock keys so a cold spawn that has not yet
         # registered in ``_entries`` is still linearized with ``release``
         # (``release`` waits on the spawn lock, then tears down whatever
-        # got registered). Snapshot under the registry lock; ``release``
-        # mutates ``_entries``.
+        # got registered). Include native turn markers so a manager restarted
+        # in-process does not retain stale liveness. Snapshot under the
+        # registry lock; ``release`` mutates ``_entries``.
         async with self._registry_lock:
-            conv_ids = list(set(self._entries) | set(self._spawn_locks))
+            conv_ids = list(
+                set(self._entries) | set(self._spawn_locks) | self._native_active_turns
+            )
         for conv_id in conv_ids:
             await self.release(conv_id)
         # Best-effort cleanup of our instance dir. If a subprocess
@@ -1366,7 +1400,7 @@ class HarnessProcessManager:
 
         Iterates the registry, releasing any entry whose
         ``last_used_at`` is older than ``idle_timeout_s`` AND
-        has no in-flight response on the harness. Sleeps for
+        has no active proxy or native turn. Sleeps for
         ``reaper_interval_s`` between passes. Terminates on
         :class:`asyncio.CancelledError` from :meth:`shutdown`. A
         non-positive ``idle_timeout_s`` (e.g.
@@ -1375,10 +1409,12 @@ class HarnessProcessManager:
 
         Two safety guards beyond raw ``last_used_at`` checks:
 
-        1. **In-flight skip** — entries with an active
-           harness ``response_id`` (set when the harness
-           emits ``response.created``, cleared on the
-           terminal event) are never reaped. ``last_used_at``
+        1. **Active-turn skip** — proxy turns use a harness
+           ``response_id`` (set on ``response.created`` and cleared on the
+           terminal event). Native injection responses finish before their
+           terminal turns, so semantic ``running`` / terminal status edges
+           maintain a separate marker. Either marker prevents reaping.
+           ``last_used_at``
            is updated only by :meth:`get_client`, which is
            called ONCE per turn at the start. During a
            long-running streaming response (e.g. a 20-shell
@@ -1419,7 +1455,7 @@ class HarnessProcessManager:
                 for conv_id, entry in self._entries.items():
                     if entry.last_used_at > cutoff:
                         continue
-                    if conv_id in self._in_flight_response_ids:
+                    if self.has_active_turn(conv_id):
                         continue
                     stale.append(conv_id)
             for conv_id in stale:

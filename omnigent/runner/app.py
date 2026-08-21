@@ -2149,6 +2149,20 @@ def create_runner_app(
 
     app.state.drain_session_streams = _drain_session_streams
 
+    def _sync_native_harness_turn_status(
+        session_id: str,
+        status: str,
+        *,
+        is_native: bool,
+    ) -> None:
+        """Drive harness reaper protection from semantic native turn status."""
+        if process_manager is None or not is_native:
+            return
+        if status == "running":
+            process_manager.mark_native_turn_active(session_id)
+        elif status in {"waiting", "idle", "failed"}:
+            process_manager.clear_native_turn_active(session_id)
+
     def _publish_event(session_id: str, event: Mapping[str, object]) -> None:
         event_body = cast(_JsonObject, event)
         queue = _session_event_queues.get(session_id)
@@ -2160,6 +2174,11 @@ def create_runner_app(
             _status_value = event_body.get("status")
             if isinstance(_status_value, str):
                 _native_pane_status[session_id] = _status_value
+                _sync_native_harness_turn_status(
+                    session_id,
+                    _status_value,
+                    is_native=_is_native_harness(session_id),
+                )
         _fan_out_child_delta_to_parent(session_id, event_body)
 
     def _child_preview_from_status(
@@ -7064,6 +7083,11 @@ def create_runner_app(
             delivery_ack: _SubagentDeliveryAck | None = None
             recovered_entry: _SubagentWorkEntry | None = None
             if status in ("running", "waiting", "idle", "failed"):
+                _sync_native_harness_turn_status(
+                    conversation_id,
+                    status,
+                    is_native=True,
+                )
                 resource_registry.note_external_session_status(conversation_id, status)
                 _fan_out_child_delta_to_parent(
                     conversation_id,
