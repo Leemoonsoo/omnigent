@@ -9,6 +9,7 @@ the pin so a short idle timeout can shut down.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -335,7 +336,9 @@ def test_native_terminal_activity_refreshes_running_pin_and_idle_timer() -> None
     app.state.native_pane_status["conv_native"] = "idle"
     app.state.native_pane_activity_at["conv_native"] = 0.0
     publish_status("conv_native", "running")
-    app.state.native_pane_activity_at["conv_native"] = 0.0
+    app.state.native_pane_activity_at["conv_native"] = (
+        time.monotonic() - _NATIVE_PANE_RUNNING_STALE_S - 1.0
+    )
     assert app.state.has_active_work() is False
 
     publish_activity("conv_native", "terminal_codex_main")
