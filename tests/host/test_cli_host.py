@@ -43,6 +43,31 @@ class _HostRun:
     server_url: str
 
 
+def _persist_fake_daemon_claim(
+    target: str,
+    spawned: object,
+    **_kwargs: object,
+) -> object:
+    """Simulate the child-side registry claim for patched daemon spawns."""
+    import omnigent.cli as cli_module
+
+    assert isinstance(spawned, cli_module._SpawnedDaemonProcess)
+    mode = "local" if target == "local" else "server"
+    cli_module._write_daemon_record(
+        cli_module._HostDaemonRecord(
+            pid=spawned.pid,
+            target=target,
+            mode=mode,
+            server_url=None if mode == "local" else target,
+            log_path=spawned.log_path,
+            started_at=int(time.time()),
+            config_sig="test-config-signature",
+        )
+    )
+    cli_module._HOST_PID_PATH.write_text(f"{spawned.pid}\n{target}\n")
+    return cli_module._find_daemon_record(target)
+
+
 def test_host_pid_path_honors_data_dir_at_import(tmp_path: Path) -> None:
     env = {**os.environ, "OMNIGENT_DATA_DIR": str(tmp_path / "data")}
     result = subprocess.run(
@@ -470,6 +495,7 @@ def test_ensure_host_daemon_writes_pid_file(
     with (
         patch("omnigent.cli._HOST_PID_PATH", pid_path),
         patch("omnigent.cli.subprocess.Popen", side_effect=_fake_popen),
+        patch("omnigent.cli._wait_for_daemon_claim", side_effect=_persist_fake_daemon_claim),
     ):
         _ensure_host_daemon("http://localhost:8000")
 
@@ -523,6 +549,7 @@ def test_ensure_host_daemon_keeps_old_for_different_server(
         patch("omnigent.cli._pid_alive", lambda pid: pid in {4242, 4243}),
         patch("omnigent.cli.os.kill", lambda pid, sig: killed.append(pid)),
         patch("omnigent.cli.subprocess.Popen", side_effect=_fake_popen),
+        patch("omnigent.cli._wait_for_daemon_claim", side_effect=_persist_fake_daemon_claim),
     ):
         _ensure_host_daemon("http://old-server:8000")
         _ensure_host_daemon("http://new-server:9000")
@@ -814,6 +841,7 @@ def _patch_background_host_spawn(
         return _SpawnedDaemonProcess(pid=pid, log_path=str(log_path))
 
     monkeypatch.setattr("omnigent.cli._spawn_host_daemon_process", _fake_spawn)
+    monkeypatch.setattr("omnigent.cli._wait_for_daemon_claim", _persist_fake_daemon_claim)
     return spawned_args, log_path
 
 
