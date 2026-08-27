@@ -31,13 +31,16 @@ from typing import NotRequired, TypedDict
 
 import httpx
 
-# How long to keep retrying transient 5xx / connect errors on the
+from omnigent._http_retry import bounded_retry_after_seconds
+
+# How long to keep retrying transient 429 / 5xx / connect errors on the
 # policy evaluate POST before failing closed. Keeps the pre-execution
 # gate from blocking long on a sick server while still absorbing brief
-# DB hiccups on a hosted deployment.
+# hosted-deployment failures.
 _EVALUATE_POLICY_RETRY_BUDGET_S = 30.0
 _EVALUATE_POLICY_RETRY_INITIAL_BACKOFF_S = 1.0
 _EVALUATE_POLICY_RETRY_MAX_BACKOFF_S = 10.0
+_EVALUATE_POLICY_MAX_RETRY_AFTER_S = 10.0
 # Fast connect budget so an unreachable server fails into the retry
 # loop quickly rather than blocking on the day-long read timeout.
 _EVALUATE_POLICY_CONNECT_TIMEOUT_S = 5.0
@@ -531,23 +534,26 @@ def post_evaluate_with_retry(
     """
     POST to the Omnigent policy evaluate endpoint, retrying on transient errors.
 
-    Retries on 5xx HTTP responses and connection-level errors
+    Retries on explicit 429 and 5xx HTTP responses and connection-level errors
     (:class:`httpx.ConnectError`, :class:`httpx.ConnectTimeout`) within
     :data:`_EVALUATE_POLICY_RETRY_BUDGET_S`. Returns the successful response,
     or ``None`` if the budget is exhausted or a non-retryable error occurs.
+    A 429 ``Retry-After`` hint takes precedence over exponential backoff but
+    is capped by :data:`_EVALUATE_POLICY_MAX_RETRY_AFTER_S`.
 
     A stable ``_omnigent_elicitation_id`` is minted once and stamped on
     every attempt. When the server parks an ASK gate and the connection
-    drops (5xx or :class:`httpx.ConnectError`), the retry re-POSTs the
-    same id so the server re-attaches to the existing elicitation rather
-    than minting a new one — mirroring the ``_post_hook_with_reattach``
+    drops or rejects the request (429, 5xx, or :class:`httpx.ConnectError`),
+    each retry re-POSTs the same id so the server re-attaches to the existing
+    elicitation rather than minting a new one — mirroring the
+    ``_post_hook_with_reattach``
     idiom used by the ``PermissionRequest`` hook. This prevents a
     second approval card from appearing when the first was already
     published before the error.
 
-    4xx responses are final — a bad request won't succeed on retry. Other
-    mid-stream errors (e.g. :class:`httpx.ReadTimeout`) are also not retried:
-    a read timeout fires *after* the server received the request and may
+    Other 4xx responses are final — a bad request won't succeed on retry.
+    Other mid-stream errors (e.g. :class:`httpx.ReadTimeout`) are also not
+    retried: a read timeout fires *after* the server received the request and may
     mean the long-polling ASK gate was severed mid-wait; retrying with the
     same id will re-park the existing elicitation (no duplicate card), but
     the caller's fail-closed path is equivalent and simpler. The caller is
@@ -585,6 +591,7 @@ def post_evaluate_with_retry(
     reauthed = False
     last_error: str = "unknown error"
     while True:
+        retry_delay_s = backoff_s
         try:
             with httpx.Client(headers=headers, timeout=timeout) as client:
                 resp = client.post(url, json=request_body)
@@ -619,7 +626,17 @@ def post_evaluate_with_retry(
             last_error = f"server returned {status}" + (
                 f": {body_preview}" if body_preview else ""
             )
-            if status < 500:
+            if status == 429:
+                retry_delay_s = bounded_retry_after_seconds(
+                    exc.response,
+                    fallback=backoff_s,
+                    max_delay=_EVALUATE_POLICY_MAX_RETRY_AFTER_S,
+                )
+                print(
+                    f"omnigent {hook_label}: Omnigent returned 429; retrying",
+                    file=sys.stderr,
+                )
+            elif status < 500:
                 print(
                     f"omnigent {hook_label}: Omnigent returned {status}"
                     + (f": {body_preview}" if body_preview else ""),
@@ -646,12 +663,12 @@ def post_evaluate_with_retry(
                 file=sys.stderr,
             )
             return None, last_error
-        if time.monotonic() + backoff_s >= deadline:
+        if time.monotonic() + retry_delay_s >= deadline:
             print(
                 f"omnigent {hook_label}: retry budget exhausted",
                 file=sys.stderr,
             )
             return None, f"retry budget exhausted (last error: {last_error})"
         # Two-step backoff; not worth a retry library in this dependency-light hook.
-        time.sleep(backoff_s)
+        time.sleep(retry_delay_s)
         backoff_s = min(backoff_s * 2, _EVALUATE_POLICY_RETRY_MAX_BACKOFF_S)

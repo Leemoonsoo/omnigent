@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import urllib.parse
 import warnings
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 
 import click
 import httpx
 
+from omnigent._http_retry import bounded_retry_after_seconds
 from omnigent.host.daemon_launch import error_text
 
 DAEMON_HOST_ONLINE_TIMEOUT_S = 30.0
@@ -39,28 +37,14 @@ async def request_with_429_retry(
         response = await send()
         if response.status_code != 429 or attempt == len(_HTTP_429_RETRY_DELAYS_S):
             return response
-        await _sleep(_retry_after_seconds(response, fallback=_HTTP_429_RETRY_DELAYS_S[attempt]))
+        await _sleep(
+            bounded_retry_after_seconds(
+                response,
+                fallback=_HTTP_429_RETRY_DELAYS_S[attempt],
+                max_delay=_HTTP_429_MAX_RETRY_AFTER_S,
+            )
+        )
     raise AssertionError("unreachable")
-
-
-def _retry_after_seconds(response: httpx.Response, *, fallback: float) -> float:
-    """Return a bounded Retry-After delay, or the exponential fallback."""
-    value = response.headers.get("retry-after")
-    if value is None:
-        return fallback
-    try:
-        delay = float(value)
-    except ValueError:
-        try:
-            retry_at = parsedate_to_datetime(value)
-        except (TypeError, ValueError, OverflowError):
-            return fallback
-        if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=UTC)
-        delay = (retry_at - datetime.now(UTC)).total_seconds()
-    if not math.isfinite(delay) or delay < 0:
-        return fallback
-    return min(delay, _HTTP_429_MAX_RETRY_AFTER_S)
 
 
 def normalize_extra_args(
