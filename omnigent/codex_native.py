@@ -93,6 +93,7 @@ from omnigent.native_terminal import (
 from omnigent.native_terminal import (
     normalize_extra_args as _normalize_extra_args,
 )
+from omnigent.native_terminal import request_with_429_retry
 from omnigent.native_terminal import (
     terminal_attach_url as _attach_url,
 )
@@ -1644,11 +1645,13 @@ async def _create_codex_session(
     }
     if terminal_launch_args:
         metadata["terminal_launch_args"] = terminal_launch_args
-    resp = await client.post(
-        "/v1/sessions",
-        data={"metadata": json.dumps(metadata)},
-        files={"bundle": ("codex-native-ui.tar.gz", bundle, "application/gzip")},
-        timeout=120.0,
+    resp = await request_with_429_retry(
+        lambda: client.post(
+            "/v1/sessions",
+            data={"metadata": json.dumps(metadata)},
+            files={"bundle": ("codex-native-ui.tar.gz", bundle, "application/gzip")},
+            timeout=120.0,
+        )
     )
     if resp.status_code >= 400:
         raise click.ClickException(
