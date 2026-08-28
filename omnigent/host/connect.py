@@ -139,6 +139,10 @@ from omnigent.runner.transports.ws_tunnel.limits import (
     TUNNEL_KEEPALIVE_PING_INTERVAL_S,
     TUNNEL_KEEPALIVE_PING_TIMEOUT_S,
 )
+from omnigent.runtime.websocket_metrics import (
+    record_websocket_connected,
+    record_websocket_disconnected,
+)
 from omnigent.suspend_watch import watch_for_resume
 from omnigent.tls import client_ssl_context
 from omnigent.version import VERSION
@@ -3351,15 +3355,30 @@ class HostProcess:
             raise
         # An accepted upgrade proves the credentials work: login redirects
         # from here on are server restarts, not an unauthenticated host.
+        reconnect = self._ever_connected
         self._ever_connected = True
         self._login_redirect_streak = 0
         self._auth_retry_streak = 0
         self._refused_streak = 0
         self._conn_upgrade_accepted = True
-        await self._ensure_owner_user_id()
+        record_websocket_connected("host", reconnect=reconnect)
+        disconnect_error: BaseException | None = None
         try:
+            await self._ensure_owner_user_id()
             await self._serve_frames(ws)
+        except BaseException as exc:
+            disconnect_error = exc
+            raise
         finally:
+            record_websocket_disconnected(
+                "host",
+                disconnect_error,
+                local_shutdown=(
+                    isinstance(disconnect_error, asyncio.CancelledError | KeyboardInterrupt)
+                    or self._lifecycle_lost.is_set()
+                ),
+                resumed_from_suspend=self._woke_from_suspend,
+            )
             # Drop the watcher tasks' send target — exit reports raised
             # between connections park in _unreported_exits instead of
             # racing a half-closed socket.
