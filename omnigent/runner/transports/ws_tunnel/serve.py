@@ -541,6 +541,11 @@ async def serve_tunnel(
         except (ConnectionError, OSError, ValueError) as exc:
             disconnect_error = exc
             retry_reason = str(exc)
+        except BaseException as exc:
+            # Unexpected post-connect failures (e.g. a raising callback) must
+            # not be recorded as clean peer closes.
+            disconnect_error = exc
+            raise
         finally:
             if connected_this_attempt:
                 record_websocket_disconnected(

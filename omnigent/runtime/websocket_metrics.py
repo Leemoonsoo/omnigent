@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 
 from opentelemetry import metrics as otel_metrics
 from opentelemetry.util.types import Attributes
+from websockets.exceptions import ConnectionClosed
 
 from omnigent.runtime.telemetry import telemetry_enabled
 
@@ -68,6 +69,11 @@ def websocket_close_code(error: BaseException | None) -> int | None:
         code = getattr(close, "code", None)
         if isinstance(code, int):
             return code
+    if isinstance(error, ConnectionClosed):
+        # ``ConnectionClosed.code`` is deprecated (websockets >=13.1) and
+        # warns on every abnormal reconnect; ``rcvd``/``sent`` already cover
+        # any real close frame, so a code-less close stays uncoded here.
+        return None
     direct = getattr(error, "code", None)
     if isinstance(direct, int):
         return direct
@@ -87,6 +93,10 @@ def websocket_close_reason(error: BaseException | None) -> str | None:
         reason = getattr(close, "reason", None)
         if isinstance(reason, str) and reason:
             return reason
+    if isinstance(error, ConnectionClosed):
+        # ``ConnectionClosed.reason`` is deprecated (websockets >=13.1); see
+        # websocket_close_code for why the direct fallback is skipped.
+        return None
     direct = getattr(error, "reason", None)
     if isinstance(direct, str) and direct:
         return direct
@@ -147,6 +157,8 @@ def classify_disconnect_reason(
     ):
         return "transport_error"
     if error is None or code is not None:
+        # Any unclassified close frame is an application-level close by the
+        # peer; "unknown" is reserved for code-less unexpected exceptions.
         return "peer_closed"
     return "unknown"
 

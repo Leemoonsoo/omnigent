@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 import pytest
 from opentelemetry.util.types import Attributes
+from websockets.exceptions import ConnectionClosedError
 
 from omnigent.runtime.websocket_metrics import (
     CONNECTIONS_METRIC_NAME,
@@ -14,6 +16,8 @@ from omnigent.runtime.websocket_metrics import (
     classify_disconnect_reason,
     record_websocket_connected,
     record_websocket_disconnected,
+    websocket_close_code,
+    websocket_close_reason,
 )
 
 
@@ -94,6 +98,17 @@ def test_classify_disconnect_reason_is_bounded(
 ) -> None:
     """Raw failures map to a fixed reason vocabulary."""
     assert classify_disconnect_reason(error, **kwargs) == expected
+
+
+def test_code_less_connection_closed_avoids_deprecated_properties() -> None:
+    """A no-close-frame drop classifies without deprecated attribute access."""
+    error = ConnectionClosedError(None, None)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        assert websocket_close_code(error) is None
+        assert websocket_close_reason(error) is None
+        assert classify_disconnect_reason(error) == "transport_error"
 
 
 def test_records_host_and_runner_connection_types() -> None:
