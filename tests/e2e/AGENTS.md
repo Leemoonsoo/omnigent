@@ -32,6 +32,33 @@ grep -E "passed in [0-9]|failed in [0-9]" /tmp/e2e.log | tail -1
 
 This applies to **both** the unit suite (`uv run --no-sync pytest -n 8 --dist=loadfile`) and the e2e suite. Inside Claude Code, use `Bash(run_in_background=true)` plus a separate `Bash` polling loop with `until grep -q ...` to wait for the terminal marker — that pattern frees the assistant to continue with other work and surfaces the summary as a single notification.
 
+## Managed-server black-box contract
+
+`test_managed_server_contract.py` is the portable API contract for a local OSS
+server or a live managed deployment. Managed runs need an existing deployment,
+a bearer token, workspace/org routing, and the name of an agent available in the
+managed catalog:
+
+```bash
+export OMNIGENT_E2E_TOKEN=<workspace-bearer-token>
+OMNIGENT_DISABLE_TEST_GUARDRAILS=1 uv run --no-sync pytest \
+  -o addopts= tests/e2e/test_managed_server_contract.py \
+  -m managed_black_box \
+  --omnigent-server-kind managed \
+  --omnigent-server-url https://<workspace-host>/api/2.0/omnigent \
+  --omnigent-token-env OMNIGENT_E2E_TOKEN \
+  --omnigent-org-id <workspace-org-id> \
+  --omnigent-org-routing header \
+  --omnigent-traffic-id testenv://liteswap/<swap-id> \
+  --omnigent-managed-agent codex-native-ui \
+  --timeout=600 -v
+```
+
+Use `--omnigent-org-routing query` when the deployment expects `?o=` instead
+of `X-Databricks-Org-Id`. The managed auth adapter learns each session's host,
+adds the slice key to session-scoped requests, and retries a `wrong_replica`
+response without the key when the host has been demoted to keyless routing.
+
 ## Prerequisites
 
 ### LLM credentials — pick ONE
