@@ -6542,17 +6542,21 @@ def session_export(session_id: str, output: str | None, server: str | None) -> N
     from omnigent.chat import _remote_headers
 
     cfg = _load_effective_config()
-    base_url = _resolve_attach_server(server, cfg.get("server"))
-    if base_url is None:
+    resolved_server = _resolve_attach_server_url(server, cfg.get("server"))
+    if resolved_server is None:
         startup = ensure_local_omnigent_server()
-        base_url = startup.url
+        resolved_server = ServerUrl(startup.url)
 
-    base_url = base_url.rstrip("/")
+    base_url = resolved_server.api_base
     out_path = Path(output) if output else Path(f"{session_id}.jsonl")
 
     with httpx.Client(
         base_url=base_url,
-        headers=_remote_headers(server_url=base_url, host_id=None),
+        headers=_remote_headers(
+            server_url=base_url,
+            host_id=None,
+            org_id=resolved_server.org_id,
+        ),
         timeout=30.0,
         trust_env=_trust_env_for(base_url),
     ) as client:
@@ -7813,11 +7817,25 @@ def _resolve_attach_server(server: str | None, configured_server: str | None) ->
         ``server`` key of the effective merged config), or ``None``.
     :returns: Normalized base URL without a trailing slash, or ``None``.
     """
+    resolved = _resolve_attach_server_url(server, configured_server)
+    return resolved.api_base if resolved is not None else None
+
+
+def _resolve_attach_server_url(
+    server: str | None, configured_server: str | None
+) -> ServerUrl | None:
+    """Resolve an attach target without discarding its workspace selector.
+
+    :param server: Explicit ``--server`` value, or ``None``.
+    :param configured_server: Configured server fallback, or ``None``.
+    :returns: The resolved server value, including a SPOG workspace selector,
+        or ``None`` when no remote or running local server is available.
+    """
     chosen = server if server is not None else configured_server
     if chosen:
-        return _resolve_server_url(chosen).api_base
+        return _resolve_server_url(chosen)
     local = local_server_url_if_healthy()
-    return local.rstrip("/") if local else None
+    return ServerUrl(local) if local else None
 
 
 def _require_live_conversation(
