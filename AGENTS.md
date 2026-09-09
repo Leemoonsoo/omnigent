@@ -98,3 +98,9 @@ Keep PID, command-line, and tmux inspection outside the host-global process
 registry lock. Reconciliation must merge against the current registry and
 remove only unchanged entries from its snapshot so concurrent registrations,
 replacements, and unregisters are preserved.
+
+## Runner-local Uvicorn servers
+
+Nested Uvicorn servers inside a runner must reuse the runner's logging setup
+(``log_config=None``). Uvicorn's default ``dictConfig`` closes process-wide
+handlers and can block startup while asynchronous handlers drain.
