@@ -11742,7 +11742,13 @@ def _resolve_server_url(server: str) -> ServerUrl:
             if resolved.is_workspace_hosted:
                 from omnigent.cli_auth import store_databricks_org_id
 
-                store_databricks_org_id(resolved.api_base, org_id)
+                try:
+                    store_databricks_org_id(resolved.api_base, org_id)
+                except OSError as exc:
+                    raise click.ClickException(
+                        "Could not persist the workspace routing selector. "
+                        "Check that the Omnigent data directory is writable, then retry."
+                    ) from exc
             return resolved
         return ServerUrl.from_api_base(api_base)
 

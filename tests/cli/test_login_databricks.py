@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import click
 import httpx
 import pytest
 from click.testing import CliRunner
@@ -1299,6 +1300,31 @@ def test_resolve_server_url_does_not_store_selector_off_managed_mount(
     assert resolved.api_base == "https://example.com/service"
     assert resolved.org_id == "123"
     assert stored == []
+
+
+def test_resolve_server_url_reports_selector_persistence_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A routing selector must not be silently dropped when state is unwritable."""
+
+    def fail_to_store(_server: str, _org_id: str) -> None:
+        raise PermissionError("read-only data directory")
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_workspace_api_server_url",
+        lambda _server: _WORKSPACE_API_URL,
+    )
+    monkeypatch.setattr(
+        "omnigent.cli_auth.store_databricks_org_id",
+        fail_to_store,
+    )
+
+    with pytest.raises(
+        click.ClickException,
+        match="Could not persist the workspace routing selector",
+    ):
+        cli_mod._resolve_server_url(f"{_WORKSPACE}/?o=2850744067564480")
 
 
 def test_workspace_url_expands_web_ui_path_to_api_mount(
