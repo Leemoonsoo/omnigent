@@ -91,3 +91,10 @@ instructions:
   not duplicate policy across adapters or add lifecycle metadata to `AgentSpec`.
 - If framework instructions grow beyond a small ordered list, introduce a
   structured `FrameworkInstructions` value at the prompt-composition boundary.
+
+## Native Codex process registry
+
+Keep PID, command-line, and tmux inspection outside the host-global process
+registry lock. Reconciliation must merge against the current registry and
+remove only unchanged entries from its snapshot so concurrent registrations,
+replacements, and unregisters are preserved.

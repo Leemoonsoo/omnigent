@@ -7,6 +7,7 @@ import json
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -182,6 +183,193 @@ def test_reconciliation_drops_dead_pids(tmp_path: Path, monkeypatch) -> None:
 
     assert killed == []
     assert _registry_payload(path) == []
+
+
+def test_reconciliation_does_not_block_concurrent_registration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Slow process inspection does not hold the host-global registry lock."""
+    path = tmp_path / "registry.json"
+    registry.register_codex_native_process(
+        pid=123,
+        pgid=456,
+        session_tag="stale-tag",
+        owner_lock_path=None,
+        registry_path=path,
+    )
+    inspection_started = threading.Event()
+    finish_inspection = threading.Event()
+
+    def slow_cmdline(_pid: int) -> str:
+        inspection_started.set()
+        assert finish_inspection.wait(timeout=5.0)
+        return "codex omnigent_crash_teardown_tag=stale-tag app-server"
+
+    monkeypatch.setattr(registry, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(registry, "_process_cmdline", slow_cmdline)
+    monkeypatch.setattr(registry.os, "killpg", lambda _pgid, _sig: None)
+    reconcile_thread = threading.Thread(
+        target=registry.reconcile_codex_native_process_registry,
+        kwargs={"registry_path": path},
+    )
+    reconcile_thread.start()
+    assert inspection_started.wait(timeout=5.0)
+
+    registration_finished = threading.Event()
+
+    def register_live_process() -> None:
+        registry.register_codex_native_process(
+            pid=789,
+            pgid=789,
+            session_tag="live-tag",
+            owner_lock_path=tmp_path / "live-owner.lock",
+            registry_path=path,
+        )
+        registration_finished.set()
+
+    registration_thread = threading.Thread(target=register_live_process)
+    registration_thread.start()
+    try:
+        assert registration_finished.wait(timeout=1.0)
+    finally:
+        finish_inspection.set()
+        registration_thread.join(timeout=5.0)
+        reconcile_thread.join(timeout=5.0)
+
+    assert not registration_thread.is_alive()
+    assert not reconcile_thread.is_alive()
+    assert _registry_payload(path) == [
+        {
+            "pid": 789,
+            "pgid": 789,
+            "tmux_session_name": None,
+            "session_tag": "live-tag",
+            "owner_lock_path": str(tmp_path / "live-owner.lock"),
+        }
+    ]
+
+
+def test_reconciliation_preserves_concurrent_same_tag_replacement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A replacement written during inspection is not removed as stale."""
+    path = tmp_path / "registry.json"
+    registry.register_codex_native_process(
+        pid=123,
+        pgid=456,
+        session_tag="shared-tag",
+        owner_lock_path=None,
+        registry_path=path,
+    )
+    inspection_started = threading.Event()
+    finish_inspection = threading.Event()
+
+    def slow_cmdline(_pid: int) -> str:
+        inspection_started.set()
+        assert finish_inspection.wait(timeout=5.0)
+        return "codex omnigent_crash_teardown_tag=shared-tag app-server"
+
+    monkeypatch.setattr(registry, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(registry, "_process_cmdline", slow_cmdline)
+    monkeypatch.setattr(registry.os, "killpg", lambda _pgid, _sig: None)
+    reconcile_thread = threading.Thread(
+        target=registry.reconcile_codex_native_process_registry,
+        kwargs={"registry_path": path},
+    )
+    reconcile_thread.start()
+    assert inspection_started.wait(timeout=5.0)
+
+    registry.register_codex_native_process(
+        pid=789,
+        pgid=789,
+        session_tag="shared-tag",
+        owner_lock_path=tmp_path / "new-owner.lock",
+        registry_path=path,
+    )
+    finish_inspection.set()
+    reconcile_thread.join(timeout=5.0)
+
+    assert not reconcile_thread.is_alive()
+    assert _registry_payload(path) == [
+        {
+            "pid": 789,
+            "pgid": 789,
+            "tmux_session_name": None,
+            "session_tag": "shared-tag",
+            "owner_lock_path": str(tmp_path / "new-owner.lock"),
+        }
+    ]
+
+
+def test_reconciliation_does_not_restore_concurrent_unregister(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An entry unregistered during inspection remains absent."""
+    path = tmp_path / "registry.json"
+    registry.register_codex_native_process(
+        pid=123,
+        pgid=456,
+        session_tag="stale-tag",
+        owner_lock_path=None,
+        registry_path=path,
+    )
+    inspection_started = threading.Event()
+    finish_inspection = threading.Event()
+
+    def slow_cmdline(_pid: int) -> str:
+        inspection_started.set()
+        assert finish_inspection.wait(timeout=5.0)
+        return "codex omnigent_crash_teardown_tag=stale-tag app-server"
+
+    monkeypatch.setattr(registry, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(registry, "_process_cmdline", slow_cmdline)
+    monkeypatch.setattr(registry.os, "killpg", lambda _pgid, _sig: None)
+    reconcile_thread = threading.Thread(
+        target=registry.reconcile_codex_native_process_registry,
+        kwargs={"registry_path": path},
+    )
+    reconcile_thread.start()
+    assert inspection_started.wait(timeout=5.0)
+
+    registry.unregister_codex_native_process("stale-tag", registry_path=path)
+    finish_inspection.set()
+    reconcile_thread.join(timeout=5.0)
+
+    assert not reconcile_thread.is_alive()
+    assert _registry_payload(path) == []
+
+
+def test_reconciliation_preserves_entry_when_termination_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A matching live entry remains registered after a failed termination."""
+    path = tmp_path / "registry.json"
+    registry.register_codex_native_process(
+        pid=123,
+        pgid=456,
+        session_tag="tag-123",
+        owner_lock_path=None,
+        registry_path=path,
+    )
+    monkeypatch.setattr(registry, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        registry,
+        "_process_cmdline",
+        lambda _pid: "codex omnigent_crash_teardown_tag=tag-123 app-server",
+    )
+    monkeypatch.setattr(registry, "_terminate_process_group", lambda _pgid: False)
+
+    registry.reconcile_codex_native_process_registry(registry_path=path)
+
+    assert _registry_payload(path) == [
+        {
+            "pid": 123,
+            "pgid": 456,
+            "tmux_session_name": None,
+            "session_tag": "tag-123",
+            "owner_lock_path": None,
+        }
+    ]
 
 
 def test_tmux_session_reaped_only_when_recorded_name_exists(tmp_path: Path, monkeypatch) -> None:

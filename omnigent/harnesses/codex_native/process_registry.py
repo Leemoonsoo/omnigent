@@ -10,6 +10,7 @@ import signal
 import subprocess
 import time
 import uuid
+from collections import Counter
 from collections.abc import Generator
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -198,33 +199,52 @@ def reconcile_codex_native_process_registry(*, registry_path: Path | None = None
     """
     path = registry_path or codex_native_process_registry_path()
     with _registry_lock(path):
+        snapshot = _read_registry(path)
+
+    # Process inspection and teardown can invoke ps/tmux with bounded waits.
+    # Keep those operations outside the host-global registry lock so a slow
+    # stale entry does not serialize unrelated launchers on the host.
+    removals: list[CodexNativeProcessEntry] = []
+    for entry in snapshot:
+        if _owner_lock_held(entry.owner_lock_path):
+            continue
+        if not _pid_alive(entry.pid):
+            removals.append(entry)
+            continue
+        if not _process_cmdline_has_tag(entry.pid, entry.session_tag):
+            removals.append(entry)
+            continue
+        if not _terminate_process_group(entry.pgid):
+            continue
+        _reap_tmux_session(entry.tmux_session_name)
+        removals.append(entry)
+
+    # Re-read under the lock and remove only occurrences from our original
+    # snapshot. Concurrent registrations, replacements, and unregisters are
+    # therefore preserved rather than being overwritten by a stale write.
+    removal_counts = Counter(removals)
+    with _registry_lock(path):
         survivors: list[CodexNativeProcessEntry] = []
         for entry in _read_registry(path):
-            if _owner_lock_held(entry.owner_lock_path):
+            if removal_counts[entry] > 0:
+                removal_counts[entry] -= 1
+            else:
                 survivors.append(entry)
-                continue
-            if not _pid_alive(entry.pid):
-                continue
-            if not _process_cmdline_has_tag(entry.pid, entry.session_tag):
-                continue
-            if not _terminate_process_group(entry.pgid):
-                survivors.append(entry)
-                continue
-            _reap_tmux_session(entry.tmux_session_name)
         _write_registry(path, survivors)
 
 
 @contextlib.contextmanager
 def _registry_lock(path: Path) -> Generator[None, None, None]:
     """
-    Serialize the read-modify-write on the shared registry file.
+    Serialize each read or read-modify-write on the shared registry file.
 
     The registry is a single host-global file mutated by every concurrent
-    launcher, so an unlocked read-modify-write can drop an entry written by
-    another launcher between its read and its write — leaving an orphan that
-    crash reconciliation can never reap. An exclusive flock on a sibling lock
-    file makes the whole sequence atomic across processes. Degrades to a no-op
-    when locking is unavailable (Windows, or a lock-file failure).
+    launcher, so an unlocked write can drop an entry written by another
+    launcher. An exclusive flock on a sibling lock file makes each registry
+    mutation atomic across processes. Potentially slow process inspection is
+    deliberately performed between separate locked sections and merged back
+    against the current registry contents. Degrades to a no-op when locking is
+    unavailable (Windows, or a lock-file failure).
 
     :param path: Registry file path being mutated.
     :returns: Context manager guarding the mutation.
