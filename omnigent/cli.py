@@ -11738,7 +11738,12 @@ def _resolve_server_url(server: str) -> ServerUrl:
 
     def _resolved(api_base: str) -> ServerUrl:
         if org_id is not None:
-            return ServerUrl(api_base=api_base, org_id=org_id)
+            resolved = ServerUrl(api_base=api_base, org_id=org_id)
+            if resolved.is_workspace_hosted:
+                from omnigent.cli_auth import store_databricks_org_id
+
+                store_databricks_org_id(resolved.api_base, org_id)
+            return resolved
         return ServerUrl.from_api_base(api_base)
 
     # A URL copied from the browser while a conversation is open carries the
