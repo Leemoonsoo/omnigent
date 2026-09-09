@@ -1890,6 +1890,45 @@ async def test_still_untrusted_hints_old_codex_when_hash_missing() -> None:
 # --- Codex version gate + fail-open startup ---------------------------
 
 
+async def test_prewarm_codex_model_catalog_populates_launch_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner prewarm uses the same catalog key and timeout as startup."""
+    from omnigent.harnesses.codex_native import app_server as app_server_mod
+
+    calls: list[tuple[str, Path, float]] = []
+
+    def _fake_read(codex_path: str, source_home: Path, *, timeout: float) -> object:
+        calls.append((codex_path, source_home, timeout))
+        return {"models": []}
+
+    monkeypatch.setattr(app_server_mod, "_find_codex_cli", lambda: "/bin/codex")
+    monkeypatch.setattr(app_server_mod, "_codex_home_config_source_from_env", lambda: tmp_path)
+    monkeypatch.setattr(app_server_mod, "read_codex_model_catalog", _fake_read)
+
+    await app_server_mod.prewarm_codex_model_catalog()
+
+    assert calls == [
+        ("/bin/codex", tmp_path, app_server_mod._MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS)
+    ]
+
+
+async def test_prewarm_codex_model_catalog_leaves_failure_to_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected speculative failure does not fail session initialization."""
+    from omnigent.harnesses.codex_native import app_server as app_server_mod
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(app_server_mod, "_find_codex_cli", lambda: "/bin/codex")
+    monkeypatch.setattr(app_server_mod, "read_codex_model_catalog", _raise)
+
+    await app_server_mod.prewarm_codex_model_catalog()
+
+
 def _set_codex_version(
     monkeypatch: pytest.MonkeyPatch, version: tuple[int, int, int] | None
 ) -> None:

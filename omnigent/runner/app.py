@@ -3890,6 +3890,25 @@ def create_runner_app(
             harness_name = "runner-test-default"
             spawn_env = None
 
+        # Codex app-server setup needs the CLI's model catalog to suppress
+        # headless model-migration prompts.  That read-only subprocess probe is
+        # process-wide cached and independent of the generic harness process,
+        # so overlap it with the harness bind wait instead of paying both
+        # startup costs serially.  App-server startup still performs the
+        # authoritative read (joining this probe or hitting its cache).
+        _catalog_prewarm_task: asyncio.Task[None] | None = None
+        if harness_name == "codex-native":
+            from omnigent.harnesses.codex_native.app_server import (
+                prewarm_codex_model_catalog,
+            )
+
+            _catalog_prewarm_task = asyncio.create_task(
+                prewarm_codex_model_catalog(),
+                name=f"codex-model-catalog-prewarm:{session_id}",
+            )
+            _catalog_prewarm_task.add_done_callback(_background_tasks.discard)
+            _background_tasks.add(_catalog_prewarm_task)
+
         try:
             await process_manager.get_client(
                 session_id,
@@ -3897,6 +3916,10 @@ def create_runner_app(
                 env=spawn_env,
             )
         except RuntimeError as exc:
+            if _catalog_prewarm_task is not None:
+                _catalog_prewarm_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await _catalog_prewarm_task
             return JSONResponse(
                 status_code=503,
                 content={

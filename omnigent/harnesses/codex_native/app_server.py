@@ -1285,6 +1285,33 @@ def _build_native_codex_app_server_argv(
     return argv
 
 
+async def prewarm_codex_model_catalog() -> None:
+    """Populate the process-wide Codex catalog cache ahead of app-server setup.
+
+    Runner-owned Codex sessions consult this catalog to acknowledge model
+    migrations before launching the headless TUI.  The probe is read-only and
+    :func:`read_codex_model_catalog` already serializes and caches it, so an
+    early probe and the launch-time read have the same result; the latter will
+    either join the in-flight probe or hit the populated cache.
+
+    Probe failures remain best-effort, matching the launch-time reader.  An
+    unexpected failure is deliberately swallowed here so app-server startup
+    performs its normal read and retains its existing error behavior.
+    """
+    try:
+        codex_path = _find_codex_cli()
+        if codex_path is None:
+            return
+        await asyncio.to_thread(
+            read_codex_model_catalog,
+            codex_path,
+            _codex_home_config_source_from_env(),
+            timeout=_MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
+        )
+    except Exception:  # noqa: BLE001 - launch-time read remains authoritative
+        _logger.debug("Codex model catalog prewarm failed", exc_info=True)
+
+
 @dataclass
 class CodexNativeAppServer:
     """
