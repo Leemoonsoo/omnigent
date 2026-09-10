@@ -539,6 +539,40 @@ def test_ensure_host_daemon_respawns_on_config_drift(
     assert "args" in captured  # fresh daemon spawned
 
 
+def test_ensure_remote_host_daemon_respawns_when_telemetry_is_enabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A reused remote daemon must inherit newly enabled telemetry settings."""
+    captured: dict[str, object] = {}
+    _patch_daemon_spawn(monkeypatch, tmp_path, captured)
+    target = "https://server.example.com"
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target=target,
+        mode="server",
+        server_url=target,
+        log_path=str(tmp_path / "daemon.log"),
+        started_at=1_000_000,
+        config_sig=cli.server_config_signature(include_features=False),
+    )
+    monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: True)
+    monkeypatch.setenv("OMNIGENT_TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("OTEL_PYTHON_METER_PROVIDER", "custom-provider")
+    torn_down: list[str] = []
+    monkeypatch.setattr(
+        cli, "_terminate_host_unit", lambda record, *, reason: torn_down.append(reason)
+    )
+
+    _ensure_host_daemon(target)
+
+    assert torn_down == ["host daemon config changed"]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["OMNIGENT_TELEMETRY_ENABLED"] == "true"
+    assert env["OTEL_PYTHON_METER_PROVIDER"] == "custom-provider"
+
+
 def test_ensure_host_daemon_heals_offline_tunnel(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

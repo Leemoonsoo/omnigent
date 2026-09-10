@@ -3016,9 +3016,9 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     but whose server tunnel is down (server restart, ungraceful death,
     flapping tunnel) is a zombie — the host reads ``offline`` and the
     caller would poll until timeout. And a daemon spawned under a
-    different server config (e.g. the user flipped
-    ``OMNIGENT_AUTH_ENABLED``) would silently keep its old auth
-    mode. In both cases we tear the unit down here and return
+    different process-start config (e.g. the user flipped
+    ``OMNIGENT_AUTH_ENABLED`` or enabled telemetry) would silently keep its
+    old environment. In both cases we tear the unit down here and return
     ``reuse=False`` so the caller spawns a fresh one — flagging
     ``config_changed`` for the auth-drift case so the caller can ask the
     user to re-run against the freshly-restarted server.
@@ -3044,26 +3044,27 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
         _terminate_host_unit(existing, reason="host identity changed")
         return _DaemonReuseDecision(reuse=False, config_changed=False)
 
-    if target != _LOCAL_DAEMON_MARKER:
-        # Remote / explicit ``--server`` mode: the daemon connects to a server
-        # we don't own and can't restart, so the config-signature / heal /
-        # "re-run" semantics below don't apply (auth posture is the remote's
-        # concern; its own reconnect loop covers transient tunnel drops). Keep
-        # the original PID-liveness reuse so a live daemon for the URL is
-        # reused as-is.
-        return _DaemonReuseDecision(reuse=True, config_changed=False)
-
     if not background:
         # Foreground host / legacy host.pid: keep prior behavior — a
         # live PID is reused as-is (don't kill the user's interactive
         # process or guess at an unstamped config).
         return _DaemonReuseDecision(reuse=True, config_changed=False)
 
-    # Config drift → the running server has the wrong auth source.
-    desired_sig = server_config_signature()
+    server_url = None if target == _LOCAL_DAEMON_MARKER else target
+    desired_sig = _host_daemon_config_signature(server_url=server_url)
     if existing.config_sig is not None and existing.config_sig != desired_sig:
-        _terminate_host_unit(existing, reason="config changed (auth)")
-        return _DaemonReuseDecision(reuse=False, config_changed=True)
+        _terminate_host_unit(existing, reason="host daemon config changed")
+        return _DaemonReuseDecision(
+            reuse=False,
+            config_changed=target == _LOCAL_DAEMON_MARKER,
+        )
+
+    if target != _LOCAL_DAEMON_MARKER:
+        # Remote / explicit ``--server`` mode: the daemon connects to a server
+        # we don't own and can't restart, so tunnel healing and local-server
+        # "re-run" semantics below don't apply. Its process-start signature was
+        # checked above; its reconnect loop covers transient tunnel drops.
+        return _DaemonReuseDecision(reuse=True, config_changed=False)
 
     # Tunnel health → don't reuse a zombie. Skip very young daemons (a
     # concurrent invocation may have just spawned one still connecting). This
@@ -3375,7 +3376,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     _HOST_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     mode_args = ["--local"] if not server_url else ["--server", server_url]
     args = [sys.executable, "-m", "omnigent.host._daemon_entry", *mode_args]
-    config_sig = server_config_signature(include_features=not server_url)
+    config_sig = _host_daemon_config_signature(server_url=server_url)
     daemon_env = _build_host_daemon_env(server_url=server_url)
     daemon_env[DAEMON_CONFIG_SIG_ENV_VAR] = config_sig
     spawned = _spawn_host_daemon_process(args=args, env=daemon_env)
@@ -3393,6 +3394,29 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
             spawned.log_path,
         )
     return decision.config_changed
+
+
+def _host_daemon_config_signature(*, server_url: str | None) -> str:
+    """Sign process-start configuration that must match a reused daemon."""
+    import hashlib
+
+    server_sig = server_config_signature(include_features=not server_url)
+    daemon_env = _build_host_daemon_env(server_url=server_url)
+    telemetry_env = {
+        key: value
+        for key, value in daemon_env.items()
+        if key == "OMNIGENT_TELEMETRY_ENABLED" or key.startswith(("OMNIGENT_OTEL_", "OTEL_"))
+    }
+    if not telemetry_env:
+        return server_sig
+    payload = json.dumps(
+        {
+            "runtime": telemetry_env,
+            "server": server_sig,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _build_host_daemon_env(
