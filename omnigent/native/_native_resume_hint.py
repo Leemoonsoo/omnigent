@@ -33,8 +33,13 @@ def format_native_resume_command(
     """
     prefix = os.environ.get(_RESUME_COMMAND_PREFIX_ENV_VAR)
     if prefix:
-        parts = [*shlex.split(prefix), native_command, "--resume", session_id]
-        return " ".join(shlex.quote(part) for part in parts)
+        try:
+            prefix_parts = shlex.split(prefix)
+        except ValueError:
+            prefix_parts = []
+        if prefix_parts:
+            parts = [*prefix_parts, native_command, "--resume", session_id]
+            return " ".join(shlex.quote(part) for part in parts)
 
     parts = ["omnigent", native_command]
     if server is not None:
