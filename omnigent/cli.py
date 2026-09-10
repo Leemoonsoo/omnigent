@@ -2841,10 +2841,15 @@ def _find_daemon_record(target: str) -> _HostDaemonRecord | None:
     Find a daemon record by target.
 
     :param target: Normalized daemon target, e.g. ``"local"``.
-    :returns: Matching daemon record, or ``None``.
+    :returns: Matching daemon record, including a pre-canonicalization record,
+        or ``None``.
     """
-    for record in _list_daemon_records():
+    records = _list_daemon_records()
+    for record in records:
         if record.target == target:
+            return record
+    for record in records:
+        if _normalize_daemon_target(record.target) == target:
             return record
     return None
 
@@ -3035,7 +3040,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     existing = _find_daemon_record(target)
     if existing is None:
         return _DaemonReuseDecision(reuse=False, config_changed=False)
-    if not _daemon_owner_is_live(existing, target):
+    if not _daemon_owner_is_live(existing, existing.target):
         _delete_daemon_record(existing)
         return _DaemonReuseDecision(reuse=False, config_changed=False)
 
@@ -3144,7 +3149,7 @@ def _wait_for_daemon_claim(
     deadline = time.monotonic() + timeout_s
     while True:
         record = _find_daemon_record(target)
-        if record is not None and _daemon_owner_is_live(record, target):
+        if record is not None and _daemon_owner_is_live(record, record.target):
             return record
         if time.monotonic() >= deadline:
             return None
