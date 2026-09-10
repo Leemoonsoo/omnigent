@@ -75,15 +75,15 @@ def normalize_daemon_target(server_url: str | None) -> str:
     if not server_url:
         return _LOCAL_DAEMON_MARKER
 
-    target = server_url.rstrip("/")
+    fallback_target = server_url.rstrip("/")
     try:
-        parsed = urlsplit(target)
+        parsed = urlsplit(server_url)
         hostname = parsed.hostname
         port = parsed.port
     except ValueError:
-        return target
+        return fallback_target
     if not parsed.scheme or hostname is None:
-        return target
+        return fallback_target
 
     scheme = parsed.scheme.lower()
     hostname = hostname.lower()
@@ -97,7 +97,8 @@ def normalize_daemon_target(server_url: str | None) -> str:
     raw_userinfo, separator, _ = parsed.netloc.rpartition("@")
     userinfo = f"{raw_userinfo}@" if separator else ""
     netloc = f"{userinfo}{hostname}{port_suffix}"
-    return urlunsplit((scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    path = parsed.path.rstrip("/")
+    return urlunsplit((scheme, netloc, path, parsed.query, parsed.fragment))
 
 
 def _target_digest(target: str) -> str:
