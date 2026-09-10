@@ -70,6 +70,27 @@ def test_format_native_resume_command_shell_quotes_prefixed_tokens(
     )
 
 
+@pytest.mark.parametrize(
+    "prefix",
+    ["   ", "acme-agent 'unterminated"],
+    ids=["whitespace-only", "malformed"],
+)
+def test_format_native_resume_command_ignores_invalid_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    """An invalid launcher prefix falls back to the default resume command."""
+    monkeypatch.setenv("OMNIGENT_RESUME_COMMAND_PREFIX", prefix)
+
+    command = format_native_resume_command(
+        native_command="codex",
+        server="https://example.com/omnigent",
+        session_id="conv_abc",
+    )
+
+    assert command == ("omnigent codex --server https://example.com/omnigent --resume conv_abc")
+
+
 def test_cold_resume_hint_not_restored_is_honest_on_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
