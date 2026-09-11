@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
 import os
 import re
@@ -302,9 +303,35 @@ _IDLE_EXIT_FAILURE_THRESHOLD = 3
 # Avoid adding probe pressure while the host cannot start another process.
 _TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS = 1.0
 
+# Process creation can fail temporarily while the host is under resource
+# pressure. Only those errno values leave terminal liveness unknown; permanent
+# launch failures retain the existing confirmed-failure behavior.
+_TRANSIENT_TMUX_PROCESS_START_ERRNOS = frozenset(
+    {
+        errno.EAGAIN,
+        errno.EWOULDBLOCK,
+        errno.ENOMEM,
+        errno.EMFILE,
+        errno.ENFILE,
+    }
+)
+
 
 class _TmuxProcessStartError(RuntimeError):
-    """A tmux subprocess could not start, so terminal liveness is unknown."""
+    """A tmux subprocess transiently could not start, so liveness is unknown."""
+
+
+def _is_transient_tmux_process_start_error(exc: OSError) -> bool:
+    """Return whether a tmux process launch can reasonably be retried."""
+    return exc.errno in _TRANSIENT_TMUX_PROCESS_START_ERRNOS
+
+
+def _tmux_process_start_error(cmd: list[str], exc: OSError) -> RuntimeError:
+    """Classify a tmux launch failure without masking permanent errors."""
+    detail = f"tmux command could not start: {' '.join(cmd)}: {exc}"
+    if _is_transient_tmux_process_start_error(exc):
+        return _TmuxProcessStartError(detail)
+    return RuntimeError(detail)
 
 
 # When a web client interacts with the terminal (attach/detach, focus
@@ -1900,12 +1927,14 @@ class TerminalInstance:
         implies a live process. The terminal is alive only when the session
         exists AND its pane process has not exited.
 
-        When the session is gone (probe exits non-zero) or the pane is dead,
-        this marks ``self.running`` false. If the probe cannot start, liveness
-        is unknown and the optimistic in-memory state is preserved.
+        When the session is gone (probe exits non-zero), the pane is dead, or
+        the probe has a permanent launch or communication failure, this marks
+        ``self.running`` false. A transient resource-related launch failure
+        leaves liveness unknown and preserves the optimistic in-memory state.
 
-        :returns: ``True`` when the pane is live or a probe could not start and
-            the optimistic state is preserved; ``False`` on confirmed death.
+        :returns: ``True`` when the pane is live or a transient launch failure
+            preserves the optimistic state; ``False`` on confirmed death or a
+            permanent probe failure.
         """
         if not self.running:
             return False
@@ -1920,6 +1949,20 @@ class TerminalInstance:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
+        except OSError as exc:
+            if _is_transient_tmux_process_start_error(exc):
+                logger.warning(
+                    "tmux liveness probe could not start for terminal %s:%s; "
+                    "preserving optimistic running state: %s",
+                    self.name,
+                    self.session_key,
+                    exc,
+                )
+                return self.running
+            self.running = False
+            return False
+
+        try:
             stdout, _ = await proc.communicate()
             # rc != 0 → session/server gone; a "1" line → the pane process
             # exited but the session was kept alive by remain-on-exit. Both mean
@@ -1930,15 +1973,9 @@ class TerminalInstance:
                 self.running = False
                 return False
             return True
-        except OSError as exc:
-            logger.warning(
-                "tmux liveness probe could not start for terminal %s:%s; "
-                "preserving optimistic running state: %s",
-                self.name,
-                self.session_key,
-                exc,
-            )
-            return self.running
+        except OSError:
+            self.running = False
+            return False
 
     async def _pane_is_dead_async(self) -> bool | None:
         """
@@ -1994,9 +2031,7 @@ class TerminalInstance:
                 stderr=asyncio.subprocess.PIPE,
             )
         except OSError as exc:
-            raise _TmuxProcessStartError(
-                f"tmux command could not start: {' '.join(cmd)}: {exc}"
-            ) from exc
+            raise _tmux_process_start_error(cmd, exc) from exc
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             detail = stderr.decode(errors="replace").strip() or "<no stderr>"
@@ -2014,9 +2049,7 @@ class TerminalInstance:
                 stderr=asyncio.subprocess.PIPE,
             )
         except OSError as exc:
-            raise _TmuxProcessStartError(
-                f"tmux command could not start: {' '.join(cmd)}: {exc}"
-            ) from exc
+            raise _tmux_process_start_error(cmd, exc) from exc
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             detail = stderr.decode(errors="replace").strip() or "<no stderr>"
@@ -2037,17 +2070,16 @@ class TerminalInstance:
         :param args: Args to pass after ``tmux -S <socket>``,
             e.g. ``("capture-pane", "-t", "main", "-p", "-e")``.
         :returns: The captured stdout, decoded as UTF-8.
-        :raises _TmuxProcessStartError: When the tmux subprocess cannot start.
-        :raises RuntimeError: When the tmux subprocess exits non-zero
-            (typically because the server has gone away).
+        :raises _TmuxProcessStartError: When the tmux subprocess transiently
+            cannot start because of host resource pressure.
+        :raises RuntimeError: When the subprocess permanently cannot start or
+            exits non-zero (typically because the server has gone away).
         """
         cmd = [*self._tmux_base_cmd(), *args]
         try:
             proc = subprocess.run(cmd, capture_output=True, check=False)
         except OSError as exc:
-            raise _TmuxProcessStartError(
-                f"tmux command could not start: {' '.join(cmd)}: {exc}"
-            ) from exc
+            raise _tmux_process_start_error(cmd, exc) from exc
         if proc.returncode != 0:
             detail = proc.stderr.decode(errors="replace").strip() or "<no stderr>"
             raise RuntimeError(
