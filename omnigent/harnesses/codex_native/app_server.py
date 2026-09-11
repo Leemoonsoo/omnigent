@@ -3428,13 +3428,16 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
     return params
 
 
+_CODEX_RESUME_PERMISSION_CONFIG_FIELDS = {
+    "approval_policy": "approvalPolicy",
+    "approvals_reviewer": "approvalsReviewer",
+    "default_permissions": "permissions",
+    "sandbox_mode": "sandbox",
+}
+
+
 def _set_codex_resume_config_param(params: CodexParams, key: str, raw_value: str) -> None:
-    field = {
-        "approval_policy": "approvalPolicy",
-        "approvals_reviewer": "approvalsReviewer",
-        "default_permissions": "permissions",
-        "sandbox_mode": "sandbox",
-    }.get(key.strip())
+    field = _CODEX_RESUME_PERMISSION_CONFIG_FIELDS.get(key.strip())
     if field is None:
         return
     value = _codex_config_string(raw_value)
@@ -3616,6 +3619,36 @@ def _strip_approval_sandbox_flags(codex_args: tuple[str, ...]) -> list[str]:
     return cleaned
 
 
+def _strip_codex_resume_permission_args(codex_args: tuple[str, ...]) -> list[str]:
+    """Omit permissions already applied by the app-server's thread/resume call."""
+    args = _strip_approval_sandbox_flags(codex_args)
+    cleaned: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        assignment: str | None = None
+        width = 1
+        if arg in {"-c", "--config"} and index + 1 < len(args):
+            assignment = args[index + 1]
+            width = 2
+        elif arg.startswith(("-c=", "--config=")):
+            assignment = arg.split("=", 1)[1]
+        if assignment is not None:
+            key, separator, raw_value = assignment.partition("=")
+            # Leave unsupported settings for Codex to validate, rather than
+            # silently dropping a policy that preload does not apply.
+            if (
+                separator
+                and key.strip() in _CODEX_RESUME_PERMISSION_CONFIG_FIELDS
+                and _codex_config_string(raw_value)
+            ):
+                index += width
+                continue
+        cleaned.append(arg)
+        index += 1
+    return cleaned
+
+
 def build_codex_remote_args(
     *,
     codex_args: tuple[str, ...],
@@ -3656,7 +3689,8 @@ def build_codex_remote_args(
         settings already cover everything.
     :param thread_id: Codex thread id to resume, e.g. ``"thread_abc123"``.
         ``None`` starts a fresh remote Codex TUI thread instead of
-        resuming an existing one.
+        resuming an existing one. Resumed terminals inherit permissions
+        from the app-server; permission args handled by preload are omitted.
     :param remote_url: App-server endpoint the TUI attaches to, e.g.
         ``"unix:///home/user/.omnigent/codex-native/x/app-server.sock"``
         or ``"ws://127.0.0.1:9876"``.
@@ -3665,14 +3699,15 @@ def build_codex_remote_args(
         ``('model="databricks-gpt-5-5"', 'model_provider="omnigent_databricks"')``.
         Each is emitted as a ``-c <value>`` global flag. Empty for a
         plain Codex-login launch that needs no provider routing.
-    :param bypass_sandbox: When ``True``, emit a single
+    :param bypass_sandbox: When ``True`` for a fresh thread, emit a single
         ``--dangerously-bypass-approvals-and-sandbox`` flag and strip any
         conflicting ``--sandbox`` / ``--ask-for-approval`` pairs from
         *codex_args* (codex aborts at startup if the bypass flag is
         combined with either). DANGEROUS: this disables both the approval
         prompts and the command sandbox; it is gated behind an explicit,
         typed-confirmation opt-in in the web UI. Default ``False`` keeps
-        the granular flags untouched. See issue #657.
+        the granular flags untouched. Resumed terminals inherit the policy
+        from the app-server and omit these flags. See issue #657.
     :param bypass_hook_trust: When ``True``, emit
         ``--dangerously-bypass-hook-trust`` so the TUI runs all enabled
         hooks without the interactive "Hooks need review" trust prompt.
@@ -3700,7 +3735,10 @@ def build_codex_remote_args(
         passthrough = [_CODEX_BYPASS_HOOK_TRUST_FLAG, *passthrough]
     if thread_id is None:
         return [*override_args, *passthrough, "--remote", remote_url]
-    return [*override_args, *passthrough, "resume", "--remote", remote_url, thread_id]
+    # Codex rejects explicit permission overrides on remote resume, even
+    # when they match the policy already applied by preload.
+    resume_args = _strip_codex_resume_permission_args((*override_args, *passthrough))
+    return [*resume_args, "resume", "--remote", remote_url, thread_id]
 
 
 def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:

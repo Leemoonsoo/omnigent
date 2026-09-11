@@ -886,14 +886,142 @@ def test_codex_resume_permission_params_repairs_legacy_full_access_profile() -> 
         thread_id="thread_x",
         remote_url="ws://127.0.0.1:9876",
     ) == [
-        *args,
-        "-c",
-        'approval_policy="never"',
         "resume",
         "--remote",
         "ws://127.0.0.1:9876",
         "thread_x",
     ]
+
+
+@pytest.mark.parametrize(
+    ("permission_args", "expected_permissions"),
+    [
+        ((), {"approvalsReviewer": "auto_review"}),
+        (
+            ("-a", "on-failure", "-s=read-only"),
+            {"approvalPolicy": "on-failure", "sandbox": "read-only"},
+        ),
+        (
+            ("--ask-for-approval=on-request", "--sandbox", "workspace-write"),
+            {"approvalPolicy": "on-request", "sandbox": "workspace-write"},
+        ),
+        (
+            (
+                "--config",
+                'sandbox_mode="read-only"',
+                '-c=approval_policy="on-request"',
+                "-c",
+                'approvals_reviewer="auto_review"',
+            ),
+            {
+                "sandbox": "read-only",
+                "approvalPolicy": "on-request",
+                "approvalsReviewer": "auto_review",
+            },
+        ),
+        (
+            (
+                '--config=default_permissions=":danger-full-access"',
+                "-c",
+                'approvals_reviewer="user"',
+            ),
+            {
+                "permissions": ":danger-full-access",
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+            },
+        ),
+        (
+            ("--dangerously-bypass-approvals-and-sandbox",),
+            {"approvalPolicy": "never", "sandbox": "danger-full-access"},
+        ),
+    ],
+)
+def test_remote_resume_applies_permissions_only_on_app_server(
+    monkeypatch: pytest.MonkeyPatch,
+    permission_args: tuple[str, ...],
+    expected_permissions: dict[str, str],
+) -> None:
+    """Remote attachment must not repeat the policy already applied by preload."""
+    fake_client = _FakeCodexAppServerClient()
+    monkeypatch.setattr(
+        codex_native_app_server,
+        "client_for_transport",
+        lambda *_args, **_kwargs: fake_client,
+    )
+    model_args = ("--model", "test-model", "-c", 'model_reasoning_effort="high"')
+    launch_args = (*permission_args, *model_args)
+    asyncio.run(
+        codex_native_app_server.preload_codex_thread_for_resume(
+            "ws://127.0.0.1:9876", "thread_test", terminal_launch_args=launch_args
+        )
+    )
+    assert fake_client.requests == [
+        (
+            "thread/resume",
+            {"threadId": "thread_test", "excludeTurns": True, **expected_permissions},
+        )
+    ]
+    assert fake_client.closed
+    assert codex_native_app_server.build_codex_remote_args(
+        codex_args=launch_args,
+        thread_id="thread_test",
+        remote_url="ws://127.0.0.1:9876",
+        config_overrides=('model_provider="test-provider"',),
+    ) == [
+        "-c",
+        'model_provider="test-provider"',
+        *model_args,
+        "resume",
+        "--remote",
+        "ws://127.0.0.1:9876",
+        "thread_test",
+    ]
+
+
+def test_remote_resume_omits_app_server_permission_config() -> None:
+    """Server config overrides also stay off the remote terminal's command line."""
+    overrides = (
+        'approval_policy="never"',
+        'sandbox_mode="danger-full-access"',
+        'model_provider="test-provider"',
+    )
+    assert codex_native_app_server.build_codex_remote_args(
+        codex_args=(),
+        thread_id="thread_test",
+        remote_url="ws://127.0.0.1:9876",
+        config_overrides=overrides,
+        bypass_sandbox=True,
+        bypass_hook_trust=True,
+    ) == [
+        "-c",
+        'model_provider="test-provider"',
+        "--dangerously-bypass-hook-trust",
+        "resume",
+        "--remote",
+        "ws://127.0.0.1:9876",
+        "thread_test",
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--add-dir", "/extra-workspace"),
+        ("--config", "sandbox_workspace_write.network_access=false"),
+        ("--full-auto",),
+        ("-c", "approvals_reviewer=false"),
+        ("--config", 'sandbox_mode=""'),
+        ("-c", 'developer_instructions="Do not change approval_policy"'),
+    ],
+)
+def test_remote_resume_preserves_settings_not_applied_by_preload(args: tuple[str, ...]) -> None:
+    """Do not silently discard unsupported policy settings or unrelated config."""
+    assert codex_native_app_server.build_codex_remote_args(
+        codex_args=args,
+        thread_id="thread_test",
+        remote_url="ws://127.0.0.1:9876",
+    ) == [*args, "resume", "--remote", "ws://127.0.0.1:9876", "thread_test"]
 
 
 def _started_event(turn_id: str) -> dict[str, Any]:
@@ -1180,7 +1308,6 @@ def test_materialized_codex_agent_spec_loads_as_valid_omnigent_yaml(
             "thread_local",
             "unix:///tmp/app-server.sock",
             [
-                *_AUTO_REVIEW_ARGS,
                 "resume",
                 "--remote",
                 "unix:///tmp/app-server.sock",
@@ -1203,7 +1330,7 @@ def test_materialized_codex_agent_spec_loads_as_valid_omnigent_yaml(
             (),
             "thread_host",
             "ws://127.0.0.1:9876",
-            [*_AUTO_REVIEW_ARGS, "resume", "--remote", "ws://127.0.0.1:9876", "thread_host"],
+            ["resume", "--remote", "ws://127.0.0.1:9876", "thread_host"],
         ),
         # Leading codex args are preserved ahead of the attach flags.
         (
@@ -1213,7 +1340,6 @@ def test_materialized_codex_agent_spec_loads_as_valid_omnigent_yaml(
             [
                 "--model",
                 "gpt-5.4-mini",
-                *_AUTO_REVIEW_ARGS,
                 "resume",
                 "--remote",
                 "ws://127.0.0.1:9876",
@@ -1274,7 +1400,6 @@ def test_build_codex_remote_args_passes_transport_verbatim(
                 'model="catalog-databricks-openai-default"',
                 "-c",
                 'model_provider="omnigent_databricks"',
-                *_AUTO_REVIEW_ARGS,
                 "resume",
                 "--remote",
                 "ws://127.0.0.1:9876",
@@ -1424,13 +1549,11 @@ def test_build_codex_remote_args_default_keeps_approval_flags_no_bypass() -> Non
                 "ws://127.0.0.1:9876",
             ],
         ),
-        # Resume path: the bypass flag is a global flag and MUST precede the
-        # ``resume`` subcommand, and a pre-existing bypass flag is de-duped.
+        # Resume inherits the bypass policy from the app-server.
         (
             ("--dangerously-bypass-approvals-and-sandbox", "--sandbox", "read-only"),
             "thread_x",
             [
-                "--dangerously-bypass-approvals-and-sandbox",
                 "resume",
                 "--remote",
                 "ws://127.0.0.1:9876",
@@ -1445,15 +1568,8 @@ def test_build_codex_remote_args_bypass_emits_flag_and_strips_conflicts(
     expected: list[str],
 ) -> None:
     """
-    ``bypass_sandbox=True`` emits one ``--dangerously-bypass-approvals-and-
-    sandbox`` and strips the conflicting ``--sandbox`` / ``--ask-for-approval``
-    pairs.
-
-    See :func:`omnigent.harnesses.codex_native.app_server._strip_approval_sandbox_flags`.
-    Asserting the exact argv guards three things: the bypass flag is present
-    exactly once, the conflicting flag pairs are removed (with their values),
-    and the bypass flag lands before any ``resume`` subcommand (codex rejects
-    a global flag placed after a subcommand).
+    Fresh sessions get one bypass flag without conflicting approval flags.
+    Resumed terminals inherit that policy from the app-server.
     """
     assert (
         codex_native_app_server.build_codex_remote_args(
@@ -8823,8 +8939,6 @@ def test_launch_codex_terminal_uses_remote_resume_order() -> None:
                 "spec": {
                     "command": "/opt/codex/bin/codex",
                     "args": [
-                        "-c",
-                        "approval_policy=on-request",
                         "resume",
                         "--remote",
                         "ws://127.0.0.1:9876",
