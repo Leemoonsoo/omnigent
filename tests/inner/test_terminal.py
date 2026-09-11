@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import shutil
 import subprocess
@@ -184,6 +185,77 @@ def test_threaded_idle_watcher_uses_session_probe_to_confirm_capture_failure(
     instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.01)
 
     assert confirmed.wait(timeout=1.0)
+    instance._stop_idle_watcher_thread()
+    assert not exited.is_set()
+    assert instance.running is True
+
+
+def test_threaded_idle_watcher_treats_probe_start_failure_as_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Process exhaustion must not be misclassified as terminal exit."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    exited = threading.Event()
+    retried = threading.Event()
+    attempts = 0
+
+    def _cannot_fork(*args: object, **kwargs: object) -> SimpleNamespace:
+        del args, kwargs
+        nonlocal attempts
+        attempts += 1
+        if attempts >= 3:
+            retried.set()
+        raise BlockingIOError(errno.EAGAIN, "resource temporarily unavailable")
+
+    monkeypatch.setattr(terminal_mod.subprocess, "run", _cannot_fork)
+    monkeypatch.setattr(terminal_mod, "_TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS", 0.01)
+
+    instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.01)
+
+    assert retried.wait(timeout=1.0)
+    instance._stop_idle_watcher_thread()
+    assert not exited.is_set()
+    assert instance.running is True
+
+
+def test_threaded_idle_watcher_treats_confirmation_start_failure_as_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmation probe that cannot start must not count toward exit."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    exited = threading.Event()
+    retried = threading.Event()
+    attempts = 0
+
+    def _cannot_fork(*args: object, **kwargs: object) -> SimpleNamespace:
+        del args, kwargs
+        nonlocal attempts
+        attempts += 1
+        if attempts >= 3:
+            retried.set()
+        raise BlockingIOError(errno.EAGAIN, "resource temporarily unavailable")
+
+    instance._capture_pane_for_idle_or_none = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr(terminal_mod.subprocess, "run", _cannot_fork)
+    monkeypatch.setattr(terminal_mod, "_TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS", 0.01)
+
+    instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.01)
+
+    assert retried.wait(timeout=1.0)
     instance._stop_idle_watcher_thread()
     assert not exited.is_set()
     assert instance.running is True
@@ -428,6 +500,42 @@ async def test_is_alive_true_when_pane_live(
         """Report a live pane (``#{pane_dead}`` -> ``0``)."""
         del cmd, stdout, stderr
         return _ProcessWithStdout(stdout=b"0\n", returncode=0)
+
+    monkeypatch.setattr(
+        terminal_mod,
+        "asyncio",
+        SimpleNamespace(
+            create_subprocess_exec=fake_create_subprocess_exec,
+            subprocess=terminal_mod.asyncio.subprocess,
+        ),
+    )
+
+    instance = TerminalInstance(
+        name="bash",
+        session_key="s1",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+
+    assert await instance.is_alive() is True
+    assert instance.running is True
+
+
+@pytest.mark.asyncio
+async def test_is_alive_preserves_running_state_when_probe_cannot_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed fork leaves liveness unknown instead of marking the pane dead."""
+
+    async def fake_create_subprocess_exec(
+        *cmd: str,
+        stdout: object,
+        stderr: object,
+    ) -> _ProcessWithStdout:
+        del cmd, stdout, stderr
+        raise BlockingIOError(errno.EAGAIN, "resource temporarily unavailable")
 
     monkeypatch.setattr(
         terminal_mod,
