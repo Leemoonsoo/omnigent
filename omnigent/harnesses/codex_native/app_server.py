@@ -1294,9 +1294,9 @@ async def prewarm_codex_model_catalog() -> None:
     early probe and the launch-time read have the same result; the latter will
     either join the in-flight probe or hit the populated cache.
 
-    Probe failures remain best-effort, matching the launch-time reader.  An
-    unexpected failure is deliberately swallowed here so app-server startup
-    performs its normal read and retains its existing error behavior.
+    Probe failures are not cached so app-server startup can retry its
+    authoritative read.  Unexpected failures are deliberately swallowed here
+    so startup retains its existing error behavior.
     """
     try:
         codex_path = _find_codex_cli()
@@ -1307,6 +1307,7 @@ async def prewarm_codex_model_catalog() -> None:
             codex_path,
             _codex_home_config_source_from_env(),
             timeout=_MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
+            cache_failures=False,
         )
     except Exception:  # noqa: BLE001 - launch-time read remains authoritative
         _logger.debug("Codex model catalog prewarm failed", exc_info=True)
