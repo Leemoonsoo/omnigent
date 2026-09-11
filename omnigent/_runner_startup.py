@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,12 +78,106 @@ STARTUP_PHASE_LABELS: tuple[str, ...] = (
     STARTUP_PHASE_LAUNCHING_AGENT,
 )
 
+_NATIVE_HARNESS_PREPARATION_MESSAGES = {
+    "Preparing Claude...": "claude",
+    "Preparing Codex...": "codex",
+    "Preparing OpenCode...": "opencode",
+    "Preparing Pi...": "pi",
+    "Preparing Cursor...": "cursor",
+    "Preparing Kiro...": "kiro",
+    "Preparing Goose...": "goose",
+    "Preparing Hermes...": "hermes",
+    "Preparing Antigravity...": "antigravity",
+    "Preparing qwen...": "qwen",
+    "Preparing Kimi...": "kimi",
+}
+NATIVE_STARTUP_HARNESSES = frozenset(_NATIVE_HARNESS_PREPARATION_MESSAGES.values())
+
+
+def _startup_metric_phase(message: str) -> str | None:
+    """Map a rendered native-harness milestone to a bounded phase."""
+    lowered = message.casefold()
+    if message == STARTUP_PHASE_CONNECTING_REMOTE:
+        return "connect_server"
+    if message in _NATIVE_HARNESS_PREPARATION_MESSAGES:
+        return "prepare_harness"
+    if lowered == "connecting to local daemon...":
+        return "connect_local_daemon"
+    if lowered.startswith("creating ") and lowered.endswith(" session..."):
+        return "create_session"
+    if lowered.startswith("loading ") and lowered.endswith(" session..."):
+        return "load_session"
+    if lowered.startswith("updating ") and lowered.endswith(" session..."):
+        return "update_session"
+    if lowered.startswith("restoring ") and lowered.endswith(" session..."):
+        return "restore_session"
+    if lowered == "starting runner...":
+        return "start_runner"
+    if lowered == "waiting for runner...":
+        return "wait_runner"
+    if lowered.startswith("starting ") and lowered.endswith(" terminal..."):
+        return "start_terminal"
+    if lowered.startswith("restoring ") and lowered.endswith(" terminal..."):
+        return "restore_terminal"
+    if lowered.endswith(" terminal ready."):
+        return None
+    return "unknown"
+
 
 def _noop() -> None:
     """No-op default for :attr:`RunnerStartupProgress.finish`.
 
     :returns: None.
     """
+
+
+@dataclass
+class _StartupPhaseTimer:
+    harness: str
+    phase: str
+    started_at: float
+
+    def transition(self, phase: str | None) -> None:
+        transitioned_at = time.monotonic()
+        self._record("success", ended_at=transitioned_at)
+        if phase is not None:
+            self.phase = phase
+            self.started_at = transitioned_at
+
+    def finish(self, outcome: str) -> None:
+        if not self.phase:
+            return
+        self._record(outcome, ended_at=time.monotonic())
+
+    def _record(self, outcome: str, *, ended_at: float) -> None:
+        if not self.phase:
+            return
+        from omnigent.runtime.startup_metrics import record_startup_phase_duration
+
+        duration_ms = (ended_at - self.started_at) * 1000
+        record_startup_phase_duration(
+            duration_ms,
+            phase=self.phase,
+            harness=self.harness,
+            outcome=outcome,
+        )
+        self.phase = ""
+
+
+@contextlib.contextmanager
+def _record_startup_outcome(
+    phase_timer: _StartupPhaseTimer | None,
+) -> Generator[None, None, None]:
+    """Close the active startup phase with the context's outcome."""
+    try:
+        yield
+    except BaseException:
+        if phase_timer is not None:
+            phase_timer.finish("failure")
+        raise
+    else:
+        if phase_timer is not None:
+            phase_timer.finish("success")
 
 
 @dataclass
@@ -135,6 +230,7 @@ def runner_startup_progress(
     *,
     initial_message: str,
     enabled: bool | None = None,
+    metric_harness: str | None = None,
 ) -> Generator[RunnerStartupProgress, None, None]:
     """
     Context manager that renders runner-startup progress.
@@ -164,6 +260,8 @@ def runner_startup_progress(
         ``OMNIGENT_NO_SPINNER``. ``True`` always renders the
         spinner; ``False`` always falls back to plain echo. Used
         by tests; production callers should leave this ``None``.
+    :param metric_harness: Stable harness label for phase metrics. ``None``
+        infers known native harnesses from their preparation message.
     :yields: A :class:`RunnerStartupProgress` whose ``update``
         callback sets the current message.
     """
@@ -172,6 +270,19 @@ def runner_startup_progress(
             sys.stderr.isatty(),
             dict(os.environ),
         )
+
+    metric_harness = metric_harness or _NATIVE_HARNESS_PREPARATION_MESSAGES.get(initial_message)
+    phase_timer = None
+    if metric_harness is not None:
+        phase_timer = _StartupPhaseTimer(
+            metric_harness,
+            _startup_metric_phase(initial_message) or "unknown",
+            time.monotonic(),
+        )
+
+    def _transition_metric_phase(message: str) -> None:
+        if phase_timer is not None:
+            phase_timer.transition(_startup_metric_phase(message))
 
     if enabled:
         from rich.live import Live
@@ -212,6 +323,7 @@ def runner_startup_progress(
                 ``"Launching your agent…"``.
             :returns: None.
             """
+            _transition_metric_phase(msg)
             spinner.update(text=msg)
 
         def _finish_rich() -> None:
@@ -225,10 +337,11 @@ def runner_startup_progress(
             _stopped[0] = True
             live.stop()
 
-        try:
-            yield RunnerStartupProgress(update=_update_rich, finish=_finish_rich)
-        finally:
-            _finish_rich()
+        with _record_startup_outcome(phase_timer):
+            try:
+                yield RunnerStartupProgress(update=_update_rich, finish=_finish_rich)
+            finally:
+                _finish_rich()
         return
 
     # Plain mode: each ``update`` prints a fresh line on stderr.
@@ -245,11 +358,13 @@ def runner_startup_progress(
             ``"Launching your agent…"``.
         :returns: None.
         """
+        _transition_metric_phase(msg)
         click.echo(f"omnigent: {msg}", err=True)
 
     # Plain mode has no live region to tear down, so ``finish`` is a
     # no-op (the printed lines stay in scrollback by design).
-    yield RunnerStartupProgress(update=_update_plain, finish=_noop)
+    with _record_startup_outcome(phase_timer):
+        yield RunnerStartupProgress(update=_update_plain, finish=_noop)
 
 
 def format_runner_log_tail(log_path: Path | None) -> str:
