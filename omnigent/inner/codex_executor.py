@@ -1450,7 +1450,7 @@ def extended_model_catalog(
 
 # Cached ``codex debug models`` result, keyed by (binary, CODEX_HOME). The
 # catalog is a property of the installed CLI, not of a session, so a successful
-# probe is paid once per host process rather than once per session.
+# probe is paid once per process rather than once per session.
 _ModelCatalogCacheKey: TypeAlias = tuple[str, str, int, int]
 
 _MODEL_CATALOG_CACHE: dict[_ModelCatalogCacheKey, dict[str, Any]] = {}
@@ -1476,7 +1476,7 @@ class _ModelCatalogProbeFlight:
     waiters: int = 0
 
 
-# Cache and flight state are host-process globals reached from worker threads.
+# Cache and flight state are process globals reached from worker threads.
 # The lock protects only those dictionaries; probes run outside it so distinct
 # catalog keys can progress concurrently. Same-key callers wait on one flight.
 _MODEL_CATALOG_LOCK = threading.Lock()
@@ -1539,7 +1539,7 @@ def read_codex_model_catalog(
     cache_failures: bool = True,
 ) -> dict[str, Any] | None:
     """
-    Ask the codex CLI for its own model catalog, once per host process.
+    Ask the codex CLI for its own model catalog, once per process.
 
     Read from the CLI rather than pinned in this repo so the catalog tracks
     whatever codex version is installed: it is ~300 kB of vendor metadata
@@ -1571,6 +1571,19 @@ def read_codex_model_catalog(
                 flight = _ModelCatalogProbeFlight(done=threading.Event())
                 _MODEL_CATALOG_INFLIGHT[cache_key] = flight
                 is_probe_owner = True
+            elif flight.done.is_set():
+                if flight.error is not None:
+                    raise flight.error
+                if flight.result is not None:
+                    return flight.result
+                if flight.failure_cached or not cache_failures:
+                    return None
+                # Keep an uncached speculative failure visible until an
+                # authoritative caller claims the single shared retry. New
+                # speculative callers return above instead of starving it.
+                flight = _ModelCatalogProbeFlight(done=threading.Event())
+                _MODEL_CATALOG_INFLIGHT[cache_key] = flight
+                is_probe_owner = True
             else:
                 flight.waiters += 1
                 is_probe_owner = False
@@ -1578,6 +1591,8 @@ def read_codex_model_catalog(
         if is_probe_owner:
             break
         flight.done.wait()
+        with _MODEL_CATALOG_LOCK:
+            flight.waiters -= 1
         if flight.error is not None:
             raise flight.error
         if flight.result is not None:
@@ -1590,6 +1605,9 @@ def read_codex_model_catalog(
 
     try:
         catalog = _probe_codex_model_catalog(codex_path, source_home, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - catalog lookup fails open
+        logger.warning("could not read the codex model catalog (%s)", exc)
+        catalog = None
     except BaseException as exc:
         with _MODEL_CATALOG_LOCK:
             flight.error = exc
@@ -1607,7 +1625,8 @@ def read_codex_model_catalog(
         else:
             _MODEL_CATALOG_CACHE[cache_key] = catalog
         flight.result = catalog
-        _MODEL_CATALOG_INFLIGHT.pop(cache_key, None)
+        if catalog is not None or flight.failure_cached:
+            _MODEL_CATALOG_INFLIGHT.pop(cache_key, None)
         flight.done.set()
     return catalog
 
