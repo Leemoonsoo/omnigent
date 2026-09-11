@@ -31,6 +31,7 @@ from omnigent._runner_startup import (
     format_runner_log_tail,
     runner_startup_progress,
 )
+from omnigent.runtime import startup_metrics
 
 # ---------------------------------------------------------------------------
 # format_runner_log_tail
@@ -191,6 +192,92 @@ def test_runner_startup_progress_plain_mode_does_not_swallow_exceptions(
     # The initial message still printed; the exception did not
     # suppress it.
     assert "omnigent: Starting" in capsys.readouterr().err
+
+
+def test_runner_startup_progress_records_phase_durations(monkeypatch, capsys) -> None:
+    """Metric phases close on transitions without affecting rendered text."""
+    ticks = iter((1.0, 2.0, 4.5))
+    recorded: list[tuple[float, str, str, str]] = []
+    monkeypatch.setattr("omnigent._runner_startup.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        startup_metrics,
+        "record_startup_phase_duration",
+        lambda duration, *, phase, harness, outcome: recorded.append(
+            (duration, phase, harness, outcome)
+        ),
+    )
+
+    with runner_startup_progress(
+        initial_message="Preparing Codex...",
+        enabled=False,
+    ) as progress:
+        progress.update("Waiting for runner...")
+        progress.update("Codex terminal ready.")
+
+    assert recorded == [
+        (1000.0, "prepare_harness", "codex", "success"),
+        (2500.0, "wait_runner", "codex", "success"),
+    ]
+    assert "Waiting for runner" in capsys.readouterr().err
+
+
+def test_runner_startup_progress_records_active_phase_failure(monkeypatch) -> None:
+    """An exception classifies the active phase as failed before propagating."""
+    ticks = iter((1.0, 2.25))
+    recorded: list[tuple[float, str]] = []
+    monkeypatch.setattr("omnigent._runner_startup.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        startup_metrics,
+        "record_startup_phase_duration",
+        lambda duration, *, phase, harness, outcome: recorded.append((duration, outcome)),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with runner_startup_progress(
+            initial_message="Waiting for runner...",
+            enabled=False,
+            metric_harness="codex",
+        ):
+            raise RuntimeError("boom")
+
+    assert recorded == [(1250.0, "failure")]
+
+
+@pytest.mark.parametrize(
+    ("message", "harness"),
+    [
+        ("Preparing Claude...", "claude"),
+        ("Preparing Codex...", "codex"),
+        ("Preparing OpenCode...", "opencode"),
+        ("Preparing Pi...", "pi"),
+        ("Preparing Cursor...", "cursor"),
+        ("Preparing Kiro...", "kiro"),
+        ("Preparing Goose...", "goose"),
+        ("Preparing Hermes...", "hermes"),
+        ("Preparing Antigravity...", "antigravity"),
+        ("Preparing qwen...", "qwen"),
+        ("Preparing Kimi...", "kimi"),
+    ],
+)
+def test_runner_startup_progress_infers_native_harness(
+    monkeypatch,
+    message: str,
+    harness: str,
+) -> None:
+    """Every built-in native startup reports a bounded harness label."""
+    ticks = iter((1.0, 2.0))
+    recorded: list[str] = []
+    monkeypatch.setattr("omnigent._runner_startup.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        startup_metrics,
+        "record_startup_phase_duration",
+        lambda duration, *, phase, harness, outcome: recorded.append(harness),
+    )
+
+    with runner_startup_progress(initial_message=message, enabled=False):
+        pass
+
+    assert recorded == [harness]
 
 
 def test_runner_startup_progress_rich_mode_writes_only_to_stderr(
