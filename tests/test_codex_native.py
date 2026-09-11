@@ -8221,6 +8221,90 @@ async def test_prepare_codex_terminal_fresh_session_passes_developer_instruction
     assert captured.get("developer_instructions") == "Be a concise, careful coding assistant."
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_failure", [None, "terminal", "client"])
+@pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])
+async def test_prepare_codex_terminal_closes_resources_when_cleanup_is_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cleanup_failure: str | None,
+    error: type[BaseException],
+) -> None:
+    """A failed or cancelled close must not skip the remaining owned resources."""
+    from unittest.mock import AsyncMock
+
+    closed: list[str] = []
+
+    async def close_resource(name: str) -> None:
+        closed.append(name)
+        if cleanup_failure == name:
+            raise error("cleanup failed")
+
+    async def close_terminal(**_kwargs: Any) -> None:
+        await close_resource("terminal")
+
+    async def close_client() -> None:
+        await close_resource("client")
+
+    async def close_server() -> None:
+        await close_resource("server")
+
+    def progress(_progress: object, message: str) -> None:
+        if message == "Codex terminal ready.":
+            raise error("startup failed")
+
+    client = SimpleNamespace(close=close_client)
+    server = SimpleNamespace(
+        start=AsyncMock(),
+        close=close_server,
+        codex_cli_version=(0, 154, 0),
+        config_overrides=[],
+        env={},
+        codex_home=tmp_path / "codex-home",
+    )
+    preload = AsyncMock(return_value=client)
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        codex_native,
+        "_fetch_codex_session",
+        AsyncMock(
+            return_value={
+                "labels": {codex_native._WRAPPER_LABEL_KEY: codex_native._WRAPPER_LABEL_VALUE},
+                "external_session_id": "thread_test",
+            }
+        ),
+    )
+    monkeypatch.setattr(codex_native, "_find_running_codex_terminal", AsyncMock(return_value=None))
+    monkeypatch.setattr(codex_native, "_ensure_local_codex_resume_rollout", AsyncMock())
+    monkeypatch.setattr(codex_native, "build_codex_native_server", lambda **_kwargs: server)
+    monkeypatch.setattr(codex_native, "preload_codex_thread_for_resume", preload)
+    monkeypatch.setattr(
+        codex_native,
+        "_launch_codex_terminal",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                terminal_id="terminal_test",
+            )
+        ),
+    )
+    monkeypatch.setattr(codex_native, "_update_startup_progress", progress)
+    monkeypatch.setattr(codex_native, "_close_codex_terminal", close_terminal)
+
+    with pytest.raises(error, match="cleanup failed" if cleanup_failure else "startup failed"):
+        await codex_native._prepare_codex_terminal(
+            base_url="http://127.0.0.1:8000",
+            headers={},
+            session_id="conv_test",
+            runner_id=None,
+            session_bundle=None,
+            codex_args=(),
+            command="codex",
+            model=None,
+        )
+    assert preload.await_args.kwargs["retain_client"] is True
+    assert closed == ["terminal", "client", "server"]
+
+
 def test_run_with_local_server_threads_raw_instructions_to_prepare_terminal_fresh(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

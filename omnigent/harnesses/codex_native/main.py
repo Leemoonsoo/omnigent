@@ -1307,16 +1307,20 @@ async def _prepare_codex_terminal(
             terminal_id = launched_terminal.terminal_id
             _update_startup_progress(startup_progress, "Codex terminal ready.")
         except BaseException:
-            if terminal_id is not None:
-                await _close_codex_terminal(
-                    base_url=base_url,
-                    headers=headers,
-                    session_id=session_id,
-                    terminal_id=terminal_id,
-                )
-            if event_client is not None:
-                await event_client.close()
-            await app_server.close()
+            try:
+                if terminal_id is not None:
+                    await _close_codex_terminal(
+                        base_url=base_url,
+                        headers=headers,
+                        session_id=session_id,
+                        terminal_id=terminal_id,
+                    )
+            finally:
+                try:
+                    if event_client is not None:
+                        await event_client.close()
+                finally:
+                    await app_server.close()
             raise
     if launched_terminal is None:
         raise click.ClickException("Codex terminal was not launched.")
