@@ -149,7 +149,8 @@ class _StartupPhaseTimer:
                 self.phase = phase
                 self.started_at = transitioned_at
             return
-        # Telemetry must never interrupt progress rendering or startup.
+        # Fail closed for the rest of this startup: telemetry must never
+        # interrupt progress rendering or repeatedly retry a broken recorder.
         self.phase = ""
 
     def finish(self, outcome: str) -> None:

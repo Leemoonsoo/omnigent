@@ -3593,7 +3593,7 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
     _databricks_login(server, workspace_host, org_id=_org_id_from_url(server))
 
 
-def _ensure_backend(server: str | None) -> str:
+def _ensure_backend(server: str | None, *, metric_harness: str | None = None) -> str:
     """Ensure the host daemon is running and return the Omnigent server URL.
 
     The daemon is the single backend for ``attach`` / ``run`` / ``claude`` /
@@ -3605,6 +3605,9 @@ def _ensure_backend(server: str | None) -> str:
         ``""`` selects local mode: the daemon starts (or reuses) a
         persistent local Omnigent server and this returns its discovered loopback
         URL.
+    :param metric_harness: Canonical native harness key when the caller has
+        already resolved it. Dedicated harness commands fall back to the Click
+        command context.
     :returns: A concrete base URL, e.g. ``"http://127.0.0.1:8123"`` or the
         remote URL passed in.
     :raises click.ClickException: If local mode's server never becomes
@@ -3621,14 +3624,16 @@ def _ensure_backend(server: str | None) -> str:
         native_coding_agent_for_terminal_name,
     )
 
-    ctx = click.get_current_context(silent=True)
-    native_agent = None
-    if ctx is not None and ctx.info_name == "run":
-        native_agent = native_coding_agent_for_harness(ctx.params.get("harness"))
-    elif ctx is not None:
-        terminal_name = "antigravity" if ctx.info_name == "agy" else ctx.info_name
-        native_agent = native_coding_agent_for_terminal_name(terminal_name)
-    startup_harness = native_agent.key if native_agent is not None else None
+    startup_harness = metric_harness
+    if startup_harness is None:
+        ctx = click.get_current_context(silent=True)
+        native_agent = None
+        if ctx is not None and ctx.info_name == "run":
+            native_agent = native_coding_agent_for_harness(ctx.params.get("harness"))
+        elif ctx is not None:
+            terminal_name = "antigravity" if ctx.info_name == "agy" else ctx.info_name
+            native_agent = native_coding_agent_for_terminal_name(terminal_name)
+        startup_harness = native_agent.key if native_agent is not None else None
 
     # The foreground client owns these phase timers. Runtime processes initialize
     # their own providers, but that does not install one in this process.
@@ -7525,7 +7530,7 @@ def _dispatch_native_terminal_harness(
             f"the REPL-only option(s) {', '.join(unsupported)} have no effect there — remove them."
         )
 
-    server = _ensure_backend(server)
+    server = _ensure_backend(server, metric_harness=native_agent.key)
     passthrough = ("--model", model) if model else ()
 
     # Resolve --continue to a concrete conversation id (the wrappers take a

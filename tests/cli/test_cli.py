@@ -6839,7 +6839,13 @@ def test_dispatch_native_terminal_harness_launches_registered_wrapper(
     expected_extra: dict[str, object],
 ) -> None:
     """Every registered native harness launches through the generic run dispatcher."""
-    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
+    backend_harnesses: list[str | None] = []
+
+    def _capture_backend(_server: str | None, *, metric_harness: str | None = None) -> str:
+        backend_harnesses.append(metric_harness)
+        return "http://localhost:0"
+
+    monkeypatch.setattr("omnigent.cli._ensure_backend", _capture_backend)
     captured: dict[str, object] = {}
     monkeypatch.setattr(target, lambda **kwargs: captured.update(kwargs))
 
@@ -6853,6 +6859,9 @@ def test_dispatch_native_terminal_harness_launches_registered_wrapper(
     )
 
     assert handled is True
+    # The run command resolves configured and first-run defaults before dispatch.
+    # Pass that canonical result instead of rediscovering the raw Click flag.
+    assert backend_harnesses == [harness.removesuffix("-native")]
     assert captured == {
         "server": "http://localhost:0",
         "session_id": "conv_abc123",
@@ -6874,7 +6883,7 @@ def test_dispatch_native_terminal_harness_cursor_launches_wrapper(
     TUI is the single source of turns. A top-level ``--model`` is forwarded as a
     passthrough ``--model`` flag.
     """
-    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s, **_kwargs: "http://localhost:0")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         "omnigent.harnesses.cursor_native.main.run_cursor_native",
@@ -6903,7 +6912,7 @@ def test_dispatch_native_terminal_harness_kiro_launches_wrapper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``run --harness kiro-native`` dispatches to the Kiro TUI wrapper."""
-    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s, **_kwargs: "http://localhost:0")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         "omnigent.harnesses.kiro_native.main.run_kiro_native",
@@ -6935,7 +6944,7 @@ def test_dispatch_native_terminal_harness_kiro_forwards_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Kiro's native wrapper supports an initial prompt from generic run."""
-    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s, **_kwargs: "http://localhost:0")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         "omnigent.harnesses.kiro_native.main.run_kiro_native",
@@ -6966,7 +6975,7 @@ def test_dispatch_native_terminal_harness_forwards_prompt_to_claude_and_codex(
     no longer a REPL-only option for them. A multi-line prompt must arrive as
     one value — the wrappers put it on argv rather than pasting it.
     """
-    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s, **_kwargs: "http://localhost:0")
     captured: dict[str, object] = {}
     monkeypatch.setattr(target, lambda **kwargs: captured.update(kwargs))
 
@@ -7002,7 +7011,7 @@ def test_dispatch_native_terminal_harness_own_config_model_policy(
     expected_args: tuple[str, ...],
 ) -> None:
     """Own-config wrappers receive only models explicitly requested by users."""
-    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s, **_kwargs: "http://localhost:0")
     captured: dict[str, object] = {}
     monkeypatch.setattr(target, lambda **kwargs: captured.update(kwargs))
 
@@ -7080,7 +7089,7 @@ def test_dispatch_native_terminal_harness_continue_resumes_latest(
     ``cursor-native-ui`` conversation and hand that to the wrapper as the
     session id.
     """
-    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s, **_kwargs: "http://localhost:0")
     seen: dict[str, object] = {}
 
     def _fake_latest(*, base_url: str, agent_name: str, headers: object) -> str:
@@ -7113,7 +7122,7 @@ def test_dispatch_native_terminal_harness_continue_with_no_prior_fails_loud(
     as ``session_id`` would silently open a new session. Matches the REPL's
     ``_resolve_resume_target`` "No prior conversation" behavior.
     """
-    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s, **_kwargs: "http://localhost:0")
     monkeypatch.setattr("omnigent.chat._resolve_latest_conversation_id", lambda **_kw: None)
     monkeypatch.setattr("omnigent.chat._remote_headers", lambda **_kw: {})
 
@@ -7132,7 +7141,7 @@ def test_dispatch_native_terminal_harness_explicit_id_skips_latest_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An explicit ``--resume <id>`` wins over ``--continue`` (no latest lookup)."""
-    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s, **_kwargs: "http://localhost:0")
 
     def _must_not_lookup(**_kw: object) -> str:
         raise AssertionError("latest-conversation lookup ran despite an explicit id")
