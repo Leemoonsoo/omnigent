@@ -10,6 +10,7 @@ wiring that routes ``--server`` through them.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -2290,6 +2291,32 @@ def test_ensure_backend_remote_passthrough(monkeypatch: pytest.MonkeyPatch) -> N
     # The daemon receives the normalized (slash-stripped) URL so its
     # pidfile target matches what later commands compute.
     assert calls == ["https://example.databricksapps.com"]
+
+
+def test_ensure_backend_labels_remote_connect_with_click_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The early remote-connect phase uses the active native harness label."""
+    captured: list[tuple[str, str | None]] = []
+
+    @contextlib.contextmanager
+    def _capture_progress(*, initial_message: str, metric_harness: str | None = None):
+        captured.append((initial_message, metric_harness))
+        yield
+
+    monkeypatch.setattr("omnigent._runner_startup.runner_startup_progress", _capture_progress)
+    monkeypatch.setattr(cli, "_ensure_host_daemon", lambda _server: None)
+    monkeypatch.setattr(cli, "_workspace_api_server_url", lambda server: server.rstrip("/"))
+    monkeypatch.setattr(cli, "_ensure_databricks_server_auth", lambda _server: None)
+
+    @click.command("codex")
+    def _codex() -> None:
+        _ensure_backend("https://example.databricksapps.com/")
+
+    result = CliRunner().invoke(_codex)
+
+    assert result.exit_code == 0, result.output
+    assert captured == [("Connecting to the server…", "codex")]
 
 
 def test_ensure_backend_local_discovers_url(monkeypatch: pytest.MonkeyPatch) -> None:
