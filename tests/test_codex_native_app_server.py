@@ -1890,36 +1890,64 @@ async def test_still_untrusted_hints_old_codex_when_hash_missing() -> None:
 # --- Codex version gate + fail-open startup ---------------------------
 
 
-async def test_prewarm_codex_model_catalog_populates_launch_cache(
+async def test_start_overlaps_catalog_prewarm_with_version_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The runner prewarm uses the same catalog key and timeout as startup."""
+    """App-server startup begins the catalog probe before version discovery ends."""
+    import threading
+
     from omnigent.harnesses.codex_native import app_server as app_server_mod
+    from omnigent.inner import codex_executor
 
-    calls: list[tuple[str, Path, float, bool]] = []
+    real_codex_home = tmp_path / "real-codex-home"
+    real_codex_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(real_codex_home))
+    _disable_codex_startup_rpc(monkeypatch)
 
-    def _fake_read(
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    calls: list[tuple[str, Path, float]] = []
+
+    def _probe(
         codex_path: str,
         source_home: Path,
         *,
         timeout: float,
-        cache_failures: bool,
-    ) -> object:
-        calls.append((codex_path, source_home, timeout, cache_failures))
-        return {"models": []}
+    ) -> dict[str, object]:
+        calls.append((codex_path, source_home, timeout))
+        probe_started.set()
+        assert release_probe.wait(timeout=10)
+        return {"models": [{"slug": "gpt-test"}]}
 
-    monkeypatch.setattr(app_server_mod, "_find_codex_cli", lambda: "/bin/codex")
-    monkeypatch.setattr(app_server_mod, "_codex_home_config_source_from_env", lambda: tmp_path)
-    monkeypatch.setattr(app_server_mod, "read_codex_model_catalog", _fake_read)
+    async def _version_after_probe_started(_codex_path: str) -> tuple[int, int, int]:
+        assert await asyncio.to_thread(probe_started.wait, 10)
+        release_probe.set()
+        return (0, 136, 0)
 
-    await app_server_mod.prewarm_codex_model_catalog()
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_CACHE", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_FAILURES", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_INFLIGHT", {})
+    monkeypatch.setattr(codex_executor, "_probe_codex_model_catalog", _probe)
+    monkeypatch.setattr(app_server_mod, "_codex_cli_version", _version_after_probe_started)
+
+    server = _test_app_server(
+        tmp_path,
+        tmp_path / "codex-home",
+        tmp_path / "bridge",
+        workspace,
+    )
+    server.trust_project = True
+    server.pinned_model = "gpt-test"
+    await server.start()
+    await server.close()
 
     assert calls == [
         (
-            "/bin/codex",
-            tmp_path,
+            sys.executable,
+            real_codex_home,
             app_server_mod._MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
-            False,
         )
     ]
 
@@ -1927,41 +1955,61 @@ async def test_prewarm_codex_model_catalog_populates_launch_cache(
 async def test_prewarm_codex_model_catalog_failure_does_not_suppress_startup_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed speculative probe leaves the authoritative startup read available."""
+    """A failed in-process prewarm leaves one authoritative startup retry."""
+    import threading
+
     from omnigent.harnesses.codex_native import app_server as app_server_mod
     from omnigent.inner import codex_executor
+
+    real_codex_home = tmp_path / "real-codex-home"
+    real_codex_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(real_codex_home))
+    _disable_codex_startup_rpc(monkeypatch)
 
     catalog = {"models": [{"slug": "gpt-test"}]}
     results: list[dict[str, object] | None] = [None, catalog]
     calls = 0
+    speculative_finished = threading.Event()
 
     def _probe(codex_path: str, source_home: Path, *, timeout: float) -> object:
         nonlocal calls
         del codex_path, source_home, timeout
         result = results[calls]
         calls += 1
+        if calls == 1:
+            speculative_finished.set()
         return result
 
-    monkeypatch.setattr(app_server_mod, "_find_codex_cli", lambda: "/bin/codex")
-    monkeypatch.setattr(app_server_mod, "_codex_home_config_source_from_env", lambda: tmp_path)
+    async def _version_after_speculative_failure(
+        _codex_path: str,
+    ) -> tuple[int, int, int]:
+        assert await asyncio.to_thread(speculative_finished.wait, 10)
+        return (0, 136, 0)
+
     monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_CACHE", {})
     monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_FAILURES", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_INFLIGHT", {})
     monkeypatch.setattr(codex_executor, "_probe_codex_model_catalog", _probe)
+    monkeypatch.setattr(app_server_mod, "_codex_cli_version", _version_after_speculative_failure)
 
-    await app_server_mod.prewarm_codex_model_catalog()
-
-    assert (
-        codex_executor.read_codex_model_catalog(
-            "/bin/codex",
-            tmp_path,
-            timeout=app_server_mod._MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
-        )
-        == catalog
+    server = _test_app_server(
+        tmp_path,
+        tmp_path / "codex-home",
+        tmp_path / "bridge",
+        workspace,
     )
+    server.trust_project = True
+    server.pinned_model = "gpt-test"
+    await server.start()
+    await server.close()
+
     assert calls == 2
 
 
 async def test_prewarm_codex_model_catalog_leaves_failure_to_startup(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unexpected speculative failure does not fail session initialization."""
@@ -1971,10 +2019,9 @@ async def test_prewarm_codex_model_catalog_leaves_failure_to_startup(
         del args, kwargs
         raise RuntimeError("probe failed")
 
-    monkeypatch.setattr(app_server_mod, "_find_codex_cli", lambda: "/bin/codex")
     monkeypatch.setattr(app_server_mod, "read_codex_model_catalog", _raise)
 
-    await app_server_mod.prewarm_codex_model_catalog()
+    await app_server_mod._prewarm_codex_model_catalog("/bin/codex", tmp_path)
 
 
 def _set_codex_version(
