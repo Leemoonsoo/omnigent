@@ -243,6 +243,25 @@ def test_runner_startup_progress_records_active_phase_failure(monkeypatch) -> No
     assert recorded == [(1250.0, "failure")]
 
 
+def test_runner_startup_progress_ignores_metric_failures(monkeypatch, capsys) -> None:
+    """Instrumentation failures never interrupt progress or the startup body."""
+    ticks = iter((1.0, 2.0))
+    monkeypatch.setattr("omnigent._runner_startup.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        startup_metrics,
+        "record_startup_phase_duration",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("metric failed")),
+    )
+
+    with runner_startup_progress(
+        initial_message="Preparing Codex...",
+        enabled=False,
+    ) as progress:
+        progress.update("Waiting for runner...")
+
+    assert "Waiting for runner" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     ("message", "harness"),
     [
