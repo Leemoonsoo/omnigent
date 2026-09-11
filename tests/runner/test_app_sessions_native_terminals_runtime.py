@@ -659,15 +659,16 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     assert len(launched_specs) == 1
     launched = launched_specs[0]
     assert launched.command == "/opt/codex/bin/codex"
-    assert launched.args[0] == "--dangerously-bypass-hook-trust"
-    assert launched.args[1:4] == [
-        "--config",
-        "approval_policy=on-request",
+    # Permissions are applied by preload, not repeated on the remote TUI.
+    assert launched.args == [
+        "--dangerously-bypass-hook-trust",
         "resume",
+        "--remote",
+        app_server.listen_url,
+        thread_id,
     ]
-    assert launched.args[4] == "--remote"
-    assert launched.args[5].startswith("ws://127.0.0.1:")
-    assert launched.args[6] == thread_id
+    assert app_server.listen_url is not None
+    assert app_server.listen_url.startswith("ws://127.0.0.1:")
     assert launched.env["OPENAI_API_KEY"] == "sk-test"
     assert "IGNORED" not in launched.env
     assert launched.env["CODEX_HOME"] == str(app_server.codex_home)

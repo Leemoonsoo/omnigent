@@ -10,3 +10,7 @@ a restarted app-server, and use `thread/settings/update` for live changes.
 
 Regression coverage is in `tests/test_codex_native.py`; app-server startup and
 provider configuration tests are in `tests/test_codex_native_app_server.py`.
+Runner-owned launch coverage is in
+`tests/runner/test_app_sessions_native_terminals_runtime.py`.
+Use a temporary `OMNIGENT_CONFIG_HOME` for runner launch tests so local harness
+command overrides do not alter the captured terminal arguments.
