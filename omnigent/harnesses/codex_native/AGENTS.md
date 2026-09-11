@@ -11,7 +11,12 @@ Codex can ignore resume overrides while other clients remain subscribed; test
 cold and unsubscribed resume, and use `thread/settings/update` for live changes.
 Preserve terminal permission arguments before Codex 0.154: older remote TUIs can
 reload an idle thread with their own settings when no clients are subscribed.
-Compatibility smoke tests must close the preload/observer client before attachment.
+For Codex 0.154+ or an unknown version, retain the preload subscription and pass
+that same client to the forwarder. Closing it before attachment lets the TUI
+reload the idle thread with different permissions, even on 0.154. Close retained
+clients on startup failure, cancellation, and forwarder teardown. Smoke tests
+must follow production ownership without adding an independent observer that
+could hide a missing subscription.
 
 Regression coverage is in `tests/test_codex_native.py`; app-server startup and
 provider configuration tests are in `tests/test_codex_native_app_server.py`.

@@ -47,6 +47,7 @@ from omnigent.harnesses.codex_native.app_server import (
     build_codex_native_server,
     build_codex_remote_args,
     client_for_transport,
+    codex_remote_resume_omits_permission_args,
     codex_session_meta_model_provider,
     codex_terminal_env,
     native_codex_launch_base_url,
@@ -381,7 +382,8 @@ class PreparedCodexTerminal:
         invocation owns it. ``None`` for reattached live terminals.
     :param event_client: App-server client already listening for the
         Codex thread. Fresh sessions keep this listener open after it
-        observes the TUI-created ``thread/started`` event.
+        observes the TUI-created ``thread/started`` event; resumed sessions
+        retain the preload subscription until forwarder teardown.
     :param reattached: ``True`` when an existing terminal was reused.
     """
 
@@ -1267,10 +1269,13 @@ async def _prepare_codex_terminal(
                 )
                 await event_client.connect()
             else:
-                await preload_codex_thread_for_resume(
+                event_client = await preload_codex_thread_for_resume(
                     codex_ws_url,
                     thread_id,
                     terminal_launch_args=codex_args,
+                    retain_client=codex_remote_resume_omits_permission_args(
+                        app_server.codex_cli_version
+                    ),
                 )
                 write_bridge_state(
                     bridge_dir,
@@ -1301,7 +1306,7 @@ async def _prepare_codex_terminal(
             )
             terminal_id = launched_terminal.terminal_id
             _update_startup_progress(startup_progress, "Codex terminal ready.")
-        except Exception:
+        except BaseException:
             if terminal_id is not None:
                 await _close_codex_terminal(
                     base_url=base_url,
@@ -1409,10 +1414,15 @@ async def _attach_with_forwarder(
                 recover=recover,
             )
     finally:
-        if forwarder is not None:
-            forwarder.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await forwarder
+        try:
+            if forwarder is not None:
+                forwarder.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await forwarder
+        finally:
+            if prepared.event_client is not None:
+                with contextlib.suppress(Exception):
+                    await prepared.event_client.close()
         if not prepared.reattached:
             active_session_id = (
                 _active_codex_session_id(prepared.bridge_dir) or prepared.session_id

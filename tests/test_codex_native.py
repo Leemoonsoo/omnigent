@@ -739,8 +739,10 @@ def test_clear_bridge_state_removes_stale_runtime_state(tmp_path: Path) -> None:
     assert read_bridge_state(bridge_dir) is None
 
 
-def test_preload_codex_thread_for_resume_resumes_and_closes(
+@pytest.mark.parametrize("retain_client", [False, True])
+def test_preload_codex_thread_for_resume_manages_subscription(
     monkeypatch: pytest.MonkeyPatch,
+    retain_client: bool,
 ) -> None:
     """
     Preloading uses Codex ``thread/resume`` before bridge state is exposed.
@@ -768,7 +770,7 @@ def test_preload_codex_thread_for_resume_resumes_and_closes(
         fake_client_factory,
     )
 
-    asyncio.run(
+    retained = asyncio.run(
         codex_native_app_server.preload_codex_thread_for_resume(
             "ws://127.0.0.1:1234",
             "019e96aa-0be2-7343-8d3b-6f914d60936b",
@@ -780,6 +782,7 @@ def test_preload_codex_thread_for_resume_resumes_and_closes(
                 "-c",
                 'approvals_reviewer="auto_review"',
             ],
+            retain_client=retain_client,
         )
     )
 
@@ -796,7 +799,36 @@ def test_preload_codex_thread_for_resume_resumes_and_closes(
             },
         )
     ]
-    assert fake_client.closed is True
+    assert fake_client.closed is not retain_client
+    assert retained is (fake_client if retain_client else None)
+
+
+@pytest.mark.parametrize("retain_client", [False, True])
+@pytest.mark.parametrize("stage", ["connect", "request"])
+@pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])
+def test_preload_codex_thread_closes_client_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    retain_client: bool,
+    stage: str,
+    error: type[BaseException],
+) -> None:
+    """Failed or cancelled startup must not leave a preload subscription open."""
+    fake_client = _FakeCodexAppServerClient()
+
+    async def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise error("preload failed")
+
+    monkeypatch.setattr(fake_client, stage, fail)
+    monkeypatch.setattr(
+        codex_native_app_server, "client_for_transport", lambda *_args, **_kwargs: fake_client
+    )
+    with pytest.raises(error, match="preload failed"):
+        asyncio.run(
+            codex_native_app_server.preload_codex_thread_for_resume(
+                "ws://127.0.0.1:9876", "thread_test", retain_client=retain_client
+            )
+        )
+    assert fake_client.closed
 
 
 @pytest.mark.parametrize(
@@ -9046,6 +9078,57 @@ def test_launch_codex_terminal_extracts_tmux_attach_metadata(
     assert launched.terminal_id == "terminal_codex_main"
     assert launched.tmux_socket == socket_path
     assert launched.tmux_target == "main"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attach_fails", [False, True])
+async def test_attach_retains_preload_subscription_until_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    attach_fails: bool,
+) -> None:
+    """The same subscribed client must survive attachment and reach the forwarder."""
+    client = _FakeCodexAppServerClient()
+    forwarded: list[object] = []
+
+    async def forward(**kwargs: Any) -> None:
+        forwarded.append(kwargs["client"])
+        await asyncio.Event().wait()
+
+    async def attach(**_kwargs: Any) -> None:
+        await asyncio.sleep(0)
+        assert forwarded == [client]
+        assert not client.closed
+        if attach_fails:
+            raise RuntimeError("attach failed")
+
+    async def close(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr(codex_native, "supervise_forwarder", forward)
+    monkeypatch.setattr(codex_native, "_attach_terminal_resource", attach)
+    monkeypatch.setattr(codex_native, "_close_codex_terminal", close)
+    prepared = codex_native.PreparedCodexTerminal(
+        session_id="conv_test",
+        terminal_id="terminal_test",
+        tmux_socket=None,
+        tmux_target=None,
+        bridge_dir=tmp_path,
+        thread_id="thread_test",
+        app_server_url="ws://127.0.0.1:9876",
+        app_server=SimpleNamespace(close=close),  # type: ignore[arg-type]
+        event_client=client,  # type: ignore[arg-type]
+        reattached=False,
+    )
+    operation = codex_native._attach_with_forwarder(
+        base_url="http://127.0.0.1:8000", headers={}, prepared=prepared, prompt=None
+    )
+    if attach_fails:
+        with pytest.raises(RuntimeError, match="attach failed"):
+            await operation
+    else:
+        await operation
+    assert client.closed
 
 
 def test_attach_with_forwarder_uses_direct_tmux_when_socket_is_local(

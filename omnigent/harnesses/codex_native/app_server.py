@@ -3452,7 +3452,8 @@ async def preload_codex_thread_for_resume(
     thread_id: str,
     *,
     terminal_launch_args: Sequence[str] | None = None,
-) -> None:
+    retain_client: bool = False,
+) -> CodexAppServerClient | None:
     """
     Load an existing Codex thread into a freshly started app-server.
 
@@ -3467,15 +3468,18 @@ async def preload_codex_thread_for_resume(
     :param thread_id: Codex thread id to load, e.g.
         ``"019e96aa-0be2-7343-8d3b-6f914d60936b"``.
     :param terminal_launch_args: Persisted permission overrides for the resumed thread.
-    :returns: None.
+    :param retain_client: Keep the thread subscribed through terminal attachment.
+        The caller must pass the returned client to the forwarder and close it.
+    :returns: The subscribed client when retained, otherwise None.
     :raises RuntimeError: If the app-server rejects the resume.
     """
     client = client_for_transport(
         transport,
         client_name="omnigent-codex-native-preload",
     )
-    await client.connect()
+    retained = False
     try:
+        await client.connect()
         await client.request(
             "thread/resume",
             {
@@ -3484,8 +3488,13 @@ async def preload_codex_thread_for_resume(
                 **_codex_resume_permission_params(terminal_launch_args),
             },
         )
+        if retain_client:
+            retained = True
+            return client
     finally:
-        await client.close()
+        if not retained:
+            await client.close()
+    return None
 
 
 async def apply_codex_thread_effort(
@@ -3651,6 +3660,16 @@ def _strip_codex_resume_permission_args(codex_args: tuple[str, ...]) -> list[str
     return cleaned
 
 
+def codex_remote_resume_omits_permission_args(
+    codex_cli_version: tuple[int, int, int] | None,
+) -> bool:
+    """Whether remote resume needs a retained preload instead of permission flags."""
+    return (
+        codex_cli_version is None
+        or codex_cli_version >= _MIN_REMOTE_RESUME_PERMISSION_GUARD_CODEX_VERSION
+    )
+
+
 def build_codex_remote_args(
     *,
     codex_args: tuple[str, ...],
@@ -3742,10 +3761,7 @@ def build_codex_remote_args(
         passthrough = [_CODEX_BYPASS_HOOK_TRUST_FLAG, *passthrough]
     if thread_id is None:
         return [*override_args, *passthrough, "--remote", remote_url]
-    if (
-        codex_cli_version is not None
-        and codex_cli_version < _MIN_REMOTE_RESUME_PERMISSION_GUARD_CODEX_VERSION
-    ):
+    if not codex_remote_resume_omits_permission_args(codex_cli_version):
         return [*override_args, *passthrough, "resume", "--remote", remote_url, thread_id]
     # Codex rejects explicit permission overrides on remote resume, even
     # when they match the app-server policy. config_overrides went to server
