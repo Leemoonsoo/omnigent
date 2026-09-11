@@ -12,6 +12,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NoReturn
 
 import pytest
 
@@ -206,7 +207,7 @@ def test_threaded_idle_watcher_treats_probe_start_failure_as_unknown(
     retried = threading.Event()
     attempts = 0
 
-    def _cannot_fork(*args: object, **kwargs: object) -> SimpleNamespace:
+    def _cannot_fork(*args: object, **kwargs: object) -> NoReturn:
         del args, kwargs
         nonlocal attempts
         attempts += 1
@@ -241,7 +242,7 @@ def test_threaded_idle_watcher_treats_confirmation_start_failure_as_unknown(
     retried = threading.Event()
     attempts = 0
 
-    def _cannot_fork(*args: object, **kwargs: object) -> SimpleNamespace:
+    def _cannot_fork(*args: object, **kwargs: object) -> NoReturn:
         del args, kwargs
         nonlocal attempts
         attempts += 1
@@ -428,6 +429,81 @@ def test_threaded_idle_watcher_reports_exit_on_dead_pane(tmp_path: Path) -> None
     assert instance.last_pane_text() == "claude exited: boom\nbye"
 
 
+def test_threaded_idle_watcher_retries_unknown_pane_death(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pane-death probe that cannot start backs off without reporting exit."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    exited = threading.Event()
+    retried = threading.Event()
+    attempts = 0
+
+    instance._capture_pane_for_idle_or_none = lambda: "steady frame"  # type: ignore[method-assign]
+
+    def _cannot_probe(*args: str) -> NoReturn:
+        del args
+        nonlocal attempts
+        attempts += 1
+        if attempts >= 2:
+            retried.set()
+        raise terminal_mod._TmuxProcessStartError("resource temporarily unavailable")
+
+    instance._tmux_output_sync = _cannot_probe  # type: ignore[method-assign]
+    monkeypatch.setattr(terminal_mod, "_TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS", 0.01)
+
+    instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.01)
+
+    assert retried.wait(timeout=3.0)
+    instance._stop_idle_watcher_thread()
+    assert not exited.is_set()
+    assert instance.running is True
+
+
+@pytest.mark.asyncio
+async def test_async_idle_watcher_retries_unknown_pane_death(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The async watcher also backs off when pane-death liveness is unknown."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    exited = asyncio.Event()
+    retried = asyncio.Event()
+    attempts = 0
+
+    async def _tmux_output(*args: str) -> str:
+        nonlocal attempts
+        if args[0] == "capture-pane":
+            return "steady frame"
+        attempts += 1
+        if attempts >= 2:
+            retried.set()
+        raise terminal_mod._TmuxProcessStartError("resource temporarily unavailable")
+
+    instance._tmux_output = _tmux_output  # type: ignore[method-assign]
+    monkeypatch.setattr(terminal_mod, "_IDLE_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(terminal_mod, "_TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS", 0.01)
+
+    instance.start_idle_watcher(lambda: None, on_exit=exited.set)
+
+    await asyncio.wait_for(retried.wait(), timeout=1.0)
+    await instance._stop_idle_watcher()
+    assert not exited.is_set()
+    assert instance.running is True
+
+
 @pytest.mark.asyncio
 async def test_is_alive_false_when_pane_dead(
     tmp_path: Path,
@@ -457,12 +533,7 @@ async def test_is_alive_false_when_pane_dead(
         return _ProcessWithStdout(stdout=b"1\n", returncode=0)
 
     monkeypatch.setattr(
-        terminal_mod,
-        "asyncio",
-        SimpleNamespace(
-            create_subprocess_exec=fake_create_subprocess_exec,
-            subprocess=terminal_mod.asyncio.subprocess,
-        ),
+        terminal_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
     )
 
     instance = TerminalInstance(
@@ -502,12 +573,7 @@ async def test_is_alive_true_when_pane_live(
         return _ProcessWithStdout(stdout=b"0\n", returncode=0)
 
     monkeypatch.setattr(
-        terminal_mod,
-        "asyncio",
-        SimpleNamespace(
-            create_subprocess_exec=fake_create_subprocess_exec,
-            subprocess=terminal_mod.asyncio.subprocess,
-        ),
+        terminal_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
     )
 
     instance = TerminalInstance(
@@ -538,12 +604,7 @@ async def test_is_alive_preserves_running_state_when_probe_cannot_start(
         raise BlockingIOError(errno.EAGAIN, "resource temporarily unavailable")
 
     monkeypatch.setattr(
-        terminal_mod,
-        "asyncio",
-        SimpleNamespace(
-            create_subprocess_exec=fake_create_subprocess_exec,
-            subprocess=terminal_mod.asyncio.subprocess,
-        ),
+        terminal_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
     )
 
     instance = TerminalInstance(
