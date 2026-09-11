@@ -1523,6 +1523,7 @@ def read_codex_model_catalog(
     source_home: Path,
     *,
     timeout: float = 10.0,
+    cache_failures: bool = True,
 ) -> dict[str, Any] | None:
     """
     Ask the codex CLI for its own model catalog, once per host process.
@@ -1537,6 +1538,8 @@ def read_codex_model_catalog(
     :param codex_path: The codex binary.
     :param source_home: ``CODEX_HOME`` to resolve config from.
     :param timeout: Seconds to wait; a slow probe must not delay session boot.
+    :param cache_failures: Whether to suppress another probe after a failure.
+        Speculative callers disable this so an authoritative read can retry.
     :returns: ``{"models": [...]}``, or ``None`` on any failure.
     """
     cache_key = _model_catalog_cache_key(codex_path, source_home)
@@ -1551,7 +1554,10 @@ def read_codex_model_catalog(
             del _MODEL_CATALOG_FAILURES[cache_key]
         catalog = _probe_codex_model_catalog(codex_path, source_home, timeout=timeout)
         if catalog is None:
-            _MODEL_CATALOG_FAILURES[cache_key] = time.monotonic() + _MODEL_CATALOG_FAILURE_TTL_S
+            if cache_failures:
+                _MODEL_CATALOG_FAILURES[cache_key] = (
+                    time.monotonic() + _MODEL_CATALOG_FAILURE_TTL_S
+                )
             return None
         _MODEL_CATALOG_CACHE[cache_key] = catalog
         return catalog
