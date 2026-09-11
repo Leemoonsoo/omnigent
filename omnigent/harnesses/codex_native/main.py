@@ -1297,6 +1297,7 @@ async def _prepare_codex_terminal(
                 # the app-server so it resolves the Omnigent provider
                 # and skips the OpenAI-login onboarding screen.
                 config_overrides=tuple(app_server.config_overrides),
+                codex_cli_version=app_server.codex_cli_version,
             )
             terminal_id = launched_terminal.terminal_id
             _update_startup_progress(startup_progress, "Codex terminal ready.")
@@ -2689,6 +2690,7 @@ async def _launch_codex_terminal(
     remote_url: str,
     env: dict[str, str],
     config_overrides: tuple[str, ...] = (),
+    codex_cli_version: tuple[int, int, int] | None = None,
 ) -> LaunchedCodexTerminal:
     """
     Launch the server-backed Codex terminal resource.
@@ -2708,6 +2710,7 @@ async def _launch_codex_terminal(
         screen). See :func:`build_codex_remote_args`. Empty for a plain
         Codex-login launch. E.g.
         ``('model_provider="omnigent_databricks"',)``.
+    :param codex_cli_version: Probed CLI version used to preserve older resume behavior.
     :returns: Launched terminal resource details.
     """
     terminal_args = build_codex_remote_args(
@@ -2715,6 +2718,7 @@ async def _launch_codex_terminal(
         thread_id=thread_id,
         remote_url=remote_url,
         config_overrides=config_overrides,
+        codex_cli_version=codex_cli_version,
     )
     body = {
         "terminal": _TERMINAL_NAME,

@@ -5,8 +5,13 @@ Codex 0.154 rejects explicit permission overrides on `resume --remote`, so
 `build_codex_remote_args` omits settings handled by preload from resumed terminal
 arguments. Preserve provider/model overrides and fresh-thread permission defaults.
 Do not silently strip additional policy settings unless the app-server applies them.
-Codex ignores resume overrides for already-loaded threads; test cold resume with
-a restarted app-server, and use `thread/settings/update` for live changes.
+`config_overrides` also includes bypass permissions applied at app-server startup;
+persisted `terminal_launch_args` supply the explicit thread-resume overrides.
+Codex can ignore resume overrides while other clients remain subscribed; test
+cold and unsubscribed resume, and use `thread/settings/update` for live changes.
+Preserve terminal permission arguments before Codex 0.154: older remote TUIs can
+reload an idle thread with their own settings when no clients are subscribed.
+Compatibility smoke tests must close the preload/observer client before attachment.
 
 Regression coverage is in `tests/test_codex_native.py`; app-server startup and
 provider configuration tests are in `tests/test_codex_native_app_server.py`.

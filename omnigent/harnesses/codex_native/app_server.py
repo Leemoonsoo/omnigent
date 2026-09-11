@@ -123,6 +123,8 @@ _MIN_POLICY_HOOK_CODEX_VERSION = (0, 129, 0)
 # (including a version we could not parse) the flag is omitted and the
 # interactive trust prompt may appear instead.
 _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION = (0, 131, 0)
+# Codex rejects permission flags on remote resume starting with this release.
+_MIN_REMOTE_RESUME_PERMISSION_GUARD_CODEX_VERSION = (0, 154, 0)
 _MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS = 3.0
 
 
@@ -3620,7 +3622,7 @@ def _strip_approval_sandbox_flags(codex_args: tuple[str, ...]) -> list[str]:
 
 
 def _strip_codex_resume_permission_args(codex_args: tuple[str, ...]) -> list[str]:
-    """Omit permissions already applied by the app-server's thread/resume call."""
+    """Omit permissions configured on the app-server at startup or thread/resume."""
     args = _strip_approval_sandbox_flags(codex_args)
     cleaned: list[str] = []
     index = 0
@@ -3655,6 +3657,7 @@ def build_codex_remote_args(
     thread_id: str | None,
     remote_url: str,
     config_overrides: tuple[str, ...] = (),
+    codex_cli_version: tuple[int, int, int] | None = None,
     bypass_sandbox: bool = False,
     bypass_hook_trust: bool = False,
 ) -> list[str]:
@@ -3689,8 +3692,8 @@ def build_codex_remote_args(
         settings already cover everything.
     :param thread_id: Codex thread id to resume, e.g. ``"thread_abc123"``.
         ``None`` starts a fresh remote Codex TUI thread instead of
-        resuming an existing one. Resumed terminals inherit permissions
-        from the app-server; permission args handled by preload are omitted.
+        resuming an existing one. On Codex 0.154+, omit terminal permission
+        args; app-server startup and preload still configure the thread.
     :param remote_url: App-server endpoint the TUI attaches to, e.g.
         ``"unix:///home/user/.omnigent/codex-native/x/app-server.sock"``
         or ``"ws://127.0.0.1:9876"``.
@@ -3699,15 +3702,19 @@ def build_codex_remote_args(
         ``('model="databricks-gpt-5-5"', 'model_provider="omnigent_databricks"')``.
         Each is emitted as a ``-c <value>`` global flag. Empty for a
         plain Codex-login launch that needs no provider routing.
-    :param bypass_sandbox: When ``True`` for a fresh thread, emit a single
+    :param codex_cli_version: Probed app-server CLI version. Before 0.154,
+        preserve permission flags because a remote TUI can reapply its own
+        defaults on attach. ``None`` uses the 0.154+ compatible arguments.
+    :param bypass_sandbox: When ``True`` for a fresh thread or a pre-0.154
+        resume, emit a single
         ``--dangerously-bypass-approvals-and-sandbox`` flag and strip any
         conflicting ``--sandbox`` / ``--ask-for-approval`` pairs from
         *codex_args* (codex aborts at startup if the bypass flag is
         combined with either). DANGEROUS: this disables both the approval
         prompts and the command sandbox; it is gated behind an explicit,
         typed-confirmation opt-in in the web UI. Default ``False`` keeps
-        the granular flags untouched. Resumed terminals inherit the policy
-        from the app-server and omit these flags. See issue #657.
+        the granular flags untouched. On Codex 0.154+, resumed terminals
+        omit these flags and use the existing preload path. See issue #657.
     :param bypass_hook_trust: When ``True``, emit
         ``--dangerously-bypass-hook-trust`` so the TUI runs all enabled
         hooks without the interactive "Hooks need review" trust prompt.
@@ -3735,8 +3742,14 @@ def build_codex_remote_args(
         passthrough = [_CODEX_BYPASS_HOOK_TRUST_FLAG, *passthrough]
     if thread_id is None:
         return [*override_args, *passthrough, "--remote", remote_url]
+    if (
+        codex_cli_version is not None
+        and codex_cli_version < _MIN_REMOTE_RESUME_PERMISSION_GUARD_CODEX_VERSION
+    ):
+        return [*override_args, *passthrough, "resume", "--remote", remote_url, thread_id]
     # Codex rejects explicit permission overrides on remote resume, even
-    # when they match the policy already applied by preload.
+    # when they match the app-server policy. config_overrides went to server
+    # startup; codex_args went to preload's thread/resume call.
     resume_args = _strip_codex_resume_permission_args((*override_args, *passthrough))
     return [*resume_args, "resume", "--remote", remote_url, thread_id]
 

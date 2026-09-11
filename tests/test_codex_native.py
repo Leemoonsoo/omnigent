@@ -979,7 +979,10 @@ def test_remote_resume_applies_permissions_only_on_app_server(
     ]
 
 
-def test_remote_resume_omits_app_server_permission_config() -> None:
+@pytest.mark.parametrize("codex_cli_version", [None, (0, 154, 0), (0, 155, 0)])
+def test_remote_resume_omits_app_server_permission_config(
+    codex_cli_version: tuple[int, int, int] | None,
+) -> None:
     """Server config overrides also stay off the remote terminal's command line."""
     overrides = (
         'approval_policy="never"',
@@ -991,12 +994,40 @@ def test_remote_resume_omits_app_server_permission_config() -> None:
         thread_id="thread_test",
         remote_url="ws://127.0.0.1:9876",
         config_overrides=overrides,
+        codex_cli_version=codex_cli_version,
         bypass_sandbox=True,
         bypass_hook_trust=True,
     ) == [
         "-c",
         'model_provider="test-provider"',
         "--dangerously-bypass-hook-trust",
+        "resume",
+        "--remote",
+        "ws://127.0.0.1:9876",
+        "thread_test",
+    ]
+
+
+@pytest.mark.parametrize("codex_cli_version", [(0, 136, 0), (0, 153, 0), (0, 153, 1)])
+def test_remote_resume_preserves_legacy_bypass_args(
+    codex_cli_version: tuple[int, int, int],
+) -> None:
+    """Older TUIs need the bypass settings even after app-server preload."""
+    assert codex_native_app_server.build_codex_remote_args(
+        codex_args=("-a", "on-request", "-s", "read-only", "--model", "test-model"),
+        thread_id="thread_test",
+        remote_url="ws://127.0.0.1:9876",
+        config_overrides=('approval_policy="never"', 'sandbox_mode="danger-full-access"'),
+        codex_cli_version=codex_cli_version,
+        bypass_sandbox=True,
+    ) == [
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'sandbox_mode="danger-full-access"',
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model",
+        "test-model",
         "resume",
         "--remote",
         "ws://127.0.0.1:9876",
@@ -1012,6 +1043,8 @@ def test_remote_resume_omits_app_server_permission_config() -> None:
         ("--full-auto",),
         ("-c", "approvals_reviewer=false"),
         ("--config", 'sandbox_mode=""'),
+        ("-c",),
+        ("--config",),
         ("-c", 'developer_instructions="Do not change approval_policy"'),
     ],
 )
@@ -8908,7 +8941,18 @@ def test_launch_codex_terminal_starts_fresh_remote_tui() -> None:
     assert client.posts[0][1]["spec"]["tmux_start_on_attach"] is True
 
 
-def test_launch_codex_terminal_uses_remote_resume_order() -> None:
+@pytest.mark.parametrize(
+    ("codex_cli_version", "permission_args"),
+    [
+        ((0, 153, 1), ["-c", "approval_policy=on-request"]),
+        ((0, 154, 0), []),
+        (None, []),
+    ],
+)
+def test_launch_codex_terminal_uses_remote_resume_order(
+    codex_cli_version: tuple[int, int, int] | None,
+    permission_args: list[str],
+) -> None:
     """
     Terminal launch uses the Codex resume subcommand with ``--remote``
     before the thread id, matching Codex CLI parsing coverage.
@@ -8926,6 +8970,7 @@ def test_launch_codex_terminal_uses_remote_resume_order() -> None:
             thread_id="thread_123",
             remote_url="ws://127.0.0.1:9876",
             env={"CODEX_HOME": "/tmp/codex-home"},
+            codex_cli_version=codex_cli_version,
         )
     )
 
@@ -8939,6 +8984,7 @@ def test_launch_codex_terminal_uses_remote_resume_order() -> None:
                 "spec": {
                     "command": "/opt/codex/bin/codex",
                     "args": [
+                        *permission_args,
                         "resume",
                         "--remote",
                         "ws://127.0.0.1:9876",

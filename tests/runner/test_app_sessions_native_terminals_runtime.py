@@ -393,9 +393,19 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("version", "permission_args"),
+    [
+        ((0, 153, 1), ["--config", "approval_policy=on-request"]),
+        ((0, 154, 0), []),
+        (None, []),
+    ],
+)
 async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    version: tuple[int, int, int] | None,
+    permission_args: list[str],
 ) -> None:
     """
     Runner-owned Codex launch consumes persisted args and thread id.
@@ -481,7 +491,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
         """Minimal app-server object used by ``codex_terminal_env``."""
 
         codex_path = "/opt/codex/bin/codex"
-        codex_cli_version: tuple[int, int, int] | None = (0, 145, 0)
+        codex_cli_version = version
 
         def __init__(self) -> None:
             """:returns: None."""
@@ -659,9 +669,10 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     assert len(launched_specs) == 1
     launched = launched_specs[0]
     assert launched.command == "/opt/codex/bin/codex"
-    # Permissions are applied by preload, not repeated on the remote TUI.
+    # Older TUIs still need permission flags; Codex 0.154+ rejects them.
     assert launched.args == [
         "--dangerously-bypass-hook-trust",
+        *permission_args,
         "resume",
         "--remote",
         app_server.listen_url,
