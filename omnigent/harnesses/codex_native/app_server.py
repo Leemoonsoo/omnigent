@@ -1285,27 +1285,13 @@ def _build_native_codex_app_server_argv(
     return argv
 
 
-async def prewarm_codex_model_catalog() -> None:
-    """Populate the process-wide Codex catalog cache ahead of app-server setup.
-
-    Runner-owned Codex sessions consult this catalog to acknowledge model
-    migrations before launching the headless TUI.  The probe is read-only and
-    :func:`read_codex_model_catalog` already serializes and caches it, so an
-    early probe and the launch-time read have the same result; the latter will
-    either join the in-flight probe or hit the populated cache.
-
-    Probe failures are not cached so app-server startup can retry its
-    authoritative read.  Unexpected failures are deliberately swallowed here
-    so startup retains its existing error behavior.
-    """
+async def _prewarm_codex_model_catalog(codex_path: str, source_home: Path) -> None:
+    """Populate the harness process's catalog cache before it is consumed."""
     try:
-        codex_path = _find_codex_cli()
-        if codex_path is None:
-            return
         await asyncio.to_thread(
             read_codex_model_catalog,
             codex_path,
-            _codex_home_config_source_from_env(),
+            source_home,
             timeout=_MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
             cache_failures=False,
         )
@@ -1412,6 +1398,13 @@ class CodexNativeAppServer:
         if self.listen_url is None or self.listen_url.startswith("unix://"):
             with contextlib.suppress(FileNotFoundError):
                 self.socket_path.unlink()
+        config_source = _codex_home_config_source_from_env()
+        catalog_prewarm_task: asyncio.Task[None] | None = None
+        if self.trust_project and self.pinned_model:
+            catalog_prewarm_task = asyncio.create_task(
+                _prewarm_codex_model_catalog(self.codex_path, config_source),
+                name="codex-model-catalog-prewarm",
+            )
         # Native policy enforcement needs codex's hook-trust protocol
         # (``currentHash`` / ``trustStatus`` in ``hooks/list``), added in
         # codex 0.129. Below that the hook can never be trusted, so
@@ -1422,38 +1415,44 @@ class CodexNativeAppServer:
         # (``None``) is treated as supported so a flaky probe never
         # silently disables enforcement — a genuine trust failure is then
         # caught below.
-        codex_version = await _codex_cli_version(self.codex_path)
-        self.codex_cli_version = codex_version
-        policy_hooks_supported = (
-            codex_version is None or codex_version >= _MIN_POLICY_HOOK_CODEX_VERSION
-        )
-        # When the runner advertises a route-subagent endpoint, the generated
-        # hooks file owns hooks.json, so the user's copy is merged in rather
-        # than symlinked over. The runner advertises it for auto-harness Smart
-        # Routing sessions only, so its presence is also this session class's
-        # signature — see ``ensure_session_router_quietly``.
-        router_bridge_dir = codex_router_bridge_dir(self.env)
-        if router_bridge_dir is not None:
-            # A CLI too old for the spawn gate gets no routing hooks at all, so
-            # routing no-ops instead of blocking the launch. Everything keyed
-            # off the advertisement below (generated hooks.json, the routed-spawn
-            # tool pre-approvals) then falls back to the plain shape.
-            skip_reason = codex_routing_hook_skip_reason(codex_version)
-            if skip_reason is not None:
-                _logger.warning("%s", skip_reason)
-                router_bridge_dir = None
-        self.router_hooks_registered = router_bridge_dir is not None and policy_hooks_supported
-        routed_spawns = router_bridge_dir is not None
-        config_source = _codex_home_config_source_from_env()
-        model_migration_target: str | None = None
-        if self.trust_project and self.pinned_model:
-            catalog = await asyncio.to_thread(
-                read_codex_model_catalog,
-                self.codex_path,
-                config_source,
-                timeout=_MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
+        try:
+            codex_version = await _codex_cli_version(self.codex_path)
+            self.codex_cli_version = codex_version
+            policy_hooks_supported = (
+                codex_version is None or codex_version >= _MIN_POLICY_HOOK_CODEX_VERSION
             )
-            model_migration_target = _codex_model_upgrade_target(catalog, self.pinned_model)
+            # When the runner advertises a route-subagent endpoint, the generated
+            # hooks file owns hooks.json, so the user's copy is merged in rather
+            # than symlinked over. The runner advertises it for auto-harness Smart
+            # Routing sessions only, so its presence is also this session class's
+            # signature — see ``ensure_session_router_quietly``.
+            router_bridge_dir = codex_router_bridge_dir(self.env)
+            if router_bridge_dir is not None:
+                # A CLI too old for the spawn gate gets no routing hooks at all, so
+                # routing no-ops instead of blocking the launch. Everything keyed
+                # off the advertisement below (generated hooks.json, the routed-spawn
+                # tool pre-approvals) then falls back to the plain shape.
+                skip_reason = codex_routing_hook_skip_reason(codex_version)
+                if skip_reason is not None:
+                    _logger.warning("%s", skip_reason)
+                    router_bridge_dir = None
+            self.router_hooks_registered = router_bridge_dir is not None and policy_hooks_supported
+            routed_spawns = router_bridge_dir is not None
+            model_migration_target: str | None = None
+            if self.trust_project and self.pinned_model:
+                catalog = await asyncio.to_thread(
+                    read_codex_model_catalog,
+                    self.codex_path,
+                    config_source,
+                    timeout=_MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
+                )
+                model_migration_target = _codex_model_upgrade_target(catalog, self.pinned_model)
+        finally:
+            if catalog_prewarm_task is not None:
+                if not catalog_prewarm_task.done():
+                    catalog_prewarm_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await catalog_prewarm_task
         # Off the loop: this copies/symlinks a home AND (on a Smart Routing
         # session) shells out to ``codex debug models`` with a 10s timeout. Run
         # inline it stalled every other session sharing this event loop for that
