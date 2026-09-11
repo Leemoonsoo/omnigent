@@ -3611,17 +3611,31 @@ def _ensure_backend(server: str | None) -> str:
         reachable.
     """
     from omnigent._runner_startup import (
-        NATIVE_STARTUP_HARNESSES,
         STARTUP_PHASE_CONNECTING_REMOTE,
         STARTUP_PHASE_LOCAL_SERVER,
         STARTUP_PHASE_STARTING,
         runner_startup_progress,
     )
+    from omnigent.native.native_coding_agents import (
+        native_coding_agent_for_harness,
+        native_coding_agent_for_terminal_name,
+    )
 
     ctx = click.get_current_context(silent=True)
-    startup_harness = ctx.info_name if ctx is not None else None
-    if startup_harness not in NATIVE_STARTUP_HARNESSES:
-        startup_harness = None
+    native_agent = None
+    if ctx is not None and ctx.info_name == "run":
+        native_agent = native_coding_agent_for_harness(ctx.params.get("harness"))
+    elif ctx is not None:
+        terminal_name = "antigravity" if ctx.info_name == "agy" else ctx.info_name
+        native_agent = native_coding_agent_for_terminal_name(terminal_name)
+    startup_harness = native_agent.key if native_agent is not None else None
+
+    # The foreground client owns these phase timers. Runtime processes initialize
+    # their own providers, but that does not install one in this process.
+    if startup_harness is not None:
+        from omnigent.runtime import telemetry
+
+        telemetry.init(service_name="omni-client")
 
     if server:
         # Remote / explicit-server mode: the server isn't ours to restart, so
@@ -3660,7 +3674,10 @@ def _ensure_backend(server: str | None) -> str:
     # It clears on context exit — before any auth-mode-change echo below and
     # before the REPL/terminal the caller brings up — and falls back to plain
     # stderr lines off a TTY (CI, daemon logfiles).
-    with runner_startup_progress(initial_message=STARTUP_PHASE_STARTING) as progress:
+    with runner_startup_progress(
+        initial_message=STARTUP_PHASE_STARTING,
+        metric_harness=startup_harness,
+    ) as progress:
         config_changed = _ensure_host_daemon(None)
         progress.update(STARTUP_PHASE_LOCAL_SERVER)
         local_url = _discover_local_server_url()
