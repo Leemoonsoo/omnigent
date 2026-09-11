@@ -1896,10 +1896,16 @@ async def test_prewarm_codex_model_catalog_populates_launch_cache(
     """The runner prewarm uses the same catalog key and timeout as startup."""
     from omnigent.harnesses.codex_native import app_server as app_server_mod
 
-    calls: list[tuple[str, Path, float]] = []
+    calls: list[tuple[str, Path, float, bool]] = []
 
-    def _fake_read(codex_path: str, source_home: Path, *, timeout: float) -> object:
-        calls.append((codex_path, source_home, timeout))
+    def _fake_read(
+        codex_path: str,
+        source_home: Path,
+        *,
+        timeout: float,
+        cache_failures: bool,
+    ) -> object:
+        calls.append((codex_path, source_home, timeout, cache_failures))
         return {"models": []}
 
     monkeypatch.setattr(app_server_mod, "_find_codex_cli", lambda: "/bin/codex")
@@ -1909,8 +1915,50 @@ async def test_prewarm_codex_model_catalog_populates_launch_cache(
     await app_server_mod.prewarm_codex_model_catalog()
 
     assert calls == [
-        ("/bin/codex", tmp_path, app_server_mod._MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS)
+        (
+            "/bin/codex",
+            tmp_path,
+            app_server_mod._MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
+            False,
+        )
     ]
+
+
+async def test_prewarm_codex_model_catalog_failure_does_not_suppress_startup_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed speculative probe leaves the authoritative startup read available."""
+    from omnigent.harnesses.codex_native import app_server as app_server_mod
+    from omnigent.inner import codex_executor
+
+    catalog = {"models": [{"slug": "gpt-test"}]}
+    results: list[dict[str, object] | None] = [None, catalog]
+    calls = 0
+
+    def _probe(codex_path: str, source_home: Path, *, timeout: float) -> object:
+        nonlocal calls
+        del codex_path, source_home, timeout
+        result = results[calls]
+        calls += 1
+        return result
+
+    monkeypatch.setattr(app_server_mod, "_find_codex_cli", lambda: "/bin/codex")
+    monkeypatch.setattr(app_server_mod, "_codex_home_config_source_from_env", lambda: tmp_path)
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_CACHE", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_FAILURES", {})
+    monkeypatch.setattr(codex_executor, "_probe_codex_model_catalog", _probe)
+
+    await app_server_mod.prewarm_codex_model_catalog()
+
+    assert (
+        codex_executor.read_codex_model_catalog(
+            "/bin/codex",
+            tmp_path,
+            timeout=app_server_mod._MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
+        )
+        == catalog
+    )
+    assert calls == 2
 
 
 async def test_prewarm_codex_model_catalog_leaves_failure_to_startup(
