@@ -1451,7 +1451,9 @@ def extended_model_catalog(
 # Cached ``codex debug models`` result, keyed by (binary, CODEX_HOME). The
 # catalog is a property of the installed CLI, not of a session, so a successful
 # probe is paid once per host process rather than once per session.
-_MODEL_CATALOG_CACHE: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+_ModelCatalogCacheKey: TypeAlias = tuple[str, str, int, int]
+
+_MODEL_CATALOG_CACHE: dict[_ModelCatalogCacheKey, dict[str, Any]] = {}
 
 # Failures are cached only briefly, keyed the same way and holding the
 # monotonic time the negative expires. Caching them forever turned one
@@ -1460,17 +1462,28 @@ _MODEL_CATALOG_CACHE: dict[tuple[str, str, int, int], dict[str, Any]] = {}
 # from every later session's ``spawn_agent``. Caching them not at all would pay
 # the full timeout per session on a genuinely broken CLI.
 _MODEL_CATALOG_FAILURE_TTL_S = 60.0
-_MODEL_CATALOG_FAILURES: dict[tuple[str, str, int, int], float] = {}
+_MODEL_CATALOG_FAILURES: dict[_ModelCatalogCacheKey, float] = {}
 
-# Both caches are host-process globals reached from worker threads (every
-# caller populates a codex home through ``asyncio.to_thread``), and the probe
-# they memoize is a ~10 s subprocess. Held across the probe so two sessions
-# booting together pay it once: the loser waits for the winner's result instead
-# of shelling out again, which is also what keeps the dict mutations atomic.
+
+@dataclass
+class _ModelCatalogProbeFlight:
+    """One process-wide catalog probe shared by callers for the same key."""
+
+    done: threading.Event
+    result: dict[str, Any] | None = None
+    error: BaseException | None = None
+    failure_cached: bool = False
+    waiters: int = 0
+
+
+# Cache and flight state are host-process globals reached from worker threads.
+# The lock protects only those dictionaries; probes run outside it so distinct
+# catalog keys can progress concurrently. Same-key callers wait on one flight.
 _MODEL_CATALOG_LOCK = threading.Lock()
+_MODEL_CATALOG_INFLIGHT: dict[_ModelCatalogCacheKey, _ModelCatalogProbeFlight] = {}
 
 
-def _model_catalog_cache_key(codex_path: str, source_home: Path) -> tuple[str, str, int, int]:
+def _model_catalog_cache_key(codex_path: str, source_home: Path) -> _ModelCatalogCacheKey:
     """
     Key the catalog cache so an in-place codex upgrade re-probes.
 
@@ -1543,24 +1556,60 @@ def read_codex_model_catalog(
     :returns: ``{"models": [...]}``, or ``None`` on any failure.
     """
     cache_key = _model_catalog_cache_key(codex_path, source_home)
-    with _MODEL_CATALOG_LOCK:
-        cached = _MODEL_CATALOG_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
-        failed_until = _MODEL_CATALOG_FAILURES.get(cache_key)
-        if failed_until is not None:
-            if time.monotonic() < failed_until:
-                return None
-            del _MODEL_CATALOG_FAILURES[cache_key]
+    while True:
+        with _MODEL_CATALOG_LOCK:
+            cached = _MODEL_CATALOG_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+            failed_until = _MODEL_CATALOG_FAILURES.get(cache_key)
+            if failed_until is not None:
+                if time.monotonic() < failed_until:
+                    return None
+                del _MODEL_CATALOG_FAILURES[cache_key]
+            flight = _MODEL_CATALOG_INFLIGHT.get(cache_key)
+            if flight is None:
+                flight = _ModelCatalogProbeFlight(done=threading.Event())
+                _MODEL_CATALOG_INFLIGHT[cache_key] = flight
+                is_probe_owner = True
+            else:
+                flight.waiters += 1
+                is_probe_owner = False
+
+        if is_probe_owner:
+            break
+        flight.done.wait()
+        if flight.error is not None:
+            raise flight.error
+        if flight.result is not None:
+            return flight.result
+        if flight.failure_cached or not cache_failures:
+            return None
+        # An authoritative caller retries a failed speculative probe. The
+        # retry becomes another shared flight, so concurrent callers still
+        # pay at most one additional subprocess invocation.
+
+    try:
         catalog = _probe_codex_model_catalog(codex_path, source_home, timeout=timeout)
+    except BaseException as exc:
+        with _MODEL_CATALOG_LOCK:
+            flight.error = exc
+            _MODEL_CATALOG_INFLIGHT.pop(cache_key, None)
+            flight.done.set()
+        raise
+
+    with _MODEL_CATALOG_LOCK:
         if catalog is None:
             if cache_failures:
                 _MODEL_CATALOG_FAILURES[cache_key] = (
                     time.monotonic() + _MODEL_CATALOG_FAILURE_TTL_S
                 )
-            return None
-        _MODEL_CATALOG_CACHE[cache_key] = catalog
-        return catalog
+                flight.failure_cached = True
+        else:
+            _MODEL_CATALOG_CACHE[cache_key] = catalog
+        flight.result = catalog
+        _MODEL_CATALOG_INFLIGHT.pop(cache_key, None)
+        flight.done.set()
+    return catalog
 
 
 def _probe_codex_model_catalog(
