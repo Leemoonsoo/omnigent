@@ -3611,11 +3611,17 @@ def _ensure_backend(server: str | None) -> str:
         reachable.
     """
     from omnigent._runner_startup import (
+        NATIVE_STARTUP_HARNESSES,
         STARTUP_PHASE_CONNECTING_REMOTE,
         STARTUP_PHASE_LOCAL_SERVER,
         STARTUP_PHASE_STARTING,
         runner_startup_progress,
     )
+
+    ctx = click.get_current_context(silent=True)
+    startup_harness = ctx.info_name if ctx is not None else None
+    if startup_harness not in NATIVE_STARTUP_HARNESSES:
+        startup_harness = None
 
     if server:
         # Remote / explicit-server mode: the server isn't ours to restart, so
@@ -3634,7 +3640,10 @@ def _ensure_backend(server: str | None) -> str:
 
         server = _resolve_server_url(server).api_base
         with (
-            runner_startup_progress(initial_message=STARTUP_PHASE_CONNECTING_REMOTE),
+            runner_startup_progress(
+                initial_message=STARTUP_PHASE_CONNECTING_REMOTE,
+                metric_harness=startup_harness,
+            ),
             concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
         ):
             auth_future = pool.submit(_ensure_databricks_server_auth, server)
