@@ -94,3 +94,29 @@ def test_bootstrap_factory_invalidates_fallback_credential(
     assert factory() == "expired-fallback"
     assert factory.invalidate()
     assert factory() == "renewed"
+
+
+def test_managed_mint_invalidate_discards_cached_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server-revoked minted JWT must be discarded and re-minted, not re-sent."""
+    minted: list[str] = []
+
+    def mint(*args: object, **kwargs: object) -> tuple[str, float]:
+        minted.append(f"minted-{len(minted) + 1}")
+        return minted[-1], 9e9
+
+    monkeypatch.setattr(_entry, "_mint_managed_owner_token", mint)
+    factory = _entry._ManagedMintTokenFactory(
+        "https://example.invalid/v1/runners/r/token",
+        "https://example.invalid",
+        "test-binding-token",
+    )
+    assert factory() == "minted-1"
+    assert factory() == "minted-1"  # cached until expiry
+    # The server rejected minted-1 (e.g. signing-key rotation): the resolved
+    # provider must drop its cache so the retry presents a fresh credential.
+    assert factory.invalidate() is True
+    assert factory() == "minted-2"
+    assert factory.invalidate() is True
+    assert factory.invalidate() is False  # nothing cached to discard

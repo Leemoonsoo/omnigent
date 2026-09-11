@@ -1014,6 +1014,22 @@ class _ManagedMintTokenFactory:
             self.declined = False
             self.declined_by_server_error = False
 
+    def invalidate(self) -> bool:
+        """Discard the cached JWT so the next call re-mints.
+
+        Called when the server rejects the minted credential mid-session
+        (e.g. a signing-key rotation revoked it); without this the cache
+        still looks valid locally and is re-sent on every retry.
+
+        :returns: ``True`` when a cached token was discarded.
+        """
+        with self._lock:
+            if self._cached_token is None:
+                return False
+            self._cached_token = None
+            self._cached_expires_at = 0.0
+            return True
+
     def _still_valid_cached_token(self, now: float) -> str | None:
         """Return the cached token if it hasn't expired outright.
 
