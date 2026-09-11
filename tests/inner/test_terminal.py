@@ -599,7 +599,7 @@ async def test_is_alive_preserves_running_state_when_probe_cannot_start(
         *cmd: str,
         stdout: object,
         stderr: object,
-    ) -> _ProcessWithStdout:
+    ) -> NoReturn:
         del cmd, stdout, stderr
         raise BlockingIOError(errno.EAGAIN, "resource temporarily unavailable")
 
