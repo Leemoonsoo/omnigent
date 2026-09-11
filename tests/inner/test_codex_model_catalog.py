@@ -119,7 +119,7 @@ def test_write_is_skipped_without_a_codex_binary(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
-def test_the_cli_is_probed_once_per_host_process(
+def test_the_cli_is_probed_once_per_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,6 +441,65 @@ def test_concurrent_speculative_failures_share_one_probe_before_authoritative_re
     assert speculative_results == [None] * 3
     assert all(result is not None for result in authoritative_results)
     assert codex_executor._MODEL_CATALOG_FAILURES == {}
+
+
+def test_late_speculative_call_cannot_starve_authoritative_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed prewarm failure is reserved for the next authoritative read."""
+    calls = 0
+
+    def _probe(codex_path: str, source_home: Path, *, timeout: float) -> dict[str, Any] | None:  # type: ignore[explicit-any]
+        nonlocal calls
+        del codex_path, source_home, timeout
+        calls += 1
+        return None if calls == 1 else _catalog()
+
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_CACHE", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_FAILURES", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_INFLIGHT", {})
+    monkeypatch.setattr(codex_executor, "_probe_codex_model_catalog", _probe)
+
+    assert (
+        codex_executor.read_codex_model_catalog("/bin/codex", tmp_path, cache_failures=False)
+        is None
+    )
+    assert (
+        codex_executor.read_codex_model_catalog("/bin/codex", tmp_path, cache_failures=False)
+        is None
+    )
+    assert calls == 1
+    assert codex_executor.read_codex_model_catalog("/bin/codex", tmp_path) is not None
+    assert calls == 2
+
+
+def test_unexpected_speculative_exception_allows_authoritative_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decode-like probe errors fail open and do not escape to waiting callers."""
+    calls = 0
+
+    def _probe(codex_path: str, source_home: Path, *, timeout: float) -> dict[str, Any]:  # type: ignore[explicit-any]
+        nonlocal calls
+        del codex_path, source_home, timeout
+        calls += 1
+        if calls == 1:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        return _catalog()
+
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_CACHE", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_FAILURES", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_INFLIGHT", {})
+    monkeypatch.setattr(codex_executor, "_probe_codex_model_catalog", _probe)
+
+    assert (
+        codex_executor.read_codex_model_catalog("/bin/codex", tmp_path, cache_failures=False)
+        is None
+    )
+    assert codex_executor.read_codex_model_catalog("/bin/codex", tmp_path) is not None
+    assert calls == 2
 
 
 def test_the_config_key_lands_above_the_first_table(tmp_path: Path) -> None:
