@@ -354,6 +354,95 @@ def test_concurrent_populates_share_one_probe(
     assert all(result is not None for result in results)
 
 
+def test_concurrent_speculative_failures_share_one_probe_before_authoritative_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed prewarm burst runs once, then one authoritative retry succeeds."""
+    import threading
+
+    calls: list[str] = []
+    entered = threading.Event()
+    release = threading.Event()
+    retry_entered = threading.Event()
+    retry_release = threading.Event()
+
+    def _probe(codex_path: str, source_home: Path, *, timeout: float) -> dict[str, Any] | None:  # type: ignore[explicit-any]
+        del source_home, timeout
+        calls.append(codex_path)
+        if len(calls) == 1:
+            entered.set()
+            release.wait(timeout=10)
+            return None
+        retry_entered.set()
+        retry_release.wait(timeout=10)
+        return _catalog()
+
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_CACHE", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_FAILURES", {})
+    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_INFLIGHT", {})
+    monkeypatch.setattr(codex_executor, "_probe_codex_model_catalog", _probe)
+
+    speculative_results: list[dict[str, Any] | None] = []  # type: ignore[explicit-any]
+    authoritative_results: list[dict[str, Any] | None] = []  # type: ignore[explicit-any]
+
+    def _speculative_read() -> None:
+        speculative_results.append(
+            codex_executor.read_codex_model_catalog("/bin/codex", tmp_path, cache_failures=False)
+        )
+
+    def _authoritative_read() -> None:
+        authoritative_results.append(
+            codex_executor.read_codex_model_catalog("/bin/codex", tmp_path)
+        )
+
+    first = threading.Thread(target=_speculative_read)
+    first.start()
+    assert entered.wait(timeout=10)
+
+    followers = [
+        threading.Thread(target=_speculative_read),
+        threading.Thread(target=_speculative_read),
+        threading.Thread(target=_authoritative_read),
+        threading.Thread(target=_authoritative_read),
+    ]
+    for follower in followers:
+        follower.start()
+
+    cache_key = codex_executor._model_catalog_cache_key("/bin/codex", tmp_path)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with codex_executor._MODEL_CATALOG_LOCK:
+            flight = codex_executor._MODEL_CATALOG_INFLIGHT[cache_key]
+            if flight.waiters == len(followers):
+                break
+        time.sleep(0.001)
+    else:
+        pytest.fail("concurrent speculative readers did not join the in-flight probe")
+
+    release.set()
+    assert retry_entered.wait(timeout=10)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with codex_executor._MODEL_CATALOG_LOCK:
+            retry_flight = codex_executor._MODEL_CATALOG_INFLIGHT[cache_key]
+            if retry_flight.waiters == 1:
+                break
+        time.sleep(0.001)
+    else:
+        pytest.fail("authoritative readers did not share their retry probe")
+    retry_release.set()
+
+    first.join(timeout=10)
+    for follower in followers:
+        follower.join(timeout=10)
+
+    assert calls == ["/bin/codex", "/bin/codex"]
+    assert speculative_results == [None] * 3
+    assert all(result is not None for result in authoritative_results)
+    assert codex_executor._MODEL_CATALOG_FAILURES == {}
+
+
 def test_the_config_key_lands_above_the_first_table(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(
