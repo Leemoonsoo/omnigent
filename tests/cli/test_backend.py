@@ -2293,11 +2293,23 @@ def test_ensure_backend_remote_passthrough(monkeypatch: pytest.MonkeyPatch) -> N
     assert calls == ["https://example.databricksapps.com"]
 
 
+@pytest.mark.parametrize(
+    ("command_name", "args", "expected_harness"),
+    [
+        ("codex", [], "codex"),
+        ("agy", [], "antigravity"),
+        ("run", ["--harness", "codex-native"], "codex"),
+    ],
+)
 def test_ensure_backend_labels_remote_connect_with_click_harness(
     monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    args: list[str],
+    expected_harness: str,
 ) -> None:
-    """The early remote-connect phase uses the active native harness label."""
+    """Remote startup initializes metrics and resolves canonical harness labels."""
     captured: list[tuple[str, str | None]] = []
+    initialized: list[str | None] = []
 
     @contextlib.contextmanager
     def _capture_progress(*, initial_message: str, metric_harness: str | None = None):
@@ -2308,15 +2320,57 @@ def test_ensure_backend_labels_remote_connect_with_click_harness(
     monkeypatch.setattr(cli, "_ensure_host_daemon", lambda _server: None)
     monkeypatch.setattr(cli, "_workspace_api_server_url", lambda server: server.rstrip("/"))
     monkeypatch.setattr(cli, "_ensure_databricks_server_auth", lambda _server: None)
+    monkeypatch.setattr(
+        "omnigent.runtime.telemetry.init",
+        lambda service_name=None: initialized.append(service_name),
+    )
+
+    @click.command(command_name)
+    @click.option("--harness")
+    def _command(harness: str | None) -> None:
+        _ensure_backend("https://example.databricksapps.com/")
+
+    result = CliRunner().invoke(_command, args)
+
+    assert result.exit_code == 0, result.output
+    assert captured == [("Connecting to the server…", expected_harness)]
+    assert initialized == ["omni-client"]
+
+
+def test_ensure_backend_labels_local_startup_with_click_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local startup keeps the canonical harness across backend phase changes."""
+    captured: list[tuple[str, str | None]] = []
+
+    @contextlib.contextmanager
+    def _capture_progress(*, initial_message: str, metric_harness: str | None = None):
+        captured.append((initial_message, metric_harness))
+
+        class _Progress:
+            @staticmethod
+            def update(message: str) -> None:
+                captured.append((message, metric_harness))
+
+        yield _Progress()
+
+    monkeypatch.setattr("omnigent._runner_startup.runner_startup_progress", _capture_progress)
+    monkeypatch.setattr("omnigent.runtime.telemetry.init", lambda service_name=None: None)
+    monkeypatch.setattr(cli, "_ensure_host_daemon", lambda _server: False)
+    monkeypatch.setattr(cli, "_discover_local_server_url", lambda: "http://127.0.0.1:8123")
+    monkeypatch.setattr(cli, "_update_daemon_resolved_server_url", lambda *_args: None)
 
     @click.command("codex")
     def _codex() -> None:
-        _ensure_backend("https://example.databricksapps.com/")
+        _ensure_backend(None)
 
     result = CliRunner().invoke(_codex)
 
     assert result.exit_code == 0, result.output
-    assert captured == [("Connecting to the server…", "codex")]
+    assert captured == [
+        ("Starting up…", "codex"),
+        ("Starting the local server…", "codex"),
+    ]
 
 
 def test_ensure_backend_local_discovers_url(monkeypatch: pytest.MonkeyPatch) -> None:
