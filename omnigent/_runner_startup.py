@@ -97,6 +97,10 @@ NATIVE_STARTUP_HARNESSES = frozenset(_NATIVE_HARNESS_PREPARATION_MESSAGES.values
 def _startup_metric_phase(message: str) -> str | None:
     """Map a rendered native-harness milestone to a bounded phase."""
     lowered = message.casefold()
+    if message == STARTUP_PHASE_STARTING:
+        return "start_backend"
+    if message == STARTUP_PHASE_LOCAL_SERVER:
+        return "start_local_server"
     if message == STARTUP_PHASE_CONNECTING_REMOTE:
         return "connect_server"
     if message in _NATIVE_HARNESS_PREPARATION_MESSAGES:
@@ -138,16 +142,24 @@ class _StartupPhaseTimer:
     started_at: float
 
     def transition(self, phase: str | None) -> None:
-        transitioned_at = time.monotonic()
-        self._record("success", ended_at=transitioned_at)
-        if phase is not None:
-            self.phase = phase
-            self.started_at = transitioned_at
+        with contextlib.suppress(Exception):
+            transitioned_at = time.monotonic()
+            self._record("success", ended_at=transitioned_at)
+            if phase is not None:
+                self.phase = phase
+                self.started_at = transitioned_at
+            return
+        # Telemetry must never interrupt progress rendering or startup.
+        self.phase = ""
 
     def finish(self, outcome: str) -> None:
         if not self.phase:
             return
-        self._record(outcome, ended_at=time.monotonic())
+        with contextlib.suppress(Exception):
+            self._record(outcome, ended_at=time.monotonic())
+            return
+        # Best effort: startup remains authoritative if instrumentation fails.
+        self.phase = ""
 
     def _record(self, outcome: str, *, ended_at: float) -> None:
         if not self.phase:
