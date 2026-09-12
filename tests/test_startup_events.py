@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -167,7 +168,6 @@ def test_structured_rows_reach_existing_debug_sink(monkeypatch: pytest.MonkeyPat
             logger.addHandler(handler)
 
     monkeypatch.setattr(debug_logging, "attach_debug_log_sink", attach)
-    monkeypatch.setattr(startup._logger, "level", logging.INFO)
     try:
         with startup.codex_startup_attempt():
             startup.record_startup_event("session_resolved", session_id="conv_synthetic")
@@ -180,6 +180,47 @@ def test_structured_rows_reach_existing_debug_sink(monkeypatch: pytest.MonkeyPat
     assert rows[2]["attributes"]["event"] == "terminal_available"
     assert rows[2]["session_id"] == "conv_synthetic"
     assert rows[2]["source"] == "cli"
+
+
+def test_warning_cli_level_does_not_drop_uploaded_events(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent import cli_diagnostics
+
+    monkeypatch.setenv("OMNIGENT_LOG_LEVEL", "WARNING")
+    monkeypatch.setattr(cli_diagnostics, "_log_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli_diagnostics, "_current", None)
+    loggers = [logging.getLogger(name) for name in ("omnigent", "omnigent_ui_sdk")]
+    for logger in loggers:
+        monkeypatch.setattr(logger, "handlers", [])
+        monkeypatch.setattr(logger, "level", logger.level)
+        monkeypatch.setattr(logger, "propagate", logger.propagate)
+    monkeypatch.setattr(startup._logger, "level", logging.NOTSET)
+    uploaded = []
+    handler = logging.Handler()
+    handler.emit = lambda record: uploaded.append(debug_logging.record_to_row(record, "cli"))
+
+    def attach(loggers: list[logging.Logger], **kwargs: object) -> None:
+        for logger in loggers:
+            logger.addHandler(handler)
+
+    monkeypatch.setattr(debug_logging, "attach_debug_log_sink", attach)
+    cli_log = cli_diagnostics.setup_cli_logging(["codex"])
+    try:
+        assert startup._logger.getEffectiveLevel() == logging.WARNING
+        with startup.codex_startup_attempt():
+            startup.record_startup_event("terminal_available", session_id="conv_synthetic")
+        assert [row["attributes"]["event"] for row in uploaded] == [
+            "launch_started",
+            "terminal_available",
+            "launch_incomplete",
+        ]
+        assert "client_startup" not in cli_log.path.read_text()
+    finally:
+        startup._logger.removeHandler(handler)
+        for logger in loggers:
+            for local_handler in logger.handlers:
+                local_handler.close()
 
 
 @pytest.mark.asyncio

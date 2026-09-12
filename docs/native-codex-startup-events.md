@@ -3,7 +3,9 @@
 The current runner-owned, direct-tmux `omnigent codex` launch path emits `event_name=client_startup` records through the existing
 optional debug-log sink (`source=cli`) and writes `client_startup {JSON}` lines
 in its normal CLI diagnostics log. The startup integration attaches the uploader to its content-free logger;
-the CLI's general diagnostics stay local.
+the CLI's general diagnostics stay local. Startup upload records remain enabled
+when the CLI verbosity is WARNING or ERROR; local file/stderr handlers still
+respect their configured level.
 
 Each attempt has a fresh UUID `attempt_id`, even when resuming the same session.
 The start record can have no session ID. `session_resolved` and later records
