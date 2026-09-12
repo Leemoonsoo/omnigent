@@ -172,6 +172,9 @@ def codex_startup_attempt(
     """Track one launch through attachment, retaining unsuccessful attempts."""
     attempt = _Attempt(_entry.get() or _capture_entry(), launch_kind)
     token = _attempt.set(attempt)
+    # Fleet telemetry must survive a quieter CLI. Local file/stderr handlers
+    # still apply their own configured level.
+    _logger.setLevel(logging.INFO)
     # The general CLI diagnostics logger is local-only. Attach the existing
     # optional uploader to this content-free logger, before the first event.
     with contextlib.suppress(Exception):
