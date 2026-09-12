@@ -103,9 +103,3 @@ instructions:
   not duplicate policy across adapters or add lifecycle metadata to `AgentSpec`.
 - If framework instructions grow beyond a small ordered list, introduce a
   structured `FrameworkInstructions` value at the prompt-composition boundary.
-
-## Harness process boundaries
-
-The runner's process manager launches harness adapters in child processes.
-Process-local caches used by a harness must be populated inside that harness
-process; warming the same module globals in the runner does not share state.

@@ -1890,140 +1890,6 @@ async def test_still_untrusted_hints_old_codex_when_hash_missing() -> None:
 # --- Codex version gate + fail-open startup ---------------------------
 
 
-async def test_start_overlaps_catalog_prewarm_with_version_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """App-server startup begins the catalog probe before version discovery ends."""
-    import threading
-
-    from omnigent.harnesses.codex_native import app_server as app_server_mod
-    from omnigent.inner import codex_executor
-
-    real_codex_home = tmp_path / "real-codex-home"
-    real_codex_home.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.setenv("CODEX_HOME", str(real_codex_home))
-    _disable_codex_startup_rpc(monkeypatch)
-
-    probe_started = threading.Event()
-    release_probe = threading.Event()
-    calls: list[tuple[str, Path, float]] = []
-
-    def _probe(
-        codex_path: str,
-        source_home: Path,
-        *,
-        timeout: float,
-    ) -> dict[str, object]:
-        calls.append((codex_path, source_home, timeout))
-        probe_started.set()
-        assert release_probe.wait(timeout=10)
-        return {"models": [{"slug": "gpt-test"}]}
-
-    async def _version_after_probe_started(_codex_path: str) -> tuple[int, int, int]:
-        assert await asyncio.to_thread(probe_started.wait, 10)
-        release_probe.set()
-        return (0, 136, 0)
-
-    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_CACHE", {})
-    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_FAILURES", {})
-    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_INFLIGHT", {})
-    monkeypatch.setattr(codex_executor, "_probe_codex_model_catalog", _probe)
-    monkeypatch.setattr(app_server_mod, "_codex_cli_version", _version_after_probe_started)
-
-    server = _test_app_server(
-        tmp_path,
-        tmp_path / "codex-home",
-        tmp_path / "bridge",
-        workspace,
-    )
-    server.trust_project = True
-    server.pinned_model = "gpt-test"
-    await server.start()
-    await server.close()
-
-    assert calls == [
-        (
-            sys.executable,
-            real_codex_home,
-            app_server_mod._MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS,
-        )
-    ]
-
-
-async def test_prewarm_codex_model_catalog_failure_does_not_suppress_startup_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A failed in-process prewarm leaves one authoritative startup retry."""
-    import threading
-
-    from omnigent.harnesses.codex_native import app_server as app_server_mod
-    from omnigent.inner import codex_executor
-
-    real_codex_home = tmp_path / "real-codex-home"
-    real_codex_home.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.setenv("CODEX_HOME", str(real_codex_home))
-    _disable_codex_startup_rpc(monkeypatch)
-
-    catalog = {"models": [{"slug": "gpt-test"}]}
-    results: list[dict[str, object] | None] = [None, catalog]
-    calls = 0
-    speculative_finished = threading.Event()
-
-    def _probe(codex_path: str, source_home: Path, *, timeout: float) -> object:
-        nonlocal calls
-        del codex_path, source_home, timeout
-        result = results[calls]
-        calls += 1
-        if calls == 1:
-            speculative_finished.set()
-        return result
-
-    async def _version_after_speculative_failure(
-        _codex_path: str,
-    ) -> tuple[int, int, int]:
-        assert await asyncio.to_thread(speculative_finished.wait, 10)
-        return (0, 136, 0)
-
-    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_CACHE", {})
-    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_FAILURES", {})
-    monkeypatch.setattr(codex_executor, "_MODEL_CATALOG_INFLIGHT", {})
-    monkeypatch.setattr(codex_executor, "_probe_codex_model_catalog", _probe)
-    monkeypatch.setattr(app_server_mod, "_codex_cli_version", _version_after_speculative_failure)
-
-    server = _test_app_server(
-        tmp_path,
-        tmp_path / "codex-home",
-        tmp_path / "bridge",
-        workspace,
-    )
-    server.trust_project = True
-    server.pinned_model = "gpt-test"
-    await server.start()
-    await server.close()
-
-    assert calls == 2
-
-
-async def test_prewarm_codex_model_catalog_leaves_failure_to_startup(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unexpected speculative failure does not fail session initialization."""
-    from omnigent.harnesses.codex_native import app_server as app_server_mod
-
-    def _raise(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-        raise RuntimeError("probe failed")
-
-    monkeypatch.setattr(app_server_mod, "read_codex_model_catalog", _raise)
-
-    await app_server_mod._prewarm_codex_model_catalog("/bin/codex", tmp_path)
-
-
 def _set_codex_version(
     monkeypatch: pytest.MonkeyPatch, version: tuple[int, int, int] | None
 ) -> None:
@@ -2637,20 +2503,146 @@ async def test_policy_hook_command_runs_python_isolated() -> None:
     assert argv[1:3] == ["-I", "-m"]
 
 
-def test_codex_model_upgrade_target_reads_catalog_migration() -> None:
-    """The runner records the exact old-to-new mapping Codex advertises."""
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"upgrade": "next-model"}, "next-model"),
+        ({"upgradeInfo": {"model": "next-model"}}, "next-model"),
+        ({"upgrade": None}, None),
+        ({"upgrade": "old-model"}, None),
+        ({"upgrade": " "}, None),
+        ({"upgradeInfo": []}, None),
+    ],
+)
+def test_codex_model_upgrade_target_reads_app_server_migration(
+    metadata: dict[str, Any], expected: str | None
+) -> None:
     from omnigent.harnesses.codex_native.app_server import _codex_model_upgrade_target
 
-    catalog = {
-        "models": [
-            {"slug": "gpt-5.4", "upgrade": {"model": "gpt-5.6-terra"}},
-            {"slug": "current", "upgrade": None},
-        ]
-    }
+    rows = [{"id": "picker-id", "model": "old-model", **metadata}]
+    assert _codex_model_upgrade_target(rows, "old-model") == expected
+    assert _codex_model_upgrade_target(rows, "missing") is None
 
-    assert _codex_model_upgrade_target(catalog, "gpt-5.4") == "gpt-5.6-terra"
-    assert _codex_model_upgrade_target(catalog, "current") is None
-    assert _codex_model_upgrade_target(catalog, "missing") is None
+
+@pytest.mark.parametrize("websocket", [False, True])
+async def test_readiness_acknowledges_paginated_migration_on_same_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, websocket: bool
+) -> None:
+    from omnigent.harnesses.codex_native import app_server as mod
+
+    server = _test_app_server(tmp_path, tmp_path / "private", tmp_path / "bridge", tmp_path)
+    server.codex_home.mkdir()
+    config_path = server.codex_home / "config.toml"
+    config_path.write_text('model = "old-model"\n[notice]\nhide_rate_limit_model_nudge = true\n')
+    server.trust_project = True
+    server.pinned_model = "old-model"
+    if websocket:
+        server.listen_url = "ws://127.0.0.1:12345"
+    client = AsyncMock(spec=CodexAppServerClient)
+    client.request.side_effect = [
+        {"result": {"data": [{"model": "current-model"}], "nextCursor": "page-two"}},
+        {"result": {"data": [{"model": "old-model", "upgrade": "next-model", "hidden": True}]}},
+    ]
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(mod, "CodexAppServerClient", factory)
+
+    await server._wait_until_ready()
+
+    assert factory.call_count == 1
+    client.connect.assert_awaited_once()
+    client.close.assert_awaited_once()
+    assert client.request.await_args_list == [
+        (("model/list", {"includeHidden": True}),),
+        (("model/list", {"includeHidden": True, "cursor": "page-two"}),),
+    ]
+    config = tomllib.loads(config_path.read_text())
+    assert config["model"] == "old-model"
+    assert config["notice"]["hide_rate_limit_model_nudge"] is True
+    assert config["notice"]["model_migrations"] == {"old-model": "next-model"}
+
+
+@pytest.mark.parametrize("trusted,pinned", [(False, "old-model"), (True, None)])
+async def test_readiness_skips_catalog_without_trusted_pinned_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trusted: bool, pinned: str | None
+) -> None:
+    from omnigent.harnesses.codex_native import app_server as mod
+
+    server = _test_app_server(tmp_path, tmp_path / "private", tmp_path / "bridge", tmp_path)
+    server.trust_project = trusted
+    server.pinned_model = pinned
+    client = AsyncMock(spec=CodexAppServerClient)
+    monkeypatch.setattr(mod, "CodexAppServerClient", Mock(return_value=client))
+
+    await server._wait_until_ready()
+
+    client.request.assert_not_awaited()
+    client.close.assert_awaited_once()
+    assert not (server.codex_home / "config.toml").exists()
+
+
+@pytest.mark.parametrize("failure", ["unsupported", "malformed", "timeout", "cancelled"])
+async def test_migration_failure_and_cancellation_close_readiness_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from omnigent.harnesses.codex_native import app_server as mod
+
+    server = _test_app_server(tmp_path, tmp_path / "private", tmp_path / "bridge", tmp_path)
+    server.trust_project = True
+    server.pinned_model = "old-model"
+    client = AsyncMock(spec=CodexAppServerClient)
+    lookup_started = asyncio.Event()
+    lookup_cancelled = asyncio.Event()
+
+    async def lookup(*args: object, **kwargs: object) -> object:
+        if failure == "unsupported":
+            raise mod.CodexAppServerResponseError({"code": -32601, "message": "unsupported"})
+        if failure == "malformed":
+            return {"result": {"data": "invalid"}}
+        lookup_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            lookup_cancelled.set()
+
+    client.request.side_effect = lookup
+    monkeypatch.setattr(mod, "CodexAppServerClient", Mock(return_value=client))
+    if failure == "timeout":
+        monkeypatch.setattr(mod, "_MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS", 0.01)
+    task = asyncio.create_task(server._wait_until_ready())
+    if failure == "cancelled":
+        await asyncio.wait_for(lookup_started.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        await asyncio.wait_for(task, 2)
+    if failure in {"timeout", "cancelled"}:
+        assert lookup_cancelled.is_set()
+    client.connect.assert_awaited_once()
+    client.close.assert_awaited_once()
+    assert not (server.codex_home / "config.toml").exists()
+
+
+async def test_native_start_does_not_launch_a_separate_catalog_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.inner import codex_executor
+
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(source))
+    probe = Mock(side_effect=AssertionError("unexpected catalog subprocess"))
+    monkeypatch.setattr(codex_executor, "subprocess", Mock(run=probe))
+    _disable_codex_startup_rpc(monkeypatch)
+    _set_codex_version(monkeypatch, (0, 136, 0))
+    server = _test_app_server(tmp_path, tmp_path / "private", tmp_path / "bridge", tmp_path)
+    server.trust_project = True
+    server.pinned_model = "old-model"
+    try:
+        await server.start()
+    finally:
+        await server.close()
+    probe.assert_not_called()
 
 
 def test_acknowledge_codex_model_migration_updates_private_config(tmp_path: Path) -> None:
