@@ -68,6 +68,9 @@ def _capture_entry() -> _Entry:
             offset = data["elapsed_ms"]
             started = data["started_at_unix_ms"]
             handoff = data["handoff_monotonic_ns"]
+            boundary = data.get("start_boundary", "wrapper_entry")
+            if boundary not in ("wrapper_entry", "python_entry", "launcher_entry"):
+                raise ValueError("invalid start boundary")
             if any(type(v) not in (int, float) or not math.isfinite(v) for v in (offset, started)):
                 raise ValueError("invalid timestamp")
             if offset < 0 or started <= 0 or type(handoff) is not int or not 0 < handoff <= now:
@@ -77,7 +80,7 @@ def _capture_entry() -> _Entry:
                 started,
                 attempt_id,
                 offset + (now - handoff) / 1_000_000,
-                "wrapper_entry",
+                boundary,
             )
         except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
             pass

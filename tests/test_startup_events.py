@@ -44,11 +44,14 @@ def context(**changes: object) -> str:
     )
 
 
+@pytest.mark.parametrize("boundary", [None, "wrapper_entry", "python_entry", "launcher_entry"])
 def test_exec_handoff_includes_wrapper_and_import_time(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    boundary: str | None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO, logger="omnigent.startup")
-    monkeypatch.setenv(startup.STARTUP_CONTEXT_ENV, context())
+    monkeypatch.setenv(
+        startup.STARTUP_CONTEXT_ENV, context(**({"start_boundary": boundary} if boundary else {}))
+    )
 
     @startup.capture_cli_entry
     def main() -> None:
@@ -64,7 +67,7 @@ def test_exec_handoff_includes_wrapper_and_import_time(
     events = records(caplog)
     assert [e["elapsed_ms"] for e in events] == [3500, 3500, 4500, 4500]
     assert {e["attempt_id"] for e in events} == {"00000000-0000-4000-8000-000000000001"}
-    assert {e["start_boundary"] for e in events} == {"wrapper_entry"}
+    assert {e["start_boundary"] for e in events} == {boundary or "wrapper_entry"}
     assert {e["started_at_unix_ms"] for e in events} == {16000}
     assert [r.session_id for r in caplog.records] == [
         None,
@@ -92,6 +95,8 @@ def test_exec_handoff_includes_wrapper_and_import_time(
         pytest.param(context(handoff_monotonic_ns=True), id="boolean-handoff"),
         pytest.param(context(attempt_id="not-a-uuid"), id="invalid-attempt-id"),
         pytest.param(context(started_at_unix_ms=0), id="invalid-start-time"),
+        pytest.param(context(start_boundary="unknown"), id="unknown-boundary"),
+        pytest.param(context(start_boundary=[]), id="invalid-boundary-type"),
         pytest.param("x" * 2049, id="oversized-context"),
     ],
 )
