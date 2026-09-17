@@ -27,6 +27,7 @@ import time
 from collections.abc import AsyncIterator, Callable, Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+from urllib.parse import SplitResult, urlsplit
 
 import httpx
 
@@ -783,6 +784,20 @@ def _resolve_databricks_auth(
     )
 
 
+def _normalized_databricks_host(host: str) -> SplitResult:
+    """Normalize workspace URL spelling while preserving destination components."""
+    host = host.strip()
+    parsed = urlsplit(host if "://" in host else f"https://{host}")
+    hostname = parsed.hostname or ""
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    port = parsed.port
+    if port is not None and port != {"http": 80, "https": 443}.get(parsed.scheme):
+        hostname = f"{hostname}:{port}"
+    userinfo, separator, _authority = parsed.netloc.rpartition("@")
+    return parsed._replace(netloc=f"{userinfo}{separator}{hostname}", path=parsed.path or "/")
+
+
 class _DeferredHostAuthConfig:
     """Defer host-specific credential selection without losing the winning profile."""
 
@@ -799,7 +814,9 @@ class _DeferredHostAuthConfig:
         with self._lock:
             if self._auth is None:
                 auth, resolved_host = _resolve_databricks_auth_for_host(self._host)
-                if resolved_host.rstrip("/") != self._host.rstrip("/"):
+                if _normalized_databricks_host(resolved_host) != _normalized_databricks_host(
+                    self._host
+                ):
                     raise DatabricksAuthError(
                         "Databricks workspace changed before authentication; "
                         "resolve credentials again."
@@ -827,7 +844,9 @@ def _lazy_sdk_config(**kwargs: str | None) -> Any:  # type: ignore[explicit-any]
         with lock:
             if legacy_config is None:
                 candidate = _sdk_config(**kwargs)
-                if candidate.host != metadata_config.host:
+                if _normalized_databricks_host(candidate.host) != _normalized_databricks_host(
+                    metadata_config.host
+                ):
                     raise DatabricksAuthError(
                         "Databricks workspace changed before authentication; "
                         "resolve credentials again."
