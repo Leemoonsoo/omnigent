@@ -268,6 +268,16 @@ def test_native_claude_recreate_survives_removed_launch_cwd(tmp_path: Path) -> N
     launch_cwd.mkdir()
     runner_home = tmp_path / "home"
     runner_home.mkdir()
+    server_home = tmp_path / "server-home"
+    server_home.mkdir()
+    runtime_tmp = tmp_path / "tmp"
+    runtime_tmp.mkdir()
+    harness_tmp = tmp_path / "harness"
+    harness_tmp.mkdir()
+    runtime_env = {
+        "TMPDIR": str(runtime_tmp),
+        "OMNIGENT_HARNESS_TMP_PARENT": str(harness_tmp),
+    }
 
     # Stub Claude CLI on PATH -- defense so the test never blocks on a real
     # (unauthenticated) Claude TUI; the cwd read fails before claude launches.
@@ -300,7 +310,13 @@ def test_native_claude_recreate_survives_removed_launch_cwd(tmp_path: Path) -> N
                 "--artifact-location",
                 str(tmp_path / "artifacts"),
             ],
-            env=_localhost_env({"OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token}),
+            env=_localhost_env(
+                {
+                    **runtime_env,
+                    "HOME": str(server_home),
+                    "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token,
+                }
+            ),
             stdout=server_log,
             stderr=subprocess.STDOUT,
         )
@@ -313,6 +329,7 @@ def test_native_claude_recreate_survives_removed_launch_cwd(tmp_path: Path) -> N
             cwd=str(launch_cwd),
             env=_localhost_env(
                 {
+                    **runtime_env,
                     "OMNIGENT_RUNNER_ID": runner_id,
                     "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN": binding_token,
                     "OMNIGENT_RUNNER_PARENT_PID": str(os.getpid()),

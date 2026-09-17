@@ -953,6 +953,10 @@ def create_os_environment(spec: OSEnvSpec | None) -> OSEnvironment | None:
         if not workspace:
             raise
         cwd = (Path(workspace) / (spec.cwd or "")).resolve(strict=False)
+        if not cwd.is_dir():
+            raise FileNotFoundError(
+                "Recovery working directory is missing or is not a directory."
+            ) from None
     fork_dir: Path | None = None
     if spec.fork:
         fork_dir = Path(tempfile.mkdtemp(prefix="omnigent-fork-"))

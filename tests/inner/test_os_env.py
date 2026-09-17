@@ -482,3 +482,31 @@ def test_create_os_environment_removed_cwd_without_workspace_raises(
         create_os_environment(
             OSEnvSpec(type="caller_process", cwd=None, sandbox=OSEnvSandboxSpec(type="none"))
         )
+
+
+@pytest.mark.parametrize(
+    ("workspace_kind", "spec_cwd"),
+    [("missing", None), ("file", "."), ("directory", "missing-child")],
+)
+def test_create_os_environment_rejects_missing_recovery_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_kind: str,
+    spec_cwd: str | None,
+) -> None:
+    """Reject invalid recovery directories before constructing an environment."""
+    workspace = tmp_path / "workspace"
+    if workspace_kind == "file":
+        workspace.write_text("not a directory")
+    elif workspace_kind == "directory":
+        workspace.mkdir()
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
+
+    def missing_cwd() -> str:
+        raise FileNotFoundError("process cwd was removed")
+
+    monkeypatch.setattr(os, "getcwd", missing_cwd)
+    with pytest.raises(FileNotFoundError, match="Recovery working directory"):
+        create_os_environment(
+            OSEnvSpec(type="caller_process", cwd=spec_cwd, sandbox=OSEnvSandboxSpec(type="none"))
+        )
