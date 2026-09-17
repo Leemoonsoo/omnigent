@@ -815,7 +815,9 @@ class _DeferredHostAuthConfig:
     def authenticate(self) -> dict[str, str]:
         with self._lock:
             if self._auth is None:
-                auth, resolved_host = _resolve_databricks_auth_for_host(self._host)
+                auth, resolved_host = _resolve_databricks_auth_for_host(
+                    self._host, strict_host_match=True
+                )
                 if _normalized_databricks_host(resolved_host) != _normalized_databricks_host(
                     self._host
                 ):
@@ -885,7 +887,9 @@ def _sdk_config(**kwargs: str | None) -> Any:  # type: ignore[explicit-any]  # S
     return Config(**kwargs)  # type: ignore[arg-type]
 
 
-def _resolve_databricks_auth_for_host(host: str) -> tuple[_DatabricksBearerAuth, str]:
+def _resolve_databricks_auth_for_host(
+    host: str, *, strict_host_match: bool = False
+) -> tuple[_DatabricksBearerAuth, str]:
     """Resolve per-request auth for a specific workspace host.
 
     Prefers a ``~/.databrickscfg`` profile pinned to *host*:
@@ -907,6 +911,8 @@ def _resolve_databricks_auth_for_host(host: str) -> tuple[_DatabricksBearerAuth,
 
     :param host: Workspace host, e.g.
         ``"https://example.databricks.com"``.
+    :param strict_host_match: Restrict candidate profiles to the same canonical
+        destination required by deferred authentication.
     :returns: ``(auth, host)`` — an httpx Auth and the workspace URL.
     :raises DatabricksAuthError: When no credential source resolves
         for the host.
@@ -917,7 +923,9 @@ def _resolve_databricks_auth_for_host(host: str) -> tuple[_DatabricksBearerAuth,
     )
     # One parse of ~/.databrickscfg yields both the host-matching profiles and
     # which of them are service principals; ordering then works off those sets.
-    matches, sp_sections = _databrickscfg_host_matches_and_sp_sections(host)
+    matches, sp_sections = _databrickscfg_host_matches_and_sp_sections(
+        host, strict_host_match=strict_host_match
+    )
     # User profiles that matched the host but failed to authenticate (e.g. an
     # expired OAuth grant). Tracked so we can warn if a lower-priority service
     # principal is then selected — otherwise the host would silently register
@@ -1035,7 +1043,9 @@ def _section_is_service_principal(options: configparser.SectionProxy) -> bool:
     return auth_type in machine_auth_types or has_client_secret_pair
 
 
-def _databrickscfg_host_matches_and_sp_sections(host: str) -> tuple[list[str], set[str]]:
+def _databrickscfg_host_matches_and_sp_sections(
+    host: str, *, strict_host_match: bool = False
+) -> tuple[list[str], set[str]]:
     """Host-matching profiles and which of them are service principals.
 
     Parses ``~/.databrickscfg`` once and derives both, so the resolver
@@ -1046,6 +1056,8 @@ def _databrickscfg_host_matches_and_sp_sections(host: str) -> tuple[list[str], s
 
     :param host: Workspace host to match, e.g.
         ``"https://example.databricks.com"``.
+    :param strict_host_match: Preserve destination-significant URL components
+        instead of using the legacy scheme-insensitive comparison.
     :returns: ``(matches, sp_sections)`` — matching section names in file
         order (``"DEFAULT"`` included when it carries a matching host) and
         the subset of *all* section names that are service principals.
@@ -1059,7 +1071,15 @@ def _databrickscfg_host_matches_and_sp_sections(host: str) -> tuple[list[str], s
     config = _read_databrickscfg_no_inheritance()
     if config is None:
         return [], set()
-    wanted = _norm(host)
+    wanted = _normalized_databricks_host(host) if strict_host_match else _norm(host)
+
+    def _matches_host(value: str) -> bool:
+        try:
+            candidate = _normalized_databricks_host(value) if strict_host_match else _norm(value)
+        except ValueError:
+            return False
+        return candidate == wanted
+
     # With the sentinel default_section, the file's [DEFAULT] is a plain
     # section named "DEFAULT"; its host is what named sections inherit.
     default_host = config["DEFAULT"].get("host", "") if config.has_section("DEFAULT") else ""
@@ -1078,9 +1098,9 @@ def _databrickscfg_host_matches_and_sp_sections(host: str) -> tuple[list[str], s
         # overrides inheritance to no host, matching ConfigParser semantics —
         # so an empty host does not fall back and does not match.
         section_host = options.get("host", default_host)
-        if _norm(section_host) == wanted:
+        if _matches_host(section_host):
             matches.append(section)
-    if default_host and _norm(default_host) == wanted:
+    if default_host and _matches_host(default_host):
         matches.append("DEFAULT")
     return matches, sp_sections
 

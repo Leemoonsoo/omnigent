@@ -1558,6 +1558,78 @@ def test_deferred_host_reports_only_the_selected_profile(monkeypatch, matching_p
     factory.assert_called_once()
 
 
+@pytest.mark.parametrize("defer_auth", [False, True])
+def test_host_selection_skips_incompatible_scheme_only_when_deferred(
+    monkeypatch, pat_only_cfg, defer_auth
+):
+    from databricks.sdk.credentials_provider import DefaultCredentials
+
+    import omnigent.inner.databricks_executor as db_exec
+
+    pat_only_cfg.write_text(
+        "[incompatible]\nhost=http://example.cloud.databricks.com\n"
+        "[compatible]\nhost=https://example.cloud.databricks.com\n"
+    )
+    monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "incompatible")
+    initialized_profiles = []
+
+    def initialize_credentials(_strategy, config):
+        initialized_profiles.append(config.profile)
+        return lambda: {"Authorization": f"Bearer {config.profile}-token"}
+
+    monkeypatch.setattr(DefaultCredentials, "__call__", initialize_credentials)
+    auth, _host = db_exec._resolve_databricks_auth(
+        host="https://example.cloud.databricks.com", defer_auth=defer_auth
+    )
+
+    if defer_auth:
+        assert initialized_profiles == []
+    expected_profile = "compatible" if defer_auth else "incompatible"
+    assert auth.current_token() == f"{expected_profile}-token"
+    assert auth.current_token() == f"{expected_profile}-token"
+    assert auth.profile_name == expected_profile
+    assert initialized_profiles == [expected_profile]
+
+
+def test_deferred_host_selects_default_port_equivalent_profile(monkeypatch, pat_only_cfg):
+    from databricks.sdk.credentials_provider import DefaultCredentials
+
+    import omnigent.inner.databricks_executor as db_exec
+
+    pat_only_cfg.write_text("[compatible]\nhost=https://example.cloud.databricks.com:443/\n")
+    monkeypatch.setattr(
+        DefaultCredentials,
+        "__call__",
+        lambda _strategy, _config: lambda: {"Authorization": "Bearer synthetic-token"},
+    )
+    auth, _host = db_exec._resolve_databricks_auth(
+        host="https://example.cloud.databricks.com", defer_auth=True
+    )
+
+    assert auth.current_token() == "synthetic-token"
+    assert auth.profile_name == "compatible"
+
+
+def test_strict_host_selection_preserves_default_inheritance_and_destination(pat_only_cfg):
+    import omnigent.inner.databricks_executor as db_exec
+
+    pat_only_cfg.write_text(
+        "[DEFAULT]\nhost=https://example.cloud.databricks.com/Workspace\n"
+        "[inherited]\n"
+        "[empty]\nhost=\n"
+        "[different-scheme]\nhost=http://example.cloud.databricks.com/Workspace\n"
+        "[different-path]\nhost=https://example.cloud.databricks.com/workspace\n"
+        "[malformed-port]\nhost=https://example.cloud.databricks.com:invalid/Workspace\n"
+        "[compatible]\nhost=https://Example.cloud.databricks.com:443/Workspace\n"
+    )
+
+    matches, _sp_sections = db_exec._databrickscfg_host_matches_and_sp_sections(
+        "https://example.cloud.databricks.com/Workspace", strict_host_match=True
+    )
+
+    assert matches == ["inherited", "compatible", "DEFAULT"]
+
+
 def test_deferred_host_retries_after_credential_selection_fails(monkeypatch):
     import omnigent.inner.databricks_executor as db_exec
 
@@ -1566,7 +1638,9 @@ def test_deferred_host_retries_after_credential_selection_fails(monkeypatch):
         host=host, authenticate=Mock(return_value={"Authorization": "Bearer recovered"})
     )
     monkeypatch.setattr(
-        db_exec, "_databrickscfg_host_matches_and_sp_sections", lambda _host: ([], set())
+        db_exec,
+        "_databrickscfg_host_matches_and_sp_sections",
+        lambda _host, **_kwargs: ([], set()),
     )
     factory = Mock(side_effect=[ValueError("unavailable"), candidate])
     monkeypatch.setattr(db_exec, "_sdk_config", factory)
@@ -1622,7 +1696,9 @@ def test_deferred_host_rejects_destination_mismatch(monkeypatch, changed_host):
         authenticate=Mock(return_value={"Authorization": "Bearer synthetic-token"}),
     )
     monkeypatch.setattr(
-        db_exec, "_databrickscfg_host_matches_and_sp_sections", lambda _host: (["selected"], set())
+        db_exec,
+        "_databrickscfg_host_matches_and_sp_sections",
+        lambda _host, **_kwargs: (["selected"], set()),
     )
     monkeypatch.setattr(db_exec, "_sdk_config", lambda **_kwargs: candidate)
     auth, _host = db_exec._resolve_databricks_auth(
