@@ -8043,7 +8043,9 @@ async def _auto_create_repl_terminal(
     from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
 
     started_at = time.monotonic()
-    workspace = os.environ.get("OMNIGENT_RUNNER_WORKSPACE", str(Path.cwd()))
+    # Lazy cwd fallback: a surviving runner may have lost its launch cwd, and
+    # an eager default would raise FileNotFoundError even with the env var set.
+    workspace = os.environ.get("OMNIGENT_RUNNER_WORKSPACE") or str(Path.cwd())
     server_url = os.environ.get("RUNNER_SERVER_URL", "http://localhost:6767")
     # Inherit the agent's os_env so its sandbox (e.g. ``type: none``) is honoured;
     # without sandbox= here and parent_os_env below, launch_terminal falls back to
