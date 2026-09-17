@@ -1542,9 +1542,9 @@ def test_deferred_host_reports_only_the_selected_profile(monkeypatch, matching_p
         profile="unrelated-ambient",
         authenticate=Mock(return_value={"Authorization": "Bearer selected-token"}),
     )
-    profiles = Mock(return_value=matching_profiles)
+    profiles = Mock(return_value=(matching_profiles, set()))
     factory = Mock(return_value=candidate)
-    monkeypatch.setattr(db_exec, "_databrickscfg_profiles_for_host", profiles)
+    monkeypatch.setattr(db_exec, "_databrickscfg_host_matches_and_sp_sections", profiles)
     monkeypatch.setattr(db_exec, "_sdk_config", factory)
 
     auth, resolved_host = db_exec._resolve_databricks_auth(host=host, defer_auth=True)
@@ -1565,7 +1565,9 @@ def test_deferred_host_retries_after_credential_selection_fails(monkeypatch):
     candidate = SimpleNamespace(
         host=host, authenticate=Mock(return_value={"Authorization": "Bearer recovered"})
     )
-    monkeypatch.setattr(db_exec, "_databrickscfg_profiles_for_host", lambda _host: [])
+    monkeypatch.setattr(
+        db_exec, "_databrickscfg_host_matches_and_sp_sections", lambda _host: ([], set())
+    )
     factory = Mock(side_effect=[ValueError("unavailable"), candidate])
     monkeypatch.setattr(db_exec, "_sdk_config", factory)
     auth, _host = db_exec._resolve_databricks_auth(host=host, defer_auth=True)
@@ -1582,10 +1584,10 @@ def test_deferred_host_still_tries_later_matching_profiles(monkeypatch):
     candidate = SimpleNamespace(
         host=host, authenticate=Mock(return_value={"Authorization": "Bearer second-profile"})
     )
-    profiles = Mock(return_value=["broken", "working"])
+    profiles = Mock(return_value=(["broken", "working"], set()))
     factory = Mock(side_effect=[ValueError("unavailable"), candidate])
     cli_config = Mock(side_effect=ValueError("unavailable"))
-    monkeypatch.setattr(db_exec, "_databrickscfg_profiles_for_host", profiles)
+    monkeypatch.setattr(db_exec, "_databrickscfg_host_matches_and_sp_sections", profiles)
     monkeypatch.setattr(db_exec, "_sdk_config", factory)
     monkeypatch.setattr(db_exec, "_DatabricksCliProfileAuthConfig", cli_config)
 
@@ -1619,7 +1621,9 @@ def test_deferred_host_rejects_destination_mismatch(monkeypatch, changed_host):
         host=changed_host,
         authenticate=Mock(return_value={"Authorization": "Bearer synthetic-token"}),
     )
-    monkeypatch.setattr(db_exec, "_databrickscfg_profiles_for_host", lambda _host: ["selected"])
+    monkeypatch.setattr(
+        db_exec, "_databrickscfg_host_matches_and_sp_sections", lambda _host: (["selected"], set())
+    )
     monkeypatch.setattr(db_exec, "_sdk_config", lambda **_kwargs: candidate)
     auth, _host = db_exec._resolve_databricks_auth(
         host="https://example.cloud.databricks.com", defer_auth=True
