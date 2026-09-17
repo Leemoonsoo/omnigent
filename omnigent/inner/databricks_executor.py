@@ -22,8 +22,9 @@ import os
 import shlex
 import shutil
 import subprocess
+import threading
 import time
-from collections.abc import AsyncIterator, Generator
+from collections.abc import AsyncIterator, Callable, Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
@@ -594,6 +595,8 @@ class _DatabricksBearerAuth(httpx.Auth):
 
     @property
     def profile_name(self) -> str | None:
+        if isinstance(self._config, _DeferredHostAuthConfig):
+            return self._config.profile_name
         return self._profile_name
 
     def _authenticate_headers(self) -> dict[str, str]:
@@ -659,10 +662,11 @@ def _resolve_databricks_auth(
     profile: str | None = None,
     *,
     host: str | None = None,
+    defer_auth: bool = False,
 ) -> tuple[_DatabricksBearerAuth, str]:
     """Resolve Databricks credentials and return per-request auth + host.
 
-    Validates that authentication succeeds at call time. On success,
+    By default, validates that authentication succeeds at call time. On success,
     returns an httpx Auth that re-authenticates on every HTTP request
     (surviving OAuth access-token expiry transparently) and the
     workspace host URL.
@@ -678,6 +682,13 @@ def _resolve_databricks_auth(
         profile/env fallback is NOT attempted in this mode — the
         record asked for a specific workspace, so a credential miss
         fails loud.
+    :param defer_auth: Opt in to configuration-only resolution for callers
+        composing a separate credential provider ahead of SDK authentication.
+        Token initialization then occurs on first use, with the destination
+        bound to the resolved host. The default remains eager for inference
+        callers that rely on resolution-time failures for provider fallback.
+        Deferred resolution requires valid SDK configuration and does not
+        attempt the legacy credential-reading fallback.
     :returns: ``(auth, host)`` — an httpx Auth for injection into
         ``httpx.Client``/``httpx.AsyncClient`` and the workspace URL,
         e.g. ``"https://example.cloud.databricks.com"``.
@@ -698,14 +709,24 @@ def _resolve_databricks_auth(
     if host is not None:
         if profile is not None:
             raise ValueError("_resolve_databricks_auth takes profile or host, not both")
+        if defer_auth:
+            host_failure = (
+                f"Databricks authentication failed for workspace {host}. "
+                f"Run: databricks auth login --host {host}"
+            )
+            return _DatabricksBearerAuth(
+                _DeferredHostAuthConfig(host), failure_message=host_failure
+            ), host
         return _resolve_databricks_auth_for_host(host)
 
     sdk_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE")
     cfg = None
+    config_factory = _lazy_sdk_config if defer_auth else Config
 
     try:
-        cfg = Config(profile=sdk_profile)
-        cfg.authenticate()
+        cfg = config_factory(profile=sdk_profile)
+        if not defer_auth:
+            cfg.authenticate()
     except ValueError:
         if profile is None and sdk_profile is not None:
             # Profile name came from the DATABRICKS_CONFIG_PROFILE env var,
@@ -724,8 +745,9 @@ def _resolve_databricks_auth(
                 sdk_profile,
             )
             try:
-                cfg = Config()
-                cfg.authenticate()
+                cfg = config_factory()
+                if not defer_auth:
+                    cfg.authenticate()
             except ValueError:
                 cfg = None
         else:
@@ -743,7 +765,7 @@ def _resolve_databricks_auth(
     # SDK-based resolution failed (simple PAT profile, missing auth_type,
     # etc.). Fall back to reading ~/.databrickscfg directly — static PATs
     # don't need per-request refresh.
-    creds = _read_databrickscfg(profile)
+    creds = None if defer_auth else _read_databrickscfg(profile)
     if creds is not None:
         static_cfg = type(
             "_StaticAuth",
@@ -761,7 +783,69 @@ def _resolve_databricks_auth(
     )
 
 
-def _sdk_config(**kwargs: str) -> Any:  # type: ignore[explicit-any]  # SDK Config, imported lazily
+class _DeferredHostAuthConfig:
+    """Defer host-specific credential selection without losing the winning profile."""
+
+    def __init__(self, host: str) -> None:
+        self._host = host
+        self._auth: _DatabricksBearerAuth | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def profile_name(self) -> str | None:
+        return self._auth.profile_name if self._auth is not None else None
+
+    def authenticate(self) -> dict[str, str]:
+        with self._lock:
+            if self._auth is None:
+                auth, resolved_host = _resolve_databricks_auth_for_host(self._host)
+                if resolved_host.rstrip("/") != self._host.rstrip("/"):
+                    raise DatabricksAuthError(
+                        "Databricks workspace changed before authentication; "
+                        "resolve credentials again."
+                    )
+                self._auth = auth
+            return self._auth._authenticate_headers()
+
+
+def _lazy_sdk_config(**kwargs: str | None) -> Any:  # type: ignore[explicit-any]  # SDK Config, imported lazily
+    """Resolve SDK settings now and initialize destination-bound credentials on demand.
+
+    A custom strategy prevents Config construction from eagerly refreshing
+    CLI credentials. First use constructs the real Config under a lock and
+    rejects a changed workspace before returning any authorization headers.
+    Failed initialization is retried on the next call.
+    """
+    from databricks.sdk.config import Config
+    from databricks.sdk.credentials_provider import credentials_strategy
+
+    legacy_config: Config | None = None
+    lock = threading.Lock()
+
+    def authenticate() -> dict[str, str]:
+        nonlocal legacy_config
+        with lock:
+            if legacy_config is None:
+                candidate = _sdk_config(**kwargs)
+                if candidate.host != metadata_config.host:
+                    raise DatabricksAuthError(
+                        "Databricks workspace changed before authentication; "
+                        "resolve credentials again."
+                    )
+                headers = candidate.authenticate()
+                legacy_config = candidate
+                return headers
+            return legacy_config.authenticate()
+
+    @credentials_strategy("omnigent-deferred", [])
+    def deferred_auth(_config: Config) -> Callable[[], dict[str, str]]:
+        return authenticate
+
+    metadata_config = Config(credentials_strategy=deferred_auth, **kwargs)  # type: ignore[arg-type]
+    return metadata_config
+
+
+def _sdk_config(**kwargs: str | None) -> Any:  # type: ignore[explicit-any]  # SDK Config, imported lazily
     """Construct a databricks-sdk ``Config`` (test indirection point).
 
     The SDK probes host metadata at construction time, which makes

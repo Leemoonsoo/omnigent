@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import databricks.sdk.config as _sdk_config_mod
 
@@ -1316,6 +1316,235 @@ def test_resolve_databricks_auth_returns_bearer_auth_and_host(
     auth, host = _resolve_databricks_auth("dev")
     assert isinstance(auth, _DatabricksBearerAuth)
     assert host == "https://example.cloud.databricks.com"
+
+
+def test_deferred_profile_uses_config_only_until_first_token(monkeypatch, pat_only_cfg):
+    import omnigent.inner.databricks_executor as db_exec
+
+    candidate = SimpleNamespace(
+        host="https://example.cloud.databricks.com",
+        authenticate=Mock(return_value={"Authorization": "Bearer synthetic-token"}),
+    )
+    factory = Mock(return_value=candidate)
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+
+    auth, host = db_exec._resolve_databricks_auth("pat-profile", defer_auth=True)
+
+    assert host == candidate.host
+    factory.assert_not_called()
+    candidate.authenticate.assert_not_called()
+    assert auth.current_token() == "synthetic-token"
+    assert auth.current_token() == "synthetic-token"
+    factory.assert_called_once_with(profile="pat-profile")
+    assert candidate.authenticate.call_count == 2
+
+
+def test_deferred_profile_does_not_initialize_default_sdk_strategy(monkeypatch, pat_only_cfg):
+    from databricks.sdk.credentials_provider import DefaultCredentials
+
+    import omnigent.inner.databricks_executor as db_exec
+
+    headers = Mock(return_value={"Authorization": "Bearer synthetic-sdk-token"})
+    initialization = Mock(return_value=headers)
+    monkeypatch.setattr(DefaultCredentials, "__call__", initialization)
+
+    auth, _host = db_exec._resolve_databricks_auth("pat-profile", defer_auth=True)
+
+    initialization.assert_not_called()
+    headers.assert_not_called()
+    assert auth.current_token() == "synthetic-sdk-token"
+    assert auth.current_token() == "synthetic-sdk-token"
+    initialization.assert_called_once()
+    assert headers.call_count == 2
+
+
+def test_deferred_profile_rejects_destination_mismatch(monkeypatch, pat_only_cfg):
+    import omnigent.inner.databricks_executor as db_exec
+
+    candidate = SimpleNamespace(host="https://other-workspace.example.com", authenticate=Mock())
+    factory = Mock(return_value=candidate)
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+    auth, _host = db_exec._resolve_databricks_auth("pat-profile", defer_auth=True)
+
+    with pytest.raises(db_exec.DatabricksAuthError) as failure:
+        auth.current_token()
+    assert "workspace changed" in str(failure.value.__cause__)
+    candidate.authenticate.assert_not_called()
+
+
+@pytest.mark.parametrize("failure_phase", ["construction", "authentication"])
+def test_deferred_profile_retries_failed_initialization(monkeypatch, pat_only_cfg, failure_phase):
+    import omnigent.inner.databricks_executor as db_exec
+
+    healthy = SimpleNamespace(
+        host="https://example.cloud.databricks.com",
+        authenticate=Mock(return_value={"Authorization": "Bearer recovered"}),
+    )
+    broken = SimpleNamespace(
+        host=healthy.host, authenticate=Mock(side_effect=ValueError("unavailable"))
+    )
+    factory = Mock(
+        side_effect=[
+            ValueError("unavailable") if failure_phase == "construction" else broken,
+            healthy,
+        ]
+    )
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+    auth, _host = db_exec._resolve_databricks_auth("pat-profile", defer_auth=True)
+
+    with pytest.raises(db_exec.DatabricksAuthError):
+        auth.current_token()
+    assert auth.current_token() == "recovered"
+    assert factory.call_count == 2
+
+
+def test_deferred_profile_initializes_once_for_concurrent_callers(monkeypatch, pat_only_cfg):
+    from concurrent.futures import ThreadPoolExecutor
+
+    import omnigent.inner.databricks_executor as db_exec
+
+    candidate = SimpleNamespace(
+        host="https://example.cloud.databricks.com",
+        authenticate=Mock(return_value={"Authorization": "Bearer shared"}),
+    )
+    factory = Mock(return_value=candidate)
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+    auth, _host = db_exec._resolve_databricks_auth("pat-profile", defer_auth=True)
+    barrier = threading.Barrier(4)
+
+    def token():
+        barrier.wait(timeout=5)
+        return auth.current_token()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(token) for _index in range(4)]
+        assert [future.result(timeout=5) for future in futures] == ["shared"] * 4
+    factory.assert_called_once()
+
+
+async def test_deferred_profile_refreshes_headers_for_async_http(monkeypatch, pat_only_cfg):
+    import httpx
+
+    import omnigent.inner.databricks_executor as db_exec
+
+    candidate = SimpleNamespace(
+        host="https://example.cloud.databricks.com",
+        authenticate=Mock(
+            side_effect=[{"Authorization": "Bearer first"}, {"Authorization": "Bearer second"}]
+        ),
+    )
+    factory = Mock(return_value=candidate)
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+    auth, host = db_exec._resolve_databricks_auth("pat-profile", defer_auth=True)
+    received = []
+
+    def respond(request):
+        received.append(request.headers["Authorization"])
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(auth=auth, transport=httpx.MockTransport(respond)) as client:
+        await client.get(host)
+        await client.get(host)
+    assert received == ["Bearer first", "Bearer second"]
+    factory.assert_called_once()
+
+
+def test_deferred_missing_profile_never_reads_ambient_credentials(monkeypatch, pat_only_cfg):
+    import omnigent.inner.databricks_executor as db_exec
+
+    legacy_reader = Mock(side_effect=AssertionError("must not read credentials"))
+    monkeypatch.setattr(db_exec, "_read_databrickscfg", legacy_reader)
+    monkeypatch.setenv("DATABRICKS_TOKEN", "synthetic-ambient-token")
+    with pytest.raises(db_exec.DatabricksAuthError, match="missing-profile"):
+        db_exec._resolve_databricks_auth("missing-profile", defer_auth=True)
+    legacy_reader.assert_not_called()
+
+
+@pytest.mark.parametrize("matching_profiles", [["selected"], []])
+def test_deferred_host_reports_only_the_selected_profile(monkeypatch, matching_profiles):
+    import omnigent.inner.databricks_executor as db_exec
+
+    host = "https://example.cloud.databricks.com"
+    candidate = SimpleNamespace(
+        host=host,
+        profile="unrelated-ambient",
+        authenticate=Mock(return_value={"Authorization": "Bearer selected-token"}),
+    )
+    profiles = Mock(return_value=matching_profiles)
+    factory = Mock(return_value=candidate)
+    monkeypatch.setattr(db_exec, "_databrickscfg_profiles_for_host", profiles)
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+
+    auth, resolved_host = db_exec._resolve_databricks_auth(host=host, defer_auth=True)
+    assert resolved_host == host
+    assert auth.profile_name is None
+    profiles.assert_not_called()
+    factory.assert_not_called()
+    assert auth.current_token() == "selected-token"
+    assert auth.profile_name == ("selected" if matching_profiles else None)
+    assert auth.current_token() == "selected-token"
+    factory.assert_called_once()
+
+
+def test_deferred_host_retries_after_credential_selection_fails(monkeypatch):
+    import omnigent.inner.databricks_executor as db_exec
+
+    host = "https://example.cloud.databricks.com"
+    candidate = SimpleNamespace(
+        host=host, authenticate=Mock(return_value={"Authorization": "Bearer recovered"})
+    )
+    monkeypatch.setattr(db_exec, "_databrickscfg_profiles_for_host", lambda _host: [])
+    factory = Mock(side_effect=[ValueError("unavailable"), candidate])
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+    auth, _host = db_exec._resolve_databricks_auth(host=host, defer_auth=True)
+    with pytest.raises(db_exec.DatabricksAuthError, match="auth login --host"):
+        auth.current_token()
+    assert auth.current_token() == "recovered"
+    assert factory.call_count == 2
+
+
+def test_deferred_host_still_tries_later_matching_profiles(monkeypatch):
+    import omnigent.inner.databricks_executor as db_exec
+
+    host = "https://example.cloud.databricks.com"
+    candidate = SimpleNamespace(
+        host=host, authenticate=Mock(return_value={"Authorization": "Bearer second-profile"})
+    )
+    profiles = Mock(return_value=["broken", "working"])
+    factory = Mock(side_effect=[ValueError("unavailable"), candidate])
+    cli_config = Mock(side_effect=ValueError("unavailable"))
+    monkeypatch.setattr(db_exec, "_databrickscfg_profiles_for_host", profiles)
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+    monkeypatch.setattr(db_exec, "_DatabricksCliProfileAuthConfig", cli_config)
+
+    auth, _host = db_exec._resolve_databricks_auth(host=host, defer_auth=True)
+
+    assert auth.current_token() == "second-profile"
+    assert auth.profile_name == "working"
+    assert [call.kwargs for call in factory.call_args_list] == [
+        {"profile": "broken"},
+        {"profile": "working"},
+    ]
+    cli_config.assert_called_once_with(profile="broken", host=host)
+
+
+def test_deferred_host_rejects_destination_mismatch(monkeypatch):
+    import omnigent.inner.databricks_executor as db_exec
+
+    candidate = SimpleNamespace(
+        host="https://other-workspace.example.com",
+        authenticate=Mock(return_value={"Authorization": "Bearer synthetic-token"}),
+    )
+    monkeypatch.setattr(db_exec, "_databrickscfg_profiles_for_host", lambda _host: ["selected"])
+    monkeypatch.setattr(db_exec, "_sdk_config", lambda **_kwargs: candidate)
+    auth, _host = db_exec._resolve_databricks_auth(
+        host="https://example.cloud.databricks.com", defer_auth=True
+    )
+
+    with pytest.raises(db_exec.DatabricksAuthError) as failure:
+        auth.current_token()
+    assert "workspace changed" in str(failure.value.__cause__)
+    assert auth.profile_name is None
 
 
 def test_resolve_databricks_auth_invalid_profile_raises_clear_error(
