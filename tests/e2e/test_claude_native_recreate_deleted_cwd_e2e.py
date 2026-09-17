@@ -75,6 +75,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 
@@ -188,8 +189,6 @@ def _create_claude_native_session(base_url: str) -> tuple[str, str]:
     :returns: ``(session_id, agent_id)`` for the new claude-native session and
         its session-scoped agent.
     """
-    import tempfile
-
     from omnigent._wrapper_labels import (
         CLAUDE_NATIVE_WRAPPER_VALUE,
         UI_MODE_LABEL_KEY,
@@ -270,8 +269,11 @@ def test_native_claude_recreate_survives_removed_launch_cwd(tmp_path: Path) -> N
     runner_home.mkdir()
     server_home = tmp_path / "server-home"
     server_home.mkdir()
-    runtime_tmp = tmp_path / "tmp"
-    runtime_tmp.mkdir()
+    # tmux's unix socket lives under TMPDIR and AF_UNIX socket paths cap at
+    # ~108 chars, so root the runtime tmp at a short /tmp dir rather than the
+    # long per-test tmp_path (CI's sharded basetemp overflows the limit).
+    tmp_parent = "/tmp" if os.path.isdir("/tmp") and os.access("/tmp", os.W_OK) else None
+    runtime_tmp = Path(tempfile.mkdtemp(prefix="oterm_", dir=tmp_parent))
     harness_tmp = tmp_path / "harness"
     harness_tmp.mkdir()
     runtime_env = {
@@ -437,3 +439,4 @@ def test_native_claude_recreate_survives_removed_launch_cwd(tmp_path: Path) -> N
         _terminate(server_proc)
         server_log.close()
         runner_log.close()
+        shutil.rmtree(runtime_tmp, ignore_errors=True)
