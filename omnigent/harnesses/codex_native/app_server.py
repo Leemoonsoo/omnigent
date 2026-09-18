@@ -3657,13 +3657,28 @@ _CODEX_RESUME_PERMISSION_CONFIG_FIELDS = {
 }
 
 
-def _set_codex_resume_config_param(params: CodexParams, key: str, raw_value: str) -> None:
-    field = _CODEX_RESUME_PERMISSION_CONFIG_FIELDS.get(key.strip())
-    if field is None:
-        return
-    value = _codex_config_string(raw_value)
-    if value:
+def _set_codex_resume_config_param(params: CodexParams, key: str, raw_value: str) -> bool:
+    key = key.strip()
+    field = _CODEX_RESUME_PERMISSION_CONFIG_FIELDS.get(key)
+    if field is not None:
+        value = _codex_config_string(raw_value)
+        if not value:
+            return False
         params[field] = value
+        return True
+    if key.split(".", 1)[0] not in {"sandbox_workspace_write", "network", "permissions"}:
+        return False
+    try:
+        config_value = tomlkit.parse(f"value = {raw_value}").unwrap()["value"]
+    except tomlkit.exceptions.ParseError:
+        config_value = raw_value
+    try:
+        json.dumps(config_value, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    config = cast(CodexParams, params.setdefault("config", {}))
+    config[key] = config_value
+    return True
 
 
 async def preload_codex_thread_for_resume(
@@ -3870,11 +3885,7 @@ def _strip_codex_resume_permission_args(codex_args: tuple[str, ...]) -> list[str
             key, separator, raw_value = assignment.partition("=")
             # Leave unsupported settings for Codex to validate, rather than
             # silently dropping a policy that preload does not apply.
-            if (
-                separator
-                and key.strip() in _CODEX_RESUME_PERMISSION_CONFIG_FIELDS
-                and _codex_config_string(raw_value)
-            ):
+            if separator and _set_codex_resume_config_param({}, key, raw_value):
                 index += width
                 continue
         cleaned.append(arg)
