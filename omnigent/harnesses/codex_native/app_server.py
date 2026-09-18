@@ -3670,7 +3670,7 @@ def _set_codex_resume_config_param(params: CodexParams, key: str, raw_value: str
         return False
     try:
         config_value = tomlkit.parse(f"value = {raw_value}").unwrap()["value"]
-    except tomlkit.exceptions.ParseError:
+    except tomlkit.exceptions.TOMLKitError:
         config_value = raw_value.strip().strip("\"'")
     try:
         json.dumps(config_value, allow_nan=False)

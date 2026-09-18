@@ -1084,6 +1084,14 @@ def test_remote_resume_omits_app_server_permission_config(
             "sandbox_workspace_write.writable_roots=[",
             {"sandbox_workspace_write.writable_roots": "["},
         ),
+        (
+            "sandbox_workspace_write={network_access=false,network_access=true}",
+            {"sandbox_workspace_write": "{network_access=false,network_access=true}"},
+        ),
+        (
+            "network.proxy_url= \"'http://127.0.0.1:8080'\"' ",
+            {"network.proxy_url": "http://127.0.0.1:8080"},
+        ),
     ],
 )
 def test_remote_resume_transfers_permission_config_to_preload(
