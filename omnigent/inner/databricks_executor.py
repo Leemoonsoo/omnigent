@@ -32,6 +32,7 @@ from urllib.parse import SplitResult, urlsplit
 import httpx
 
 from omnigent.models import model_catalog
+from omnigent.util.threaded_auth import ThreadedAuth
 
 if TYPE_CHECKING:
     import configparser
@@ -560,7 +561,7 @@ def _databricks_cli_token_expires_at(
     return base + _CLI_TOKEN_DEFAULT_TTL_SECONDS
 
 
-class _DatabricksBearerAuth(httpx.Auth):
+class _DatabricksBearerAuth(ThreadedAuth):
     """httpx Auth that calls ``Config.authenticate()`` on every HTTP request.
 
     Unlike the snapshot approach (read a token once, set ``api_key``),

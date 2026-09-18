@@ -1521,6 +1521,94 @@ async def test_deferred_profile_refreshes_headers_for_async_http(monkeypatch, pa
     factory.assert_called_once()
 
 
+@pytest.mark.parametrize("blocking_phase", ["initialization", "first_authentication", "refresh"])
+async def test_deferred_profile_auth_keeps_async_loop_responsive(
+    monkeypatch, pat_only_cfg, blocking_phase
+):
+    import httpx
+
+    import omnigent.inner.databricks_executor as db_exec
+
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    calls = 0
+
+    def block_provider():
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(timeout=5), "event loop did not release the credential provider"
+
+    def authenticate():
+        nonlocal calls
+        calls += 1
+        if (blocking_phase == "first_authentication" and calls == 1) or (
+            blocking_phase == "refresh" and calls == 2
+        ):
+            block_provider()
+        return {"Authorization": f"Bearer synthetic-token-{calls}"}
+
+    def initialize(**kwargs):
+        if blocking_phase == "initialization":
+            block_provider()
+        return SimpleNamespace(
+            host="https://example.cloud.databricks.com", authenticate=authenticate
+        )
+
+    factory = Mock(side_effect=initialize)
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+    auth, host = db_exec._resolve_databricks_auth("pat-profile", defer_auth=True)
+    received = []
+
+    def respond(request):
+        received.append(request.headers["Authorization"])
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(auth=auth, transport=httpx.MockTransport(respond)) as client:
+        if blocking_phase == "refresh":
+            await client.get(host)
+        request_task = asyncio.create_task(client.get(host))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=3)
+            assert not request_task.done(), "authentication blocked the event loop"
+        finally:
+            release.set()
+            response = await asyncio.wait_for(request_task, timeout=3)
+        assert response.status_code == 200
+
+    expected_calls = 2 if blocking_phase == "refresh" else 1
+    assert received == [
+        f"Bearer synthetic-token-{number}" for number in range(1, expected_calls + 1)
+    ]
+    factory.assert_called_once()
+
+
+def test_deferred_profile_auth_preserves_sync_client_thread(monkeypatch, pat_only_cfg):
+    import httpx
+
+    import omnigent.inner.databricks_executor as db_exec
+
+    caller_thread = threading.get_ident()
+
+    def authenticate():
+        assert threading.get_ident() == caller_thread
+        return {"Authorization": "Bearer synthetic-token"}
+
+    candidate = SimpleNamespace(
+        host="https://example.cloud.databricks.com", authenticate=authenticate
+    )
+    factory = Mock(return_value=candidate)
+    monkeypatch.setattr(db_exec, "_sdk_config", factory)
+    auth, host = db_exec._resolve_databricks_auth("pat-profile", defer_auth=True)
+
+    def respond(request):
+        assert request.headers["Authorization"] == "Bearer synthetic-token"
+        return httpx.Response(200)
+
+    with httpx.Client(auth=auth, transport=httpx.MockTransport(respond)) as client:
+        assert client.get(host).status_code == 200
+    factory.assert_called_once()
+
+
 def test_deferred_missing_profile_never_reads_ambient_credentials(monkeypatch, pat_only_cfg):
     import omnigent.inner.databricks_executor as db_exec
 
