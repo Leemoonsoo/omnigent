@@ -3671,14 +3671,34 @@ def _set_codex_resume_config_param(params: CodexParams, key: str, raw_value: str
     try:
         config_value = tomlkit.parse(f"value = {raw_value}").unwrap()["value"]
     except tomlkit.exceptions.ParseError:
-        config_value = raw_value
+        config_value = raw_value.strip().strip("\"'")
     try:
         json.dumps(config_value, allow_nan=False)
     except (TypeError, ValueError):
         return False
     config = cast(CodexParams, params.setdefault("config", {}))
-    config[key] = config_value
+    _set_codex_resume_config_value(config, key, config_value)
     return True
+
+
+def _set_codex_resume_config_value(config: CodexParams, key: str, value: object) -> None:
+    """Preserve CLI order without overlapping keys in the app-server's unordered config map."""
+    for existing_key in list(config):
+        if existing_key.startswith(f"{key}."):
+            del config[existing_key]
+    segments = key.split(".")
+    for prefix_length in range(1, len(segments)):
+        ancestor = ".".join(segments[:prefix_length])
+        if ancestor not in config:
+            continue
+        target = config
+        for segment in (ancestor, *segments[prefix_length:-1]):
+            if not isinstance(target.get(segment), dict):
+                target[segment] = {}
+            target = cast(CodexParams, target[segment])
+        target[segments[-1]] = value
+        return
+    config[key] = value
 
 
 async def preload_codex_thread_for_resume(

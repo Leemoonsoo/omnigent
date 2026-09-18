@@ -1077,6 +1077,10 @@ def test_remote_resume_omits_app_server_permission_config(
         ),
         ("network.enabled=not-a-boolean", {"network.enabled": "not-a-boolean"}),
         (
+            "network.proxy_url= 'http://127.0.0.1:8080 ",
+            {"network.proxy_url": "http://127.0.0.1:8080"},
+        ),
+        (
             "sandbox_workspace_write.writable_roots=[",
             {"sandbox_workspace_write.writable_roots": "["},
         ),
@@ -1159,6 +1163,57 @@ def test_remote_resume_merges_permission_config_without_dropping_profile() -> No
         thread_id="thread_test",
         remote_url="ws://127.0.0.1:9876",
     ) == ["-c", 'model="test-model"', "resume", "--remote", "ws://127.0.0.1:9876", "thread_test"]
+
+
+@pytest.mark.parametrize(
+    ("assignments", "expected_config"),
+    [
+        (
+            ("network.enabled=false", "network={enabled=true}"),
+            {"network": {"enabled": True}},
+        ),
+        (
+            ("network={enabled=true,proxy_port=8080}", "network.enabled=false"),
+            {"network": {"enabled": False, "proxy_port": 8080}},
+        ),
+        (
+            (
+                "permissions={restricted={network={enabled=true}}}",
+                "permissions.restricted.network.enabled=false",
+            ),
+            {"permissions": {"restricted": {"network": {"enabled": False}}}},
+        ),
+        (
+            (
+                "permissions.restricted.network.enabled=true",
+                "permissions.restricted={network={enabled=false}}",
+                "permissions.restricted.network.proxy_port=8080",
+            ),
+            {"permissions.restricted": {"network": {"enabled": False, "proxy_port": 8080}}},
+        ),
+        (
+            ("permissions.restricted=false", "permissions.restricted.network.enabled=false"),
+            {"permissions.restricted": {"network": {"enabled": False}}},
+        ),
+    ],
+)
+def test_remote_resume_preserves_overlapping_permission_config_order(
+    assignments: tuple[str, ...], expected_config: dict[str, object]
+) -> None:
+    launch_args = (
+        "--sandbox",
+        "workspace-write",
+        *(f"-c={assignment}" for assignment in assignments),
+    )
+    assert codex_native_app_server._codex_resume_permission_params(launch_args) == {
+        "sandbox": "workspace-write",
+        "config": expected_config,
+    }
+    assert codex_native_app_server.build_codex_remote_args(
+        codex_args=launch_args,
+        thread_id="thread_test",
+        remote_url="ws://127.0.0.1:9876",
+    ) == ["resume", "--remote", "ws://127.0.0.1:9876", "thread_test"]
 
 
 @pytest.mark.parametrize("codex_cli_version", [(0, 136, 0), (0, 153, 0), (0, 153, 1)])
