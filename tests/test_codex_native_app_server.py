@@ -2634,6 +2634,7 @@ async def test_native_codex_materializes_provider_auth_for_app_server_and_tui(
 
     config_path = codex_home / "config.toml"
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert config["model_provider"] == "omnigent_provider"
     provider = config["model_providers"]["omnigent_provider"]
     assert config["model_providers"]["existing"]["name"] == "Existing"
     assert provider["base_url"] == "https://provider.invalid/v1"
@@ -2644,6 +2645,33 @@ async def test_native_codex_materializes_provider_auth_for_app_server_and_tui(
     assert provider["wire_api"] == "responses"
     assert stat.S_IMODE(codex_home.stat().st_mode) == 0o700
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+
+
+async def test_native_codex_persists_terminal_model_provider_for_resumed_tui(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "config.toml").write_text(
+        '[model_providers.local]\nname = "Local"\nrequires_openai_auth = false\n'
+    )
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    _disable_codex_startup_rpc(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = _test_app_server(
+        tmp_path,
+        tmp_path / "codex-home",
+        tmp_path / "bridge",
+        workspace,
+    )
+    server.terminal_launch_args = ("-c", 'model_provider="local"')
+
+    await server.start()
+    await server.close()
+
+    config = tomllib.loads((server.codex_home / "config.toml").read_text())
+    assert config["model_provider"] == "local"
 
 
 def test_remote_codex_rejects_unmaterialized_provider_config() -> None:
