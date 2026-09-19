@@ -2652,9 +2652,7 @@ async def test_native_codex_persists_terminal_model_provider_for_resumed_tui(
 ) -> None:
     source_home = tmp_path / "source-codex-home"
     source_home.mkdir()
-    (source_home / "config.toml").write_text(
-        '[model_providers.local]\nname = "Local"\nrequires_openai_auth = false\n'
-    )
+    (source_home / "config.toml").write_text("")
     monkeypatch.setenv("CODEX_HOME", str(source_home))
     _disable_codex_startup_rpc(monkeypatch)
     workspace = tmp_path / "workspace"
@@ -2665,13 +2663,23 @@ async def test_native_codex_persists_terminal_model_provider_for_resumed_tui(
         tmp_path / "bridge",
         workspace,
     )
-    server.terminal_launch_args = ("-c", 'model_provider="local"')
+    server.terminal_launch_args = (
+        "-c",
+        'model_providers={local={name="Local",requires_openai_auth=false}}',
+        "-c",
+        'model_provider="local"',
+    )
 
     await server.start()
     await server.close()
 
     config = tomllib.loads((server.codex_home / "config.toml").read_text())
     assert config["model_provider"] == "local"
+    assert config["model_providers"]["local"]["name"] == "Local"
+    assert server.terminal_config_overrides == (
+        'model_provider="local"',
+        'approvals_reviewer="auto_review"',
+    )
 
 
 def test_remote_codex_rejects_unmaterialized_provider_config() -> None:

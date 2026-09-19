@@ -15,7 +15,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias, cast
 
@@ -1724,13 +1724,18 @@ def _build_native_codex_app_server_argv(
     listen_url: str,
     config_overrides: Sequence[str],
     terminal_launch_args: Sequence[str] = (),
+    terminal_config_overrides: Sequence[str] | None = None,
 ) -> list[str]:
     """Build app-server argv with generic CLI config and resolved aliases."""
     argv = [tagged_argv0, "app-server", "--listen", listen_url]
     if _codex_terminal_has_flag(terminal_launch_args, "--strict-config"):
         argv.append("--strict-config")
     for override in (
-        *_codex_app_server_terminal_config_overrides(terminal_launch_args),
+        *(
+            _codex_app_server_terminal_config_overrides(terminal_launch_args)
+            if terminal_config_overrides is None
+            else terminal_config_overrides
+        ),
         *config_overrides,
     ):
         argv.extend(["-c", override])
@@ -1838,6 +1843,7 @@ class CodexNativeAppServer:
     reconcile_process_registry: bool = True
     config_profile: str | None = None
     terminal_launch_args: tuple[str, ...] = ()
+    terminal_config_overrides: tuple[str, ...] = field(default=(), init=False)
 
     async def start(self) -> None:
         """
@@ -1943,6 +1949,12 @@ class CodexNativeAppServer:
             self.developer_instructions,
             use_current_base=compose_profile_instructions,
         )
+        self.terminal_config_overrides = tuple(
+            materialize_codex_provider_config(
+                self.codex_home,
+                _codex_app_server_terminal_config_overrides(self.terminal_launch_args),
+            )
+        )
         self.config_overrides = materialize_codex_provider_config(
             self.codex_home,
             self.config_overrides,
@@ -1950,7 +1962,7 @@ class CodexNativeAppServer:
         _pin_codex_config_model_provider(
             self.codex_home,
             [
-                *_codex_app_server_terminal_config_overrides(self.terminal_launch_args),
+                *self.terminal_config_overrides,
                 *self.config_overrides,
             ],
         )
@@ -1999,6 +2011,7 @@ class CodexNativeAppServer:
             listen_url=resolved_listen,
             config_overrides=self.config_overrides,
             terminal_launch_args=self.terminal_launch_args,
+            terminal_config_overrides=self.terminal_config_overrides,
         )
         proc_env = {**self.env, "CODEX_HOME": str(self.codex_home)}
         self.process_owner_lock = acquire_codex_native_process_owner_lock()
@@ -4085,6 +4098,8 @@ async def preload_codex_thread_for_resume(
                 raise ValueError("Codex config/read returned invalid config layers")
             resume_config: CodexParams = {}
             for layer in reversed(layers):
+                if isinstance(layer, dict) and layer.get("disabledReason") is not None:
+                    continue
                 layer_config = layer.get("config") if isinstance(layer, dict) else None
                 if not isinstance(layer_config, dict):
                     raise ValueError("Codex config/read returned an invalid config layer")

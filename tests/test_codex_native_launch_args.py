@@ -580,7 +580,8 @@ async def test_remote_resume_transfers_raw_config_layers_by_precedence(
                     "config": {
                         "future_permissions": {"filesystem": "project"},
                         "sandbox_workspace_write": {"writable_roots": ["project-output"]},
-                    }
+                    },
+                    "disabledReason": "project not trusted",
                 },
                 {
                     "config": {
@@ -599,9 +600,8 @@ async def test_remote_resume_transfers_raw_config_layers_by_precedence(
     )
     params = client.request.call_args_list[-1].args[1]
     assert params["config"] == {
-        "future_permissions": {"network": "session", "filesystem": "project"},
+        "future_permissions": {"network": "session", "filesystem": "user"},
         "sandbox_workspace_write": {
-            "writable_roots": ["project-output"],
             "network_access": False,
         },
     }

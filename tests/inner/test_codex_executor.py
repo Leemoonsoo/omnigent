@@ -3894,6 +3894,28 @@ def test_materialize_codex_provider_config_applies_custom_retry_policy(tmp_path:
     assert provider["stream_idle_timeout_ms"] == 300_000
 
 
+def test_materialize_codex_provider_config_removes_top_level_override_from_argv(
+    tmp_path: Path,
+) -> None:
+    """Inline provider maps are private config, not subprocess arguments."""
+    import tomllib
+
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+
+    codex_home = tmp_path / "codex-home"
+    remaining = materialize_codex_provider_config(
+        codex_home,
+        [
+            'model_providers={local={name="Local",requires_openai_auth=false}}',
+            'model_provider="local"',
+        ],
+    )
+
+    assert remaining == ['model_provider="local"']
+    config = tomllib.loads((codex_home / "config.toml").read_text())
+    assert config["model_providers"]["local"]["name"] == "Local"
+
+
 # ---------------------------------------------------------------------------
 # _clean_codex_env tests
 # ---------------------------------------------------------------------------

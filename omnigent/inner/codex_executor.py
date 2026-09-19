@@ -1098,7 +1098,12 @@ def materialize_codex_provider_config(
     provider_overrides: list[str] = []
     argv_overrides: list[str] = []
     for override in config_overrides:
-        if override.lstrip().startswith(_CODEX_PROVIDER_CONFIG_PREFIX):
+        key, separator, _ = override.partition("=")
+        normalized_key = key.strip()
+        if separator and (
+            normalized_key == "model_providers"
+            or normalized_key.startswith(_CODEX_PROVIDER_CONFIG_PREFIX)
+        ):
             provider_overrides.append(override)
         else:
             argv_overrides.append(override)
