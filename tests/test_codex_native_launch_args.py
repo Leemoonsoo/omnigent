@@ -8,10 +8,23 @@ import tomlkit
 
 from omnigent.harnesses.codex_native import app_server
 from omnigent.harnesses.codex_native.launch_args import (
+    absolute_codex_path,
     canonical_codex_launch_args,
     codex_config_profile,
     materialize_codex_config_profile,
 )
+
+
+def test_codex_paths_expand_home_without_resolving_symlinks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    assert absolute_codex_path("link/file", tmp_path) == str(link / "file")
+    assert absolute_codex_path("~/link/file", tmp_path / "other") == str(link / "file")
 
 
 @pytest.mark.parametrize(
@@ -94,7 +107,10 @@ def test_invalid_profile_names(profile: str) -> None:
         codex_config_profile(("--profile", profile))
 
 
-def test_profile_materialization_preserves_layers_and_private_edits(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [None, (0, 134, 0), (0, 154, 0), (0, 155, 0)])
+def test_profile_materialization_preserves_layers_and_private_edits(
+    tmp_path: Path, version: tuple[int, int, int] | None
+) -> None:
     source = tmp_path / "source"
     private = tmp_path / "private"
     source.mkdir()
@@ -108,7 +124,7 @@ def test_profile_materialization_preserves_layers_and_private_edits(tmp_path: Pa
     (source / "strict.config.toml").write_text(
         'sandbox_mode="read-only"\nmodel="profile-model"\n[sandbox_workspace_write]\nwritable_roots=["/profile"]\n'
     )
-    materialize_codex_config_profile(private, source, "strict", profile_v2=True)
+    materialize_codex_config_profile(private, source, "strict", codex_version=version)
     config = tomlkit.parse((private / "config.toml").read_text())
     assert config["approval_policy"] == "untrusted"
     assert config["sandbox_mode"] == "read-only"
@@ -119,7 +135,7 @@ def test_profile_materialization_preserves_layers_and_private_edits(tmp_path: Pa
     }
     config["model"] = "edited-model"
     (private / "config.toml").write_text(tomlkit.dumps(config))
-    materialize_codex_config_profile(private, source, None, profile_v2=True)
+    materialize_codex_config_profile(private, source, None, codex_version=version)
     restored = tomlkit.parse((private / "config.toml").read_text())
     assert "sandbox_mode" not in restored
     assert restored["model"] == "edited-model"
@@ -135,8 +151,44 @@ def test_missing_profile_does_not_mutate_private_config(tmp_path: Path) -> None:
     original = 'sandbox_mode="read-only"\n'
     (private / "config.toml").write_text(original)
     with pytest.raises(FileNotFoundError):
-        materialize_codex_config_profile(private, source, "missing", profile_v2=True)
+        materialize_codex_config_profile(private, source, "missing", codex_version=(0, 155, 0))
     assert (private / "config.toml").read_text() == original
+
+
+def test_profile_paths_keep_source_origin_and_symbolic_permission_keys(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    private = tmp_path / "private"
+    source.mkdir()
+    private.mkdir()
+    profile = {
+        "model_instructions_file": "instructions.md",
+        "model_catalog_json": "catalog.json",
+        "sandbox_workspace_write": {"writable_roots": ["output"]},
+        "agents": {"reviewer": {"config_file": "agents/reviewer.toml"}},
+        "skills": {"config": [{"path": "skills/review", "enabled": True}]},
+        "model_providers": {"fixture": {"auth": {"cwd": "auth"}}},
+        "otel": {"exporter": {"otlp-http": {"tls": {"ca-certificate": "ca.pem"}}}},
+        "permissions": {"strict": {"filesystem": {":workspace_roots": {"src/**": "read"}}}},
+        "mcp_servers": {"fixture": {"cwd": "relative-tool-cwd", "command": "tool"}},
+        "developer_instructions": "instructions.md",
+    }
+    original = tomlkit.dumps(profile)
+    (source / "strict.config.toml").write_text(original)
+    materialize_codex_config_profile(private, source, "strict", codex_version=(0, 155, 0))
+    config = tomlkit.parse((private / "config.toml").read_text()).unwrap()
+    assert config["model_instructions_file"] == str(source / "instructions.md")
+    assert config["model_catalog_json"] == str(source / "catalog.json")
+    assert config["sandbox_workspace_write"]["writable_roots"] == [str(source / "output")]
+    assert config["agents"]["reviewer"]["config_file"] == str(source / "agents/reviewer.toml")
+    assert config["skills"]["config"][0]["path"] == str(source / "skills/review")
+    assert config["model_providers"]["fixture"]["auth"]["cwd"] == str(source / "auth")
+    assert config["otel"]["exporter"]["otlp-http"]["tls"]["ca-certificate"] == str(
+        source / "ca.pem"
+    )
+    assert config["permissions"] == profile["permissions"]
+    assert config["mcp_servers"] == profile["mcp_servers"]
+    assert config["developer_instructions"] == profile["developer_instructions"]
+    assert (source / "strict.config.toml").read_text() == original
 
 
 async def test_remote_resume_add_dir_preserves_configured_roots(
@@ -178,11 +230,11 @@ def test_profile_legacy_selection_overrides_base_named_selection(tmp_path: Path)
     source.mkdir()
     (private / "config.toml").write_text('default_permissions=":danger-full-access"\n')
     (source / "strict.config.toml").write_text('sandbox_mode="read-only"\n')
-    materialize_codex_config_profile(private, source, "strict", profile_v2=True)
+    materialize_codex_config_profile(private, source, "strict", codex_version=(0, 155, 0))
     config = tomlkit.parse((private / "config.toml").read_text())
     assert config["sandbox_mode"] == "read-only"
     assert "default_permissions" not in config
-    materialize_codex_config_profile(private, source, None, profile_v2=True)
+    materialize_codex_config_profile(private, source, None, codex_version=(0, 155, 0))
     assert (
         tomlkit.parse((private / "config.toml").read_text())["default_permissions"]
         == ":danger-full-access"
@@ -195,7 +247,7 @@ def test_legacy_codex_profile_materialization(tmp_path: Path) -> None:
     private.mkdir()
     source.mkdir()
     (private / "config.toml").write_text('[profiles.strict]\nsandbox_mode="read-only"\n')
-    materialize_codex_config_profile(private, source, "strict", profile_v2=False)
+    materialize_codex_config_profile(private, source, "strict", codex_version=(0, 133, 0))
     assert tomlkit.parse((private / "config.toml").read_text())["sandbox_mode"] == "read-only"
 
 
@@ -238,3 +290,27 @@ async def test_remote_resume_config_read_failure_does_not_discard_add_dir(
         )
     client.close.assert_awaited_once()
     assert client.request.call_count == 1
+
+
+async def test_remote_resume_relative_config_roots_are_absolute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = AsyncMock()
+    client.request.return_value = {"result": {"config": {}}}
+    monkeypatch.setattr(app_server, "client_for_transport", lambda *args, **kwargs: client)
+    await app_server.preload_codex_thread_for_resume(
+        "ws://127.0.0.1:9876",
+        "thread-test",
+        cwd=tmp_path,
+        terminal_launch_args=(
+            "--add-dir=extra",
+            "-sworkspace-write",
+            '-csandbox_workspace_write.writable_roots=["relative-output"]',
+        ),
+    )
+    params = client.request.call_args_list[-1].args[1]
+    assert params["runtimeWorkspaceRoots"] == [
+        str(tmp_path),
+        str(tmp_path / "extra"),
+        str(tmp_path / "relative-output"),
+    ]

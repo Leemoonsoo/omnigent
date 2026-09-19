@@ -3,12 +3,65 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import tomlkit
+
+_CODEX_CONFIG_PATHS = (
+    "agents.*.config_file",
+    "experimental_compact_prompt_file",
+    "log_dir",
+    "model_catalog_json",
+    "model_instructions_file",
+    "model_providers.*.auth.cwd",
+    "sandbox_workspace_write.writable_roots.[]",
+    "skills.config.[].path",
+    "sqlite_home",
+    "js_repl_node_path",
+    "js_repl_node_module_dirs.[]",
+    "profiles.*.experimental_compact_prompt_file",
+    "profiles.*.model_catalog_json",
+    "profiles.*.model_instructions_file",
+    "profiles.*.js_repl_node_path",
+    "profiles.*.js_repl_node_module_dirs.[]",
+    *(
+        f"otel.{exporter}.{transport}.tls.{field}"
+        for exporter in ("exporter", "metrics_exporter", "trace_exporter")
+        for transport in ("otlp-http", "otlp-grpc")
+        for field in ("ca-certificate", "client-certificate", "client-private-key")
+    ),
+)
+
+
+def absolute_codex_path(value: str, base: Path) -> str:
+    """Match Codex's lexical path normalization without resolving symlinks."""
+    expanded = (
+        os.path.expanduser(value) if value == "~" or value.startswith(f"~{os.sep}") else value
+    )
+    return os.path.abspath(os.path.join(base, expanded))
+
+
+def _resolve_profile_paths(config: dict[str, Any], source_home: Path) -> None:
+    """Normalize Codex 0.155 typed path fields, not symbolic permission keys."""
+
+    def resolve(value: Any, segments: list[str]) -> Any:
+        if not segments:
+            return absolute_codex_path(value, source_home) if isinstance(value, str) else value
+        segment, *remaining = segments
+        if segment == "[]" and isinstance(value, list):
+            return [resolve(item, remaining) for item in value]
+        if isinstance(value, dict):
+            for key in list(value) if segment == "*" else (segment,):
+                if key in value:
+                    value[key] = resolve(value[key], remaining)
+        return value
+
+    for path in _CODEX_CONFIG_PATHS:
+        resolve(config, path.split("."))
 
 
 def canonical_codex_launch_args(args: Sequence[str]) -> list[str]:
@@ -138,7 +191,11 @@ def _carry_config_edits(
 
 
 def materialize_codex_config_profile(
-    codex_home: Path, source_home: Path, profile: str | None, *, profile_v2: bool
+    codex_home: Path,
+    source_home: Path,
+    profile: str | None,
+    *,
+    codex_version: tuple[int, int, int] | None,
 ) -> None:
     """Fold the selected user profile into the private user layer, below project/CLI.
 
@@ -164,12 +221,14 @@ def materialize_codex_config_profile(
     if profile is not None:
         if codex_config_profile(["--profile", profile]) != profile:
             raise ValueError("Invalid Codex config profile name")
-        if profile_v2:
+        if codex_version is None or codex_version >= (0, 134, 0):
             overlay = tomlkit.parse((source_home / f"{profile}.config.toml").read_text()).unwrap()
         else:
             overlay = base.get("profiles", {}).get(profile)
             if not isinstance(overlay, dict):
                 raise ValueError(f"Codex config profile {profile!r} does not exist")
+        overlay = copy.deepcopy(overlay)
+        _resolve_profile_paths(overlay, source_home)
         _merge_tables(merged, overlay)
         if overlay.get("sandbox_mode") is not None and overlay.get("default_permissions") is None:
             merged.pop("default_permissions", None)

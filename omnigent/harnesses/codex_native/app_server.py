@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 from omnigent.cli_invocation import cli_invocation
 from omnigent.harnesses.codex_native.bridge import write_policy_hook_config
 from omnigent.harnesses.codex_native.launch_args import (
+    absolute_codex_path,
     canonical_codex_launch_args,
     codex_config_profile,
     materialize_codex_config_profile,
@@ -1652,7 +1653,7 @@ class CodexNativeAppServer:
             self.codex_home,
             config_source,
             self.config_profile,
-            profile_v2=codex_version is None or codex_version >= (0, 155, 0),
+            codex_version=codex_version,
         )
         if self.trust_project:
             _trust_codex_project(self.codex_home, self.cwd)
@@ -3804,7 +3805,7 @@ async def preload_codex_thread_for_resume(
                 if arg == "--add-dir":
                     additional_roots.append(args[index])
                 else:
-                    effective_cwd = (effective_cwd / args[index]).resolve()
+                    effective_cwd = Path(absolute_codex_path(args[index], effective_cwd))
             elif arg in {
                 "-c",
                 "--config",
@@ -3846,8 +3847,8 @@ async def preload_codex_thread_for_resume(
                 dict.fromkeys(
                     [
                         str(effective_cwd),
-                        *(str((effective_cwd / root).resolve()) for root in additional_roots),
-                        *roots,
+                        *(absolute_codex_path(root, effective_cwd) for root in additional_roots),
+                        *(absolute_codex_path(root, effective_cwd) for root in roots),
                     ]
                 )
             )
