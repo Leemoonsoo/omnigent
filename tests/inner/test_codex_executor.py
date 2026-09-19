@@ -3939,9 +3939,7 @@ def test_materialize_codex_provider_config_merges_partial_provider_override(
     )
 
     assert remaining == []
-    provider = tomllib.loads((codex_home / "config.toml").read_text())["model_providers"][
-        "corp"
-    ]
+    provider = tomllib.loads((codex_home / "config.toml").read_text())["model_providers"]["corp"]
     assert provider["name"] == "Corp"
     assert provider["base_url"] == "https://corp.invalid/v1"
     assert provider["wire_api"] == "responses"

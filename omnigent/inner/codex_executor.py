@@ -1133,9 +1133,7 @@ def materialize_codex_provider_config(
     ) -> None:
         for key, value in override_config.items():
             existing_value = existing_config.get(key)
-            if isinstance(existing_value, MutableMapping) and isinstance(
-                value, MutableMapping
-            ):
+            if isinstance(existing_value, MutableMapping) and isinstance(value, MutableMapping):
                 merge_provider_config(existing_value, value)
             else:
                 existing_config[key] = value
