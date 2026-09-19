@@ -1,12 +1,14 @@
 """Codex remote-resume compatibility for CLI spellings and user profiles."""
 
+import ntpath
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 import tomlkit
 
-from omnigent.harnesses.codex_native import app_server
+from omnigent.harnesses.codex_native import app_server, launch_args
 from omnigent.harnesses.codex_native.launch_args import (
     absolute_codex_path,
     canonical_codex_launch_args,
@@ -25,6 +27,16 @@ def test_codex_paths_expand_home_without_resolving_symlinks(
     link.symlink_to(target, target_is_directory=True)
     assert absolute_codex_path("link/file", tmp_path) == str(link / "file")
     assert absolute_codex_path("~/link/file", tmp_path / "other") == str(link / "file")
+
+
+def test_codex_paths_expand_windows_home_with_either_separator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\test")
+    monkeypatch.setattr(launch_args, "os", SimpleNamespace(path=ntpath, sep="\\"))
+    for path in ("~/rules.md", "~\\rules.md"):
+        assert absolute_codex_path(path, Path("D:/codex")) == r"C:\Users\test\rules.md"
+    assert absolute_codex_path("~other/rules.md", Path("D:/codex")) == r"D:\codex\~other\rules.md"
 
 
 @pytest.mark.parametrize(

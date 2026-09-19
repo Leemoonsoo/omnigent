@@ -39,9 +39,8 @@ _CODEX_CONFIG_PATHS = (
 
 def absolute_codex_path(value: str, base: Path) -> str:
     """Match Codex's lexical path normalization without resolving symlinks."""
-    expanded = (
-        os.path.expanduser(value) if value == "~" or value.startswith(f"~{os.sep}") else value
-    )
+    home_relative = value == "~" or value.startswith(("~/", f"~{os.sep}"))
+    expanded = os.path.expanduser(value) if home_relative else value
     return os.path.abspath(os.path.join(base, expanded))
 
 
