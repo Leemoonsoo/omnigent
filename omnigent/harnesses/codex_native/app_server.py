@@ -362,11 +362,8 @@ def _pin_codex_config_model_provider(codex_home: Path, config_overrides: Sequenc
         key, separator, raw_value = override.partition("=")
         if not separator or key.strip() != "model_provider":
             continue
-        try:
-            value = tomlkit.parse(f"model_provider = {raw_value}")["model_provider"]
-        except tomlkit.exceptions.TOMLKitError as error:
-            raise ValueError("Invalid Codex model_provider override") from error
-        if not isinstance(value, str) or not value:
+        value = _codex_config_string(raw_value)
+        if not value:
             raise ValueError("Codex model_provider override must be a non-empty string")
         provider = value
     if provider is None:

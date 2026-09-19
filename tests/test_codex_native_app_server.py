@@ -2682,6 +2682,47 @@ async def test_native_codex_persists_terminal_model_provider_for_resumed_tui(
     )
 
 
+@pytest.mark.parametrize("provider_value", ["local", '"local"'])
+async def test_native_codex_merges_partial_provider_and_accepts_literal_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_value: str,
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "config.toml").write_text(
+        '[model_providers.local]\nname="Local"\nbase_url="https://local.invalid/v1"\n'
+        "requires_openai_auth=false\n"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    _disable_codex_startup_rpc(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = _test_app_server(
+        tmp_path,
+        tmp_path / "codex-home",
+        tmp_path / "bridge",
+        workspace,
+    )
+    server.terminal_launch_args = (
+        "-c",
+        'model_providers.local.wire_api="responses"',
+        "-c",
+        f"model_provider={provider_value}",
+    )
+
+    await server.start()
+    await server.close()
+
+    config = tomllib.loads((server.codex_home / "config.toml").read_text())
+    provider = config["model_providers"]["local"]
+    assert config["model_provider"] == "local"
+    assert provider["name"] == "Local"
+    assert provider["base_url"] == "https://local.invalid/v1"
+    assert provider["requires_openai_auth"] is False
+    assert provider["wire_api"] == "responses"
+
+
 def test_remote_codex_rejects_unmaterialized_provider_config() -> None:
     """Remote TUI construction fails closed on provider table overrides."""
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server

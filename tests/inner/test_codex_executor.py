@@ -3916,6 +3916,42 @@ def test_materialize_codex_provider_config_removes_top_level_override_from_argv(
     assert config["model_providers"]["local"]["name"] == "Local"
 
 
+def test_materialize_codex_provider_config_merges_partial_provider_override(
+    tmp_path: Path,
+) -> None:
+    import tomllib
+
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[model_providers.corp]\nname="Corp"\nbase_url="https://corp.invalid/v1"\n'
+        '[model_providers.corp.auth]\ntype="bearer"\nenv_key="CORP_TOKEN"\n'
+    )
+
+    remaining = materialize_codex_provider_config(
+        codex_home,
+        [
+            'model_providers.corp.wire_api="responses"',
+            "model_providers.corp.auth.timeout_ms=3000",
+        ],
+    )
+
+    assert remaining == []
+    provider = tomllib.loads((codex_home / "config.toml").read_text())["model_providers"][
+        "corp"
+    ]
+    assert provider["name"] == "Corp"
+    assert provider["base_url"] == "https://corp.invalid/v1"
+    assert provider["wire_api"] == "responses"
+    assert provider["auth"] == {
+        "type": "bearer",
+        "env_key": "CORP_TOKEN",
+        "timeout_ms": 3000,
+    }
+
+
 # ---------------------------------------------------------------------------
 # _clean_codex_env tests
 # ---------------------------------------------------------------------------

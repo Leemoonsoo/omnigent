@@ -1127,13 +1127,32 @@ def materialize_codex_provider_config(
     if not isinstance(providers, MutableMapping):
         raise ValueError("Codex model_providers config must be a TOML table")
 
+    def merge_provider_config(
+        existing_config: MutableMapping[str, object],
+        override_config: MutableMapping[str, object],
+    ) -> None:
+        for key, value in override_config.items():
+            existing_value = existing_config.get(key)
+            if isinstance(existing_value, MutableMapping) and isinstance(
+                value, MutableMapping
+            ):
+                merge_provider_config(existing_value, value)
+            else:
+                existing_config[key] = value
+
     for override in provider_overrides:
         fragment = tomlkit.parse(override)
         generated = fragment.get("model_providers")
         if not isinstance(generated, MutableMapping) or not generated:
             raise ValueError("Codex provider override must define model_providers")
         for provider_name, provider_config in generated.items():
-            providers[provider_name] = provider_config
+            existing_provider = providers.get(provider_name)
+            if isinstance(existing_provider, MutableMapping) and isinstance(
+                provider_config, MutableMapping
+            ):
+                merge_provider_config(existing_provider, provider_config)
+            else:
+                providers[provider_name] = provider_config
 
     policy = retry_policy if retry_policy is not None else RetryPolicy()
     for provider_name, provider_config in list(providers.items()):
