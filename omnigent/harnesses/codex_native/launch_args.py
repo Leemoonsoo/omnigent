@@ -5,11 +5,13 @@ from __future__ import annotations
 import copy
 import os
 import re
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import tomlkit
+from tomlkit.exceptions import TOMLKitError
 
 _CODEX_CONFIG_PATHS = (
     "agents.*.config_file",
@@ -189,6 +191,38 @@ def _carry_config_edits(
                 base[key] = copy.deepcopy(current[key])
 
 
+def _write_private_config(path: Path, content: str) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _profile_base(state_path: Path, current: dict[str, Any]) -> dict[str, Any]:
+    try:
+        state = tomlkit.parse(state_path.read_text()).unwrap()
+    except TOMLKitError as error:
+        raise ValueError(f"Invalid Codex profile state: {state_path}") from error
+    if not all(isinstance(state.get(key), dict) for key in ("base", "applied")):
+        raise ValueError(f"Invalid Codex profile state: {state_path}")
+    base = state["base"]
+    if "pending" in state:
+        if not isinstance(state["pending"], dict):
+            raise ValueError(f"Invalid Codex profile state: {state_path}")
+        if current not in (state["applied"], state["pending"]):
+            raise ValueError(
+                f"Codex config changed during an incomplete profile update: {state_path}"
+            )
+    else:
+        _carry_config_edits(base, state["applied"], current)
+    return base
+
+
 def materialize_codex_config_profile(
     codex_home: Path,
     source_home: Path,
@@ -199,8 +233,10 @@ def materialize_codex_config_profile(
     """Fold the selected user profile into the private user layer, below project/CLI.
 
     Codex app-server has no file-profile selector. Preserve the base separately
-    so switching/removing a profile on restart is reversible, including private
-    config edits made by the TUI. Never modify the source home.
+    so switching/removing a profile on restart is reversible. Private TUI edits
+    survive profile removal; selected profiles still take precedence over them.
+    Journal atomic file replacements so interrupted updates can be retried.
+    Never modify the source home.
     """
     state_path = codex_home / ".omnigent-config-profile.toml"
     if profile is None and not state_path.exists():
@@ -211,11 +247,8 @@ def materialize_codex_config_profile(
     current = (
         tomlkit.parse(config_path.read_text()) if config_path.exists() else tomlkit.document()
     )
-    base = current.unwrap()
-    if state_path.exists():
-        state = tomlkit.parse(state_path.read_text()).unwrap()
-        base = state["base"]
-        _carry_config_edits(base, state["applied"], current.unwrap())
+    current_config = current.unwrap()
+    base = _profile_base(state_path, current_config) if state_path.exists() else current_config
     merged = copy.deepcopy(base)
     if profile is not None:
         if codex_config_profile(["--profile", profile]) != profile:
@@ -232,9 +265,8 @@ def materialize_codex_config_profile(
         if overlay.get("sandbox_mode") is not None and overlay.get("default_permissions") is None:
             merged.pop("default_permissions", None)
     rendered = tomlkit.dumps(merged)
-    state_path.write_text(tomlkit.dumps({"base": base, "applied": merged}))
-    state_path.chmod(0o600)
-    if config_path.is_symlink():
-        config_path.unlink()
-    config_path.write_text(rendered)
-    config_path.chmod(0o600)
+    pending_state = tomlkit.dumps({"base": base, "applied": current_config, "pending": merged})
+    final_state = tomlkit.dumps({"base": base, "applied": merged})
+    _write_private_config(state_path, pending_state)
+    _write_private_config(config_path, rendered)
+    _write_private_config(state_path, final_state)

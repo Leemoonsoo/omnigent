@@ -167,6 +167,131 @@ def test_missing_profile_does_not_mutate_private_config(tmp_path: Path) -> None:
     assert (private / "config.toml").read_text() == original
 
 
+@pytest.mark.parametrize("operation", ["apply", "switch", "remove"])
+@pytest.mark.parametrize("failed_replace", [1, 2, 3])
+def test_profile_update_recovers_after_interrupted_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    failed_replace: int,
+) -> None:
+    source = tmp_path / "source"
+    private = tmp_path / "private"
+    source.mkdir()
+    private.mkdir()
+    config_path = private / "config.toml"
+    config_path.write_text('model="base"\nsandbox_mode="read-only"\n')
+    (source / "first.config.toml").write_text('model="first"\nsandbox_mode="workspace-write"\n')
+    (source / "second.config.toml").write_text('model="second"\napproval_policy="never"\n')
+    if operation != "apply":
+        materialize_codex_config_profile(private, source, "first", codex_version=(0, 155, 0))
+        config = tomlkit.parse(config_path.read_text())
+        config["model"] = "edited"
+        config_path.write_text(tomlkit.dumps(config))
+    selected = {"apply": "first", "switch": "second", "remove": None}[operation]
+    replace = launch_args.os.replace
+    attempts = 0
+
+    def fail_replace(source_path: str, destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == failed_replace:
+            raise OSError("injected write failure")
+        replace(source_path, destination)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(launch_args.os, "replace", fail_replace)
+        with pytest.raises(OSError, match="injected write failure"):
+            materialize_codex_config_profile(private, source, selected, codex_version=(0, 155, 0))
+    assert sorted(path.name for path in private.iterdir()) in (
+        ["config.toml"],
+        [".omnigent-config-profile.toml", "config.toml"],
+    )
+    materialize_codex_config_profile(private, source, selected, codex_version=(0, 155, 0))
+    effective = tomlkit.parse(config_path.read_text()).unwrap()
+    assert (
+        effective["model"] == {"apply": "first", "switch": "second", "remove": "edited"}[operation]
+    )
+    assert effective["sandbox_mode"] == (
+        "workspace-write" if operation == "apply" else "read-only"
+    )
+    materialize_codex_config_profile(private, source, None, codex_version=(0, 155, 0))
+    assert tomlkit.parse(config_path.read_text()).unwrap() == {
+        "model": "base" if operation == "apply" else "edited",
+        "sandbox_mode": "read-only",
+    }
+    assert config_path.stat().st_mode & 0o777 == 0o600
+    assert (private / ".omnigent-config-profile.toml").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["invalid=[", "", "base=1\n[applied]\n", "[base]\n", "pending=1\n[base]\n[applied]\n"],
+)
+def test_malformed_profile_state_preserves_both_files(tmp_path: Path, state: str) -> None:
+    source = tmp_path / "source"
+    private = tmp_path / "private"
+    source.mkdir()
+    private.mkdir()
+    config_path = private / "config.toml"
+    config_path.write_text('model="base"\n')
+    state_path = private / ".omnigent-config-profile.toml"
+    state_path.write_text(state)
+    with pytest.raises(ValueError, match="Invalid Codex profile state"):
+        materialize_codex_config_profile(private, source, None, codex_version=(0, 155, 0))
+    assert config_path.read_text() == 'model="base"\n'
+    assert state_path.read_text() == state
+
+
+def test_pending_profile_state_rejects_unexpected_config_without_writing(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    private = tmp_path / "private"
+    source.mkdir()
+    private.mkdir()
+    config_path = private / "config.toml"
+    original = 'model="concurrent-edit"\n'
+    config_path.write_text(original)
+    state_path = private / ".omnigent-config-profile.toml"
+    state = tomlkit.dumps(
+        {"base": {"model": "base"}, "applied": {"model": "base"}, "pending": {"model": "profile"}}
+    )
+    state_path.write_text(state)
+    with pytest.raises(ValueError, match="incomplete profile update"):
+        materialize_codex_config_profile(private, source, None, codex_version=(0, 155, 0))
+    assert config_path.read_text() == original
+    assert state_path.read_text() == state
+
+
+def test_profile_replaces_config_symlink_without_changing_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    private = tmp_path / "private"
+    source.mkdir()
+    private.mkdir()
+    original = 'model="base"\n'
+    (source / "config.toml").write_text(original)
+    (source / "strict.config.toml").write_text('model="profile"\n')
+    (private / "config.toml").symlink_to(source / "config.toml")
+    materialize_codex_config_profile(private, source, "strict", codex_version=(0, 155, 0))
+    assert not (private / "config.toml").is_symlink()
+    assert (source / "config.toml").read_text() == original
+
+
+def test_profile_reapplication_retains_private_edits_for_removal(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    private = tmp_path / "private"
+    source.mkdir()
+    private.mkdir()
+    config_path = private / "config.toml"
+    config_path.write_text('model="base"\n')
+    (source / "strict.config.toml").write_text('model="profile"\n')
+    materialize_codex_config_profile(private, source, "strict", codex_version=(0, 155, 0))
+    config_path.write_text('model="edited"\n')
+    materialize_codex_config_profile(private, source, "strict", codex_version=(0, 155, 0))
+    assert tomlkit.parse(config_path.read_text())["model"] == "profile"
+    materialize_codex_config_profile(private, source, None, codex_version=(0, 155, 0))
+    assert tomlkit.parse(config_path.read_text())["model"] == "edited"
+
+
 def test_profile_paths_keep_source_origin_and_symbolic_permission_keys(tmp_path: Path) -> None:
     source = tmp_path / "source"
     private = tmp_path / "private"
