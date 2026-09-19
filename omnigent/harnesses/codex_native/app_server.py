@@ -35,10 +35,12 @@ if TYPE_CHECKING:
 from omnigent.cli_invocation import cli_invocation
 from omnigent.harnesses.codex_native.bridge import write_policy_hook_config
 from omnigent.harnesses.codex_native.launch_args import (
+    _write_private_config,
     absolute_codex_path,
     canonical_codex_launch_args,
     codex_config_profile,
     materialize_codex_config_profile,
+    validate_codex_config_profile_state,
     without_codex_config_profile,
 )
 from omnigent.harnesses.codex_native.process_registry import (
@@ -418,9 +420,17 @@ def _materialize_config_symlink(config_path: Path) -> None:
         shutil.copy2(target, config_path)
 
 
+_NO_INSTRUCTION_BASE_OVERRIDE = object()
+
+
 def _sync_codex_developer_instructions(
     codex_home: Path,
     instructions: str | None,
+    *,
+    use_current_base: bool = False,
+    preserve_current_edit: bool = False,
+    base_override: object = _NO_INSTRUCTION_BASE_OVERRIDE,
+    previous_instructions: str | None = None,
 ) -> None:
     """Synchronize the agent's authored instructions in the private Codex config.
 
@@ -435,11 +445,23 @@ def _sync_codex_developer_instructions(
     :param codex_home: Private per-session ``CODEX_HOME`` directory.
     :param instructions: The agent's raw authored instructions
         (``AgentSpec.instructions``) for this launch, or ``None``.
+    :param use_current_base: Compose from the current config value without
+        replacing the saved user base. Profile startup uses this after
+        materializing the selected profile layer.
+    :param preserve_current_edit: If the current value differs from the last
+        value written by this helper, promote it to the saved user base before
+        restoring that base. Profile startup uses this before changing layers.
+    :param base_override: Migrated user base to journal atomically with the
+        config update. Ignored once an instruction journal exists.
+    :param previous_instructions: Agent instructions expected in a legacy
+        pre-journal value while restoring its user base.
     :returns: None.
     """
     addition = instructions.strip() if instructions else ""
+    previous_addition = previous_instructions.strip() if previous_instructions else addition
     config_path = codex_home / "config.toml"
-    base_path = codex_home / ".omnigent-developer-instructions-base"
+    state_path = codex_home / ".omnigent-developer-instructions-state.toml"
+    legacy_base_path = codex_home / ".omnigent-developer-instructions-base"
     if config_path.is_symlink():
         target = config_path.resolve()
         config_path.unlink()
@@ -463,10 +485,49 @@ def _sync_codex_developer_instructions(
             "developer_instructions is not a string"
         )
         return
-    if base_path.exists():
-        base = base_path.read_text(encoding="utf-8")
+    current_base = current.strip() if isinstance(current, str) else ""
+    if state_path.exists():
+        try:
+            state = tomlkit.parse(state_path.read_text()).unwrap()
+        except tomlkit.exceptions.TOMLKitError as error:
+            raise ValueError(f"Invalid Codex developer-instruction state: {state_path}") from error
+        if not all(isinstance(state.get(key), str) for key in ("base", "applied")):
+            raise ValueError(f"Invalid Codex developer-instruction state: {state_path}")
+        base = state["base"]
+        if "pending" in state:
+            if not isinstance(state["pending"], str):
+                raise ValueError(f"Invalid Codex developer-instruction state: {state_path}")
+            if current_base not in (state["applied"], state["pending"]):
+                raise ValueError(
+                    "Codex developer instructions changed during an incomplete update: "
+                    f"{state_path}"
+                )
+        elif preserve_current_edit and current_base != state["applied"]:
+            applied = state["applied"]
+            if applied and current_base.startswith(f"{applied}\n\n"):
+                appended = current_base[len(applied) :].strip()
+                base = f"{base}\n\n{appended}" if base else appended
+            else:
+                base = current_base
+    elif base_override is not _NO_INSTRUCTION_BASE_OVERRIDE:
+        if not isinstance(base_override, str):
+            raise TypeError("Codex developer-instruction base override must be a string")
+        base = base_override
+    elif legacy_base_path.exists():
+        base = legacy_base_path.read_text(encoding="utf-8")
+        if preserve_current_edit:
+            generated_active = (
+                f"{base}\n\n{previous_addition}"
+                if base and previous_addition
+                else base or previous_addition
+            )
+            if generated_active and current_base.startswith(f"{generated_active}\n\n"):
+                appended = current_base[len(generated_active) :].strip()
+                base = f"{base}\n\n{appended}" if base else appended
+            elif current_base not in {base, generated_active}:
+                base = current_base
     else:
-        base = current.strip() if isinstance(current, str) else ""
+        base = current_base
         # A previous Omnigent build may have appended the same instructions
         # without writing the sidecar. Recover the user-authored
         # prefix instead of permanently capturing the combined value as base.
@@ -474,13 +535,176 @@ def _sync_codex_developer_instructions(
             base = ""
         elif addition and base.endswith(f"\n\n{addition}"):
             base = base[: -len(addition)].rstrip()
-        base_path.write_text(base, encoding="utf-8")
-    active = f"{base}\n\n{addition}" if base and addition else base or addition
+    composition_base = current_base if use_current_base else base
+    active = (
+        f"{composition_base}\n\n{addition}"
+        if composition_base and addition
+        else composition_base or addition
+    )
     if active:
         document["developer_instructions"] = active
     elif "developer_instructions" in document:
         del document["developer_instructions"]
-    config_path.write_text(tomlkit.dumps(document), encoding="utf-8")
+    pending_state = tomlkit.dumps({"base": base, "applied": current_base, "pending": active})
+    final_state = tomlkit.dumps({"base": base, "applied": active})
+    _write_private_config(state_path, pending_state)
+    _write_private_config(config_path, tomlkit.dumps(document))
+    _write_private_config(state_path, final_state)
+
+
+def _migrate_profile_instruction_base(
+    codex_home: Path,
+    source_home: Path,
+    state: dict[str, object],
+    agent_instructions: str | None,
+) -> object:
+    """Move developer instructions out of profile state written by older builds."""
+    base = state.get("base")
+    applied = state.get("applied")
+    if not isinstance(base, dict) or not isinstance(applied, dict):
+        return _NO_INSTRUCTION_BASE_OVERRIDE
+    old_base = base.get("developer_instructions")
+    old_applied = applied.get("developer_instructions")
+    if "developer_instructions" not in applied:
+        return _NO_INSTRUCTION_BASE_OVERRIDE
+    base_path = codex_home / ".omnigent-developer-instructions-base"
+    saved_base = base_path.read_text(encoding="utf-8") if base_path.exists() else ""
+    config_path = codex_home / "config.toml"
+    document = tomlkit.parse(config_path.read_text()) if config_path.exists() else {}
+    current = document.get("developer_instructions")
+    current_instructions = current.strip() if isinstance(current, str) else ""
+    candidate = old_base.strip() if isinstance(old_base, str) else ""
+    applied_instructions = old_applied.strip() if isinstance(old_applied, str) else ""
+    addition = agent_instructions.strip() if agent_instructions else ""
+    generated_values = {applied_instructions, saved_base}
+    generated_active_values: set[str] = set()
+    if addition:
+        generated_active_values = {
+            f"{value}\n\n{addition}" if value else addition
+            for value in (applied_instructions, saved_base)
+        }
+        generated_values.update(generated_active_values)
+    generated = current_instructions in generated_values
+    appended_edit = next(
+        (
+            current_instructions[len(value) :].strip()
+            for value in generated_active_values
+            if value and current_instructions.startswith(f"{value}\n\n")
+        ),
+        "",
+    )
+    if (
+        (generated or appended_edit)
+        and saved_base
+        and (candidate == saved_base or candidate.startswith(f"{saved_base}\n\n"))
+    ):
+        source_path = source_home / "config.toml"
+        try:
+            source = tomlkit.parse(source_path.read_text()) if source_path.exists() else {}
+        except (OSError, tomlkit.exceptions.TOMLKitError) as error:
+            raise ValueError(
+                f"Cannot migrate Codex profile instructions from {source_path}"
+            ) from error
+        else:
+            source_instructions = source.get("developer_instructions")
+            candidate = source_instructions.strip() if isinstance(source_instructions, str) else ""
+    if appended_edit:
+        candidate = f"{candidate}\n\n{appended_edit}" if candidate else appended_edit
+    elif not generated:
+        candidate = current_instructions
+    return candidate
+
+
+_NO_PROFILE_INSTRUCTIONS = object()
+
+
+def _selected_profile_instructions(
+    source_home: Path,
+    profile: str | None,
+    codex_version: tuple[int, int, int] | None,
+) -> object:
+    """Read a selected profile's instruction value for interrupted-start recovery."""
+    if profile is None:
+        return _NO_PROFILE_INSTRUCTIONS
+    if codex_version is None or codex_version >= (0, 134, 0):
+        document = tomlkit.parse((source_home / f"{profile}.config.toml").read_text()).unwrap()
+    else:
+        source_path = source_home / "config.toml"
+        source = tomlkit.parse(source_path.read_text()).unwrap() if source_path.exists() else {}
+        profiles = source.get("profiles")
+        document = profiles.get(profile) if isinstance(profiles, dict) else None
+        if not isinstance(document, dict):
+            raise ValueError(f"Codex config profile {profile!r} does not exist")
+    if not isinstance(document, dict):
+        return _NO_PROFILE_INSTRUCTIONS
+    value = document.get("developer_instructions", _NO_PROFILE_INSTRUCTIONS)
+    return value.strip() if isinstance(value, str) else value
+
+
+def _materialize_codex_profile_for_start(
+    codex_home: Path,
+    source_home: Path,
+    profile: str | None,
+    *,
+    codex_version: tuple[int, int, int] | None,
+    agent_instructions: str | None = None,
+) -> bool:
+    """Materialize one profile after restoring the prior instruction base.
+
+    The profile and developer-instruction sidecars both derive ``config.toml``.
+    Restore the previous instruction base before changing profile layers, then
+    tell the caller to capture the newly selected layer before appending this
+    launch's agent instructions.
+
+    :returns: Whether agent instructions should compose from the materialized
+        profile layer while retaining the separately saved user base.
+    """
+    profile_state_path = codex_home / ".omnigent-config-profile.toml"
+    profile_state_exists = profile_state_path.exists()
+    compose_profile_instructions = profile is not None or profile_state_exists
+    selected_instructions = _selected_profile_instructions(source_home, profile, codex_version)
+    migrated_instruction_base: object = _NO_INSTRUCTION_BASE_OVERRIDE
+    if profile_state_exists:
+        validate_codex_config_profile_state(codex_home)
+        try:
+            state = tomlkit.parse(profile_state_path.read_text()).unwrap()
+        except tomlkit.exceptions.TOMLKitError:
+            state = None
+        if isinstance(state, dict):
+            state_is_valid = all(
+                isinstance(state.get(key), dict) for key in ("base", "applied")
+            ) and ("pending" not in state or isinstance(state["pending"], dict))
+            if state_is_valid:
+                migrated_instruction_base = _migrate_profile_instruction_base(
+                    codex_home, source_home, state, agent_instructions
+                )
+    if compose_profile_instructions:
+        config_path = codex_home / "config.toml"
+        try:
+            current_config = tomlkit.parse(config_path.read_text()) if config_path.exists() else {}
+        except tomlkit.exceptions.TOMLKitError:
+            current_config = {}
+        current_instructions = current_config.get("developer_instructions")
+        current_matches_profile = isinstance(current_instructions, str) and (
+            current_instructions.strip() == selected_instructions
+        )
+        _sync_codex_developer_instructions(
+            codex_home,
+            None,
+            preserve_current_edit=(
+                migrated_instruction_base is _NO_INSTRUCTION_BASE_OVERRIDE
+                and not current_matches_profile
+            ),
+            base_override=migrated_instruction_base,
+            previous_instructions=agent_instructions,
+        )
+    materialize_codex_config_profile(
+        codex_home,
+        source_home,
+        profile,
+        codex_version=codex_version,
+    )
+    return compose_profile_instructions
 
 
 def _codex_model_catalog_entry(catalog: object, model: str) -> dict[str, object] | None:
@@ -1649,11 +1873,12 @@ class CodexNativeAppServer:
             extend_model_catalog=codex_extended_catalog_requested(self.env),
             supported_efforts=CODEX_NATIVE_EFFORTS,
         )
-        materialize_codex_config_profile(
+        compose_profile_instructions = _materialize_codex_profile_for_start(
             self.codex_home,
             config_source,
             self.config_profile,
             codex_version=codex_version,
+            agent_instructions=self.developer_instructions,
         )
         if self.trust_project:
             _trust_codex_project(self.codex_home, self.cwd)
@@ -1679,6 +1904,7 @@ class CodexNativeAppServer:
         _sync_codex_developer_instructions(
             self.codex_home,
             self.developer_instructions,
+            use_current_base=compose_profile_instructions,
         )
         self.config_overrides = materialize_codex_provider_config(
             self.codex_home,

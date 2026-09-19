@@ -38,6 +38,8 @@ _CODEX_CONFIG_PATHS = (
     ),
 )
 
+_MISSING = object()
+
 
 def absolute_codex_path(value: str, base: Path) -> str:
     """Match Codex's lexical path normalization without resolving symlinks."""
@@ -210,6 +212,10 @@ def _profile_base(state_path: Path, current: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Invalid Codex profile state: {state_path}") from error
     if not all(isinstance(state.get(key), dict) for key in ("base", "applied")):
         raise ValueError(f"Invalid Codex profile state: {state_path}")
+    for key in ("base", "applied", "pending"):
+        value = state.get(key)
+        if isinstance(value, dict):
+            value.pop("developer_instructions", None)
     base = state["base"]
     if "pending" in state:
         if not isinstance(state["pending"], dict):
@@ -221,6 +227,17 @@ def _profile_base(state_path: Path, current: dict[str, Any]) -> dict[str, Any]:
     else:
         _carry_config_edits(base, state["applied"], current)
     return base
+
+
+def validate_codex_config_profile_state(codex_home: Path) -> None:
+    """Validate an existing profile journal without modifying private config."""
+    state_path = codex_home / ".omnigent-config-profile.toml"
+    if not state_path.exists():
+        return
+    config_path = codex_home / "config.toml"
+    current = tomlkit.parse(config_path.read_text()).unwrap() if config_path.exists() else {}
+    current.pop("developer_instructions", None)
+    _profile_base(state_path, current)
 
 
 def materialize_codex_config_profile(
@@ -248,6 +265,7 @@ def materialize_codex_config_profile(
         tomlkit.parse(config_path.read_text()) if config_path.exists() else tomlkit.document()
     )
     current_config = current.unwrap()
+    current_instructions = current_config.pop("developer_instructions", _MISSING)
     base = _profile_base(state_path, current_config) if state_path.exists() else current_config
     merged = copy.deepcopy(base)
     if profile is not None:
@@ -260,11 +278,20 @@ def materialize_codex_config_profile(
             if not isinstance(overlay, dict):
                 raise ValueError(f"Codex config profile {profile!r} does not exist")
         overlay = copy.deepcopy(overlay)
+        profile_instructions = overlay.pop("developer_instructions", _MISSING)
         _resolve_profile_paths(overlay, source_home)
         _merge_tables(merged, overlay)
         if overlay.get("sandbox_mode") is not None and overlay.get("default_permissions") is None:
             merged.pop("default_permissions", None)
-    rendered = tomlkit.dumps(merged)
+    else:
+        profile_instructions = _MISSING
+    rendered_config = copy.deepcopy(merged)
+    effective_instructions = (
+        profile_instructions if profile_instructions is not _MISSING else current_instructions
+    )
+    if effective_instructions is not _MISSING:
+        rendered_config["developer_instructions"] = effective_instructions
+    rendered = tomlkit.dumps(rendered_config)
     pending_state = tomlkit.dumps({"base": base, "applied": current_config, "pending": merged})
     final_state = tomlkit.dumps({"base": base, "applied": merged})
     _write_private_config(state_path, pending_state)
