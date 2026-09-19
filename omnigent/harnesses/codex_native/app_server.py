@@ -34,6 +34,12 @@ if TYPE_CHECKING:
 
 from omnigent.cli_invocation import cli_invocation
 from omnigent.harnesses.codex_native.bridge import write_policy_hook_config
+from omnigent.harnesses.codex_native.launch_args import (
+    canonical_codex_launch_args,
+    codex_config_profile,
+    materialize_codex_config_profile,
+    without_codex_config_profile,
+)
 from omnigent.harnesses.codex_native.process_registry import (
     CodexNativeProcessOwnerLock,
     acquire_codex_native_process_owner_lock,
@@ -1538,6 +1544,8 @@ class CodexNativeAppServer:
     :param reconcile_process_registry: Whether startup synchronously performs
         host-global crash registry maintenance. Runner-owned launches delegate
         it to the host janitor; standalone callers keep the safe default.
+    :param config_profile: Codex user config-file profile materialized into
+        the private user layer before app-server and terminal startup.
     """
 
     codex_path: str
@@ -1567,6 +1575,7 @@ class CodexNativeAppServer:
     trust_all_hooks: bool = False
     router_hooks_registered: bool = False
     reconcile_process_registry: bool = True
+    config_profile: str | None = None
 
     async def start(self) -> None:
         """
@@ -1638,6 +1647,12 @@ class CodexNativeAppServer:
             inject_hooks=self.router_hooks_registered,
             extend_model_catalog=codex_extended_catalog_requested(self.env),
             supported_efforts=CODEX_NATIVE_EFFORTS,
+        )
+        materialize_codex_config_profile(
+            self.codex_home,
+            config_source,
+            self.config_profile,
+            profile_v2=codex_version is None or codex_version >= (0, 155, 0),
         )
         if self.trust_project:
             _trust_codex_project(self.codex_home, self.cwd)
@@ -2704,6 +2719,7 @@ def build_codex_native_server(
     reasoning_effort: str | None = None,
     model_catalog_rows: list[_JsonObject] | None = None,
     reconcile_process_registry: bool = True,
+    terminal_launch_args: Sequence[str] = (),
 ) -> CodexNativeAppServer:
     """
     Build a configured native Codex app-server process wrapper.
@@ -2758,6 +2774,8 @@ def build_codex_native_server(
         crash registry sweep. Runner-owned launches disable this because the
         host janitor owns it; standalone callers keep the
         synchronous safety default.
+    :param terminal_launch_args: Original CLI options used to select the Codex
+        config-file profile (distinct from the Databricks routing profile).
     :returns: Configured app-server process wrapper.
     :raises ImportError: If no Codex CLI is available.
     :raises OSError: If Databricks routing was requested but no
@@ -2814,6 +2832,7 @@ def build_codex_native_server(
         codex_home=codex_home,
         env=env,
         config_overrides=config_overrides,
+        config_profile=codex_config_profile(terminal_launch_args),
         cwd=cwd,
         bridge_dir=bridge_dir,
         developer_instructions=developer_instructions,
@@ -3560,9 +3579,9 @@ def normalize_codex_permission_launch_args(
       automatic reviewer settle eligible requests instead of prompting.
       Any explicit approval/sandbox/reviewer/profile choice wins untouched.
     """
-    args = list(terminal_launch_args or ())
+    args = canonical_codex_launch_args(terminal_launch_args or ())
     full_access = False
-    has_permission_profile = False
+    has_permission_profile = codex_config_profile(args) is not None
     has_reviewer = False
     has_sandbox = False
     has_approval_policy = "--dangerously-bypass-approvals-and-sandbox" in args
@@ -3570,8 +3589,12 @@ def normalize_codex_permission_launch_args(
     index = 0
     while index < len(args):
         arg = args[index]
+        if arg == "--":
+            break
         assignment: str | None = None
-        if arg in {"--ask-for-approval", "-a"} or arg.startswith(("--ask-for-approval=", "-a=")):
+        if arg == "--approve-for-me":
+            has_reviewer = True
+        elif arg in {"--ask-for-approval", "-a"} or arg.startswith(("--ask-for-approval=", "-a=")):
             has_approval_policy = True
         elif arg in {"--sandbox", "-s"} or arg.startswith(("--sandbox=", "-s=")):
             has_sandbox = True
@@ -3618,24 +3641,27 @@ def _codex_config_string(raw_value: str) -> str:
 def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) -> CodexParams:
     """Convert persisted Codex permission args into thread-resume overrides."""
     params: CodexParams = {}
+    typed_params: CodexParams = {}
     args = normalize_codex_permission_launch_args(terminal_launch_args)
     index = 0
     while index < len(args):
         arg = args[index]
+        if arg == "--":
+            break
         value: str | None = None
         if arg == "--dangerously-bypass-approvals-and-sandbox":
-            params.update(approvalPolicy="never", sandbox="danger-full-access")
+            typed_params.update(approvalPolicy="never", sandbox="danger-full-access")
         elif arg in {"--ask-for-approval", "-a", "--sandbox", "-s"}:
             if index + 1 < len(args):
                 value = args[index + 1]
                 index += 1
             if value is not None:
                 field = "approvalPolicy" if arg in {"--ask-for-approval", "-a"} else "sandbox"
-                params[field] = value
+                typed_params[field] = value
         elif arg.startswith(("--ask-for-approval=", "-a=")):
-            params["approvalPolicy"] = arg.split("=", 1)[1]
+            typed_params["approvalPolicy"] = arg.split("=", 1)[1]
         elif arg.startswith(("--sandbox=", "-s=")):
-            params["sandbox"] = arg.split("=", 1)[1]
+            typed_params["sandbox"] = arg.split("=", 1)[1]
         elif arg in {"--config", "-c"} and index + 1 < len(args):
             index += 1
             key, _, value = args[index].partition("=")
@@ -3644,6 +3670,13 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
             key, _, value = arg.split("=", 1)[1].partition("=")
             _set_codex_resume_config_param(params, key, value)
         index += 1
+    if "--approve-for-me" in args:
+        if "sandbox" in typed_params:
+            raise ValueError("--approve-for-me conflicts with sandbox and bypass flags")
+        params.update(
+            approvalsReviewer="auto_review", approvalPolicy="on-request", sandbox="workspace-write"
+        )
+    params.update(typed_params)
     if "permissions" in params:
         params.pop("sandbox", None)
     return params
@@ -3707,6 +3740,7 @@ async def preload_codex_thread_for_resume(
     *,
     terminal_launch_args: Sequence[str] | None = None,
     retain_client: bool = False,
+    cwd: Path | None = None,
 ) -> CodexAppServerClient | None:
     """
     Load an existing Codex thread into a freshly started app-server.
@@ -3724,6 +3758,7 @@ async def preload_codex_thread_for_resume(
     :param terminal_launch_args: Persisted permission overrides for the resumed thread.
     :param retain_client: Keep the thread subscribed through terminal attachment.
         The caller must pass the returned client to the forwarder and close it.
+    :param cwd: Session working directory for resolving additional writable roots.
     :returns: The subscribed client when retained, otherwise None.
     :raises RuntimeError: If the app-server rejects the resume.
     """
@@ -3734,12 +3769,73 @@ async def preload_codex_thread_for_resume(
     retained = False
     try:
         await client.connect()
+        params = _codex_resume_permission_params(terminal_launch_args)
+        args = canonical_codex_launch_args(terminal_launch_args or ())
+        additional_roots: list[str] = []
+        effective_cwd = cwd or Path.cwd()
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == "--":
+                break
+            if arg in {"--add-dir", "--cd", "-C"}:
+                if index + 1 == len(args) or args[index + 1].startswith("-"):
+                    raise ValueError(f"Codex requires a directory for {arg}")
+                index += 1
+                if arg == "--add-dir":
+                    additional_roots.append(args[index])
+                else:
+                    effective_cwd = (effective_cwd / args[index]).resolve()
+            elif arg in {
+                "-c",
+                "--config",
+                "-m",
+                "--model",
+                "-s",
+                "--sandbox",
+                "-a",
+                "--ask-for-approval",
+                "-p",
+                "--profile",
+            }:
+                index += 1
+            index += 1
+        if additional_roots:
+            response = await client.request(
+                "config/read", {"includeLayers": False, "cwd": str(effective_cwd)}
+            )
+            loaded_config = response["result"]["config"]
+            sandbox_config = loaded_config.get("sandbox_workspace_write") or {}
+            roots = sandbox_config.get("writable_roots") or []
+            config = cast(CodexParams, params.setdefault("config", {}))
+            if "sandbox_workspace_write" in config:
+                configured = config["sandbox_workspace_write"]
+                if not isinstance(configured, dict):
+                    raise ValueError("sandbox_workspace_write must be a table")
+                roots = configured.get("writable_roots", roots)
+            roots = config.get("sandbox_workspace_write.writable_roots", roots)
+            if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+                raise ValueError(
+                    "sandbox_workspace_write.writable_roots must be an array of paths"
+                )
+            if params.get("permissions") or loaded_config.get("default_permissions"):
+                roots = []
+            params["runtimeWorkspaceRoots"] = list(
+                dict.fromkeys(
+                    [
+                        str(effective_cwd),
+                        *(str((effective_cwd / root).resolve()) for root in additional_roots),
+                        *roots,
+                    ]
+                )
+            )
+            params["cwd"] = str(effective_cwd)
         await client.request(
             "thread/resume",
             {
                 "threadId": thread_id,
                 "excludeTurns": True,
-                **_codex_resume_permission_params(terminal_launch_args),
+                **params,
             },
         )
         if retain_client:
@@ -3857,11 +3953,15 @@ def _strip_approval_sandbox_flags(codex_args: tuple[str, ...]) -> list[str]:
     :returns: ``codex_args`` with the conflicting flags removed, e.g.
         ``["--model", "gpt-5.4-mini"]``.
     """
+    codex_args = tuple(canonical_codex_launch_args(codex_args))
     cleaned: list[str] = []
     i = 0
     n = len(codex_args)
     while i < n:
         arg = codex_args[i]
+        if arg == "--":
+            cleaned.extend(codex_args[i:])
+            break
         if arg in _CODEX_APPROVAL_SANDBOX_FLAGS:
             # ``--flag value``: drop the flag, and consume the NEXT token as
             # its value ONLY when that token is a real value — it exists and
@@ -3877,7 +3977,7 @@ def _strip_approval_sandbox_flags(codex_args: tuple[str, ...]) -> list[str]:
             # ``--flag=value`` single token: drop it whole, consume nothing.
             i += 1
             continue
-        if arg == _CODEX_BYPASS_SANDBOX_FLAG:
+        if arg in {_CODEX_BYPASS_SANDBOX_FLAG, "--approve-for-me"}:
             # Drop any pre-existing bypass flag; a single canonical copy is
             # re-added by the caller so it is never duplicated.
             i += 1
@@ -3894,6 +3994,12 @@ def _strip_codex_resume_permission_args(codex_args: tuple[str, ...]) -> list[str
     index = 0
     while index < len(args):
         arg = args[index]
+        if arg == "--":
+            cleaned.extend(args[index:])
+            break
+        if arg == "--add-dir":
+            index += 2
+            continue
         assignment: str | None = None
         width = 1
         if arg in {"-c", "--config"} and index + 1 < len(args):
@@ -4010,6 +4116,7 @@ def build_codex_remote_args(
         passthrough = [_CODEX_BYPASS_SANDBOX_FLAG, *_strip_approval_sandbox_flags(codex_args)]
     else:
         passthrough = normalize_codex_permission_launch_args(codex_args)
+    passthrough = without_codex_config_profile(passthrough)
     if bypass_hook_trust:
         passthrough = [_CODEX_BYPASS_HOOK_TRUST_FLAG, *passthrough]
     if thread_id is None:

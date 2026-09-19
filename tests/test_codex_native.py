@@ -1254,7 +1254,6 @@ def test_remote_resume_preserves_legacy_bypass_args(
 @pytest.mark.parametrize(
     "args",
     [
-        ("--add-dir", "/extra-workspace"),
         ("--config", "sandbox_workspace_write.network_access=1979-05-27"),
         ("--config", "network.proxy_port=nan"),
         ("--config", "network.proxy_port=inf"),
