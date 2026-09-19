@@ -3823,7 +3823,10 @@ async def preload_codex_thread_for_resume(
             response = await client.request(
                 "config/read", {"includeLayers": False, "cwd": str(effective_cwd)}
             )
-            loaded_config = response["result"]["config"]
+            result = response.get("result")
+            loaded_config = result.get("config") if isinstance(result, dict) else None
+            if not isinstance(loaded_config, dict):
+                raise ValueError("Codex config/read returned an invalid config")
             sandbox_config = loaded_config.get("sandbox_workspace_write") or {}
             roots = sandbox_config.get("writable_roots") or []
             config = cast(CodexParams, params.setdefault("config", {}))
