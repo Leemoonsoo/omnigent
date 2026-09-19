@@ -591,6 +591,8 @@ async def test_remote_resume_transfers_raw_config_layers_by_precedence(
                         }
                     }
                 },
+                {"name": "runtime"},
+                {"name": "system", "config": None},
             ],
         }
     }

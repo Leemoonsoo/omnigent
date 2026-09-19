@@ -4095,9 +4095,13 @@ async def preload_codex_thread_for_resume(
                 raise ValueError("Codex config/read returned invalid config layers")
             resume_config: CodexParams = {}
             for layer in reversed(layers):
-                if isinstance(layer, dict) and layer.get("disabledReason") is not None:
+                if not isinstance(layer, dict):
+                    raise ValueError("Codex config/read returned an invalid config layer")
+                if layer.get("disabledReason") is not None:
                     continue
-                layer_config = layer.get("config") if isinstance(layer, dict) else None
+                layer_config = layer.get("config")
+                if layer_config is None:
+                    continue
                 if not isinstance(layer_config, dict):
                     raise ValueError("Codex config/read returned an invalid config layer")
                 _merge_codex_resume_config(resume_config, cast(CodexParams, layer_config))
