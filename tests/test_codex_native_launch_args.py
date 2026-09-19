@@ -609,6 +609,29 @@ async def test_remote_resume_transfers_raw_config_layers_by_precedence(
     }
 
 
+async def test_remote_resume_preserves_cross_key_permission_precedence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = AsyncMock()
+    client.request.return_value = {
+        "result": {
+            "config": {"sandbox_mode": "read-only"},
+            "layers": [
+                {"config": {"sandbox_mode": "read-only"}},
+                {"config": {"default_permissions": ":danger-full-access"}},
+            ],
+        }
+    }
+    monkeypatch.setattr(app_server, "client_for_transport", lambda *args, **kwargs: client)
+
+    await app_server.preload_codex_thread_for_resume(
+        "ws://127.0.0.1:9876", "thread-test", cwd=tmp_path
+    )
+
+    params = client.request.call_args_list[-1].args[1]
+    assert params["config"] == {"sandbox_mode": "read-only"}
+
+
 async def test_legacy_remote_resume_does_not_require_config_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

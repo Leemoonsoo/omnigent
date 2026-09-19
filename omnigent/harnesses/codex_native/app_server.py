@@ -356,7 +356,7 @@ def _pin_codex_config_model(codex_home: Path, model: str) -> None:
 
 
 def _pin_codex_config_model_provider(codex_home: Path, config_overrides: Sequence[str]) -> None:
-    """Persist provider selection so resumed remote TUIs need no config argv."""
+    """Persist a generated provider selection while preserving the user's base."""
     provider: str | None = None
     for override in config_overrides:
         key, separator, raw_value = override.partition("=")
@@ -366,7 +366,8 @@ def _pin_codex_config_model_provider(codex_home: Path, config_overrides: Sequenc
         if not value:
             raise ValueError("Codex model_provider override must be a non-empty string")
         provider = value
-    if provider is None:
+    state_path = codex_home / ".omnigent-model-provider-state.toml"
+    if provider is None and not state_path.exists():
         return
     config_path = codex_home / "config.toml"
     _materialize_config_symlink(config_path)
@@ -375,8 +376,63 @@ def _pin_codex_config_model_provider(codex_home: Path, config_overrides: Sequenc
         if config_path.exists()
         else tomlkit.document()
     )
-    document["model_provider"] = provider
+    current_present = "model_provider" in document
+    current_value = document.get("model_provider")
+    if current_present and not isinstance(current_value, str):
+        raise ValueError("Codex model_provider config must be a string")
+    current = (current_present, current_value if isinstance(current_value, str) else "")
+
+    if state_path.exists():
+        try:
+            state = tomlkit.parse(state_path.read_text()).unwrap()
+        except tomlkit.exceptions.TOMLKitError as error:
+            raise ValueError(f"Invalid Codex model-provider state: {state_path}") from error
+
+        def selection(name: str) -> tuple[bool, str]:
+            present = state.get(f"{name}_present")
+            value = state.get(name)
+            if not isinstance(present, bool) or not isinstance(value, str):
+                raise ValueError(f"Invalid Codex model-provider state: {state_path}")
+            return present, value
+
+        base = selection("base")
+        generated = {selection("applied")}
+        if "pending_present" in state or "pending" in state:
+            generated.add(selection("pending"))
+        if current not in generated:
+            base = current
+    else:
+        base = current
+
+    target = (True, provider) if provider is not None else base
+    if target[0]:
+        document["model_provider"] = target[1]
+    elif "model_provider" in document:
+        del document["model_provider"]
+    pending_state = tomlkit.dumps(
+        {
+            "base_present": base[0],
+            "base": base[1],
+            "applied_present": current[0],
+            "applied": current[1],
+            "pending_present": target[0],
+            "pending": target[1],
+        }
+    )
+    final_state = tomlkit.dumps(
+        {
+            "base_present": base[0],
+            "base": base[1],
+            "applied_present": target[0],
+            "applied": target[1],
+        }
+    )
+    _write_private_config(state_path, pending_state)
     _write_private_config(config_path, tomlkit.dumps(document))
+    if provider is None:
+        state_path.unlink()
+    else:
+        _write_private_config(state_path, final_state)
     os.chmod(config_path, 0o600)
 
 
@@ -3997,14 +4053,20 @@ def _codex_config_string(raw_value: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _merge_codex_resume_config(base: CodexParams, overlay: CodexParams) -> None:
-    """Merge a lower-to-higher precedence raw Codex config layer."""
+def _merge_codex_resume_table(base: CodexParams, overlay: CodexParams) -> None:
     for key, value in overlay.items():
         existing = base.get(key)
         if isinstance(existing, dict) and isinstance(value, dict):
-            _merge_codex_resume_config(cast(CodexParams, existing), cast(CodexParams, value))
+            _merge_codex_resume_table(cast(CodexParams, existing), cast(CodexParams, value))
         else:
             base[key] = value
+
+
+def _merge_codex_resume_config(base: CodexParams, overlay: CodexParams) -> None:
+    """Merge one lower-to-higher precedence raw Codex config layer."""
+    if overlay.get("sandbox_mode") is not None and overlay.get("default_permissions") is None:
+        base.pop("default_permissions", None)
+    _merge_codex_resume_table(base, overlay)
 
 
 async def preload_codex_thread_for_resume(

@@ -2681,6 +2681,30 @@ async def test_native_codex_persists_terminal_model_provider_for_resumed_tui(
         'approvals_reviewer="auto_review"',
     )
 
+    server.terminal_launch_args = ()
+    await server.start()
+    await server.close()
+
+    config = tomllib.loads((server.codex_home / "config.toml").read_text())
+    assert "model_provider" not in config
+    assert not (server.codex_home / ".omnigent-model-provider-state.toml").exists()
+
+
+def test_model_provider_pin_preserves_private_user_edit(tmp_path: Path) -> None:
+    from omnigent.harnesses.codex_native import app_server as codex_native_app_server
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('model_provider="user-default"\n')
+    codex_native_app_server._pin_codex_config_model_provider(
+        tmp_path, ['model_provider="generated"']
+    )
+    config_path.write_text('model_provider="private-edit"\n')
+
+    codex_native_app_server._pin_codex_config_model_provider(tmp_path, ())
+
+    assert tomllib.loads(config_path.read_text())["model_provider"] == "private-edit"
+    assert not (tmp_path / ".omnigent-model-provider-state.toml").exists()
+
 
 @pytest.mark.parametrize("provider_value", ["local", '"local"'])
 async def test_native_codex_merges_partial_provider_and_accepts_literal_name(
