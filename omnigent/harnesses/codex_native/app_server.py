@@ -4001,12 +4001,14 @@ def _codex_app_server_terminal_config_overrides(
     config_overrides: list[str] = []
     typed_overrides: list[str] = []
     auto_review = False
+    sandbox_alias = False
     index = 0
     while index < len(args):
         arg = args[index]
         if arg == "--":
             break
         if arg == "--dangerously-bypass-approvals-and-sandbox":
+            sandbox_alias = True
             typed_overrides = [
                 'approval_policy="never"',
                 'sandbox_mode="danger-full-access"',
@@ -4017,10 +4019,12 @@ def _codex_app_server_terminal_config_overrides(
             if index + 1 < len(args):
                 index += 1
                 key = "approval_policy" if arg in {"--ask-for-approval", "-a"} else "sandbox_mode"
+                sandbox_alias = sandbox_alias or key == "sandbox_mode"
                 typed_overrides.append(f"{key}={json.dumps(args[index])}")
         elif arg.startswith(("--ask-for-approval=", "-a=")):
             typed_overrides.append(f"approval_policy={json.dumps(arg.split('=', 1)[1])}")
         elif arg.startswith(("--sandbox=", "-s=")):
+            sandbox_alias = True
             typed_overrides.append(f"sandbox_mode={json.dumps(arg.split('=', 1)[1])}")
         elif arg in {"--config", "-c"} and index + 1 < len(args):
             index += 1
@@ -4029,6 +4033,8 @@ def _codex_app_server_terminal_config_overrides(
             config_overrides.append(arg.split("=", 1)[1])
         index += 1
     if auto_review:
+        if sandbox_alias:
+            raise ValueError("--approve-for-me conflicts with sandbox and bypass flags")
         config_overrides.extend(
             [
                 'approvals_reviewer="auto_review"',

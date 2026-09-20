@@ -112,6 +112,23 @@ def test_remote_resume_option_spellings(
     ) == ["resume", "--remote", "ws://127.0.0.1:9876", "thread-test"]
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--approve-for-me", "--sandbox", "danger-full-access"),
+        ("--approve-for-me", "--yolo"),
+    ],
+)
+def test_remote_resume_rejects_conflicting_permission_aliases(args: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="conflicts with sandbox and bypass flags"):
+        app_server._build_native_codex_app_server_argv(
+            tagged_argv0="codex",
+            listen_url="ws://127.0.0.1:9876",
+            config_overrides=(),
+            terminal_launch_args=args,
+        )
+
+
 def test_remote_resume_future_permission_namespace_is_server_owned() -> None:
     args = (
         "-c",
