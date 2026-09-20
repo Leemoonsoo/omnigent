@@ -1778,6 +1778,7 @@ def _build_native_codex_app_server_argv(
     config_overrides: Sequence[str],
     terminal_launch_args: Sequence[str] = (),
     terminal_config_overrides: Sequence[str] | None = None,
+    enforce_policy_hooks: bool = True,
 ) -> list[str]:
     """Build app-server argv with generic CLI config and resolved aliases."""
     argv = [tagged_argv0, "app-server", "--listen", listen_url]
@@ -1792,6 +1793,8 @@ def _build_native_codex_app_server_argv(
         *config_overrides,
     ):
         argv.extend(["-c", override])
+    if enforce_policy_hooks:
+        argv.extend(["-c", "features.hooks=true"])
     return argv
 
 
@@ -2065,6 +2068,7 @@ class CodexNativeAppServer:
             config_overrides=self.config_overrides,
             terminal_launch_args=self.terminal_launch_args,
             terminal_config_overrides=self.terminal_config_overrides,
+            enforce_policy_hooks=policy_hooks_supported,
         )
         proc_env = {**self.env, "CODEX_HOME": str(self.codex_home)}
         self.process_owner_lock = acquire_codex_native_process_owner_lock()

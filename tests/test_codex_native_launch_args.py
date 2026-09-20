@@ -104,6 +104,8 @@ def test_remote_resume_option_spellings(
         "--listen",
         "ws://127.0.0.1:9876",
         *(part for override in expected_app_server_args for part in ("-c", override)),
+        "-c",
+        "features.hooks=true",
     ]
     assert app_server.build_codex_remote_args(
         codex_args=args, thread_id="thread-test", remote_url="ws://127.0.0.1:9876"
@@ -129,6 +131,8 @@ def test_remote_resume_future_permission_namespace_is_server_owned() -> None:
         "future_permissions.network=false",
         "-c",
         'approvals_reviewer="auto_review"',
+        "-c",
+        "features.hooks=true",
     ]
     assert app_server.build_codex_remote_args(
         codex_args=args,
@@ -158,7 +162,37 @@ def test_strict_config_is_applied_to_app_server() -> None:
         "future_permissions.network=false",
         "-c",
         'approvals_reviewer="auto_review"',
+        "-c",
+        "features.hooks=true",
     ]
+
+
+def test_app_server_forces_policy_hooks_after_user_config() -> None:
+    args = ("-c", "features.hooks=false")
+
+    enforced = app_server._build_native_codex_app_server_argv(
+        tagged_argv0="codex",
+        listen_url="ws://127.0.0.1:9876",
+        config_overrides=(),
+        terminal_launch_args=args,
+    )
+    assert enforced[-2:] == ["-c", "features.hooks=true"]
+    assert enforced.index("features.hooks=false") < enforced.index("features.hooks=true")
+    unsupported = app_server._build_native_codex_app_server_argv(
+        tagged_argv0="codex",
+        listen_url="ws://127.0.0.1:9876",
+        config_overrides=(),
+        terminal_launch_args=args,
+        enforce_policy_hooks=False,
+    )
+    assert "features.hooks=false" in unsupported
+    assert "features.hooks=true" not in unsupported
+    assert app_server.build_codex_remote_args(
+        codex_args=args,
+        thread_id="thread-test",
+        remote_url="ws://127.0.0.1:9876",
+        codex_cli_version=(0, 155, 0),
+    ) == ["resume", "--remote", "ws://127.0.0.1:9876", "thread-test"]
 
 
 @pytest.mark.parametrize(
@@ -183,6 +217,8 @@ def test_profile_selector_applied_by_server_not_terminal(args: tuple[str, ...]) 
         "app-server",
         "--listen",
         "ws://127.0.0.1:9876",
+        "-c",
+        "features.hooks=true",
     ]
     for thread_id in (None, "thread-test"):
         result = app_server.build_codex_remote_args(
