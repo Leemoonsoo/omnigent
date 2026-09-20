@@ -1122,7 +1122,7 @@ def test_remote_resume_merges_permission_config_without_dropping_profile() -> No
         config_overrides=(),
         terminal_launch_args=launch_args,
     )
-    assert app_server_argv.count("-c") == 6
+    assert app_server_argv.count("-c") == 7
     assert "permissions.restricted.network.enabled=false" in app_server_argv
     assert "network.enabled=false" in app_server_argv
     assert codex_native_app_server.build_codex_remote_args(
@@ -1182,6 +1182,8 @@ def test_remote_resume_preserves_overlapping_permission_config_order(
         *(part for assignment in assignments for part in ("-c", assignment)),
         "-c",
         'sandbox_mode="workspace-write"',
+        "-c",
+        "features.hooks=true",
     ]
     assert expected_config
     assert codex_native_app_server.build_codex_remote_args(
