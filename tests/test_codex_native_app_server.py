@@ -2690,6 +2690,42 @@ async def test_native_codex_persists_terminal_model_provider_for_resumed_tui(
     assert not (server.codex_home / ".omnigent-model-provider-state.toml").exists()
 
 
+async def test_model_provider_pin_restores_base_across_profile_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "config.toml").write_text('model_provider="user-default"\n')
+    (source_home / "strict.config.toml").write_text('model_provider="profile-provider"\n')
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    _disable_codex_startup_rpc(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = _test_app_server(
+        tmp_path,
+        tmp_path / "codex-home",
+        tmp_path / "bridge",
+        workspace,
+    )
+
+    server.terminal_launch_args = ("-c", 'model_provider="generated"')
+    await server.start()
+    await server.close()
+
+    server.config_profile = "strict"
+    await server.start()
+    await server.close()
+
+    server.config_profile = None
+    server.terminal_launch_args = ()
+    await server.start()
+    await server.close()
+
+    config = tomllib.loads((server.codex_home / "config.toml").read_text())
+    assert config["model_provider"] == "user-default"
+    assert not (server.codex_home / ".omnigent-model-provider-state.toml").exists()
+
+
 def test_model_provider_pin_preserves_private_user_edit(tmp_path: Path) -> None:
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
 

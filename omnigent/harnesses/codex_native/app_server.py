@@ -1972,6 +1972,7 @@ class CodexNativeAppServer:
             extend_model_catalog=codex_extended_catalog_requested(self.env),
             supported_efforts=CODEX_NATIVE_EFFORTS,
         )
+        _pin_codex_config_model_provider(self.codex_home, ())
         compose_profile_instructions = _materialize_codex_profile_for_start(
             self.codex_home,
             config_source,
