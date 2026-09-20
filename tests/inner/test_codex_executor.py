@@ -3950,6 +3950,43 @@ def test_materialize_codex_provider_config_merges_partial_provider_override(
     }
 
 
+@pytest.mark.parametrize(
+    "provider_config",
+    [
+        (
+            'model_providers = { local = { name = "Local", '
+            'base_url = "https://local.invalid/v1", wire_api = "responses", '
+            "requires_openai_auth = false } }\n"
+        ),
+        (
+            "[model_providers]\n"
+            'local = { name = "Local", base_url = "https://local.invalid/v1", '
+            'wire_api = "responses", requires_openai_auth = false }\n'
+        ),
+    ],
+)
+def test_materialize_codex_provider_config_merges_nested_override_into_inline_provider(
+    tmp_path: Path,
+    provider_config: str,
+) -> None:
+    import tomllib
+
+    from omnigent.inner.codex_executor import materialize_codex_provider_config
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text(provider_config)
+
+    materialize_codex_provider_config(
+        codex_home,
+        ['model_providers.local.http_headers.X-Test="example"'],
+    )
+
+    provider = tomllib.loads(config_path.read_text())["model_providers"]["local"]
+    assert provider["http_headers"] == {"X-Test": "example"}
+
+
 # ---------------------------------------------------------------------------
 # _clean_codex_env tests
 # ---------------------------------------------------------------------------
