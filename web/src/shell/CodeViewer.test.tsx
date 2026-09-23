@@ -154,7 +154,10 @@ afterEach(() => {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("CodeViewer find-in-file shortcut", () => {
-  function renderMarkdownEditor(setSearchOpen: (open: boolean) => void) {
+  function renderMarkdownViewer(
+    viewMode: "editor" | "source",
+    setSearchOpen: (open: boolean) => void,
+  ) {
     render(
       <>
         <textarea aria-label="Prompt" />
@@ -169,7 +172,7 @@ describe("CodeViewer find-in-file shortcut", () => {
           searchOpen={false}
           setSearchOpen={setSearchOpen}
           searchInputRef={noopRef}
-          viewMode="editor"
+          viewMode={viewMode}
         />
       </>,
     );
@@ -178,7 +181,7 @@ describe("CodeViewer find-in-file shortcut", () => {
   it("leaves Ctrl+F to a focused composer on macOS", () => {
     vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     const setSearchOpen = vi.fn();
-    renderMarkdownEditor(setSearchOpen);
+    renderMarkdownViewer("editor", setSearchOpen);
     const composer = screen.getByRole("textbox", { name: "Prompt" });
     composer.focus();
 
@@ -198,11 +201,65 @@ describe("CodeViewer find-in-file shortcut", () => {
   it("opens Markdown find-in-file with Cmd+F on macOS", () => {
     vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     const setSearchOpen = vi.fn();
-    renderMarkdownEditor(setSearchOpen);
+    renderMarkdownViewer("editor", setSearchOpen);
 
     const event = new KeyboardEvent("keydown", {
       key: "f",
       metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(setSearchOpen).toHaveBeenCalledWith(true);
+  });
+
+  it("leaves Ctrl+F to a focused composer beside Markdown source on macOS", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const setSearchOpen = vi.fn();
+    renderMarkdownViewer("source", setSearchOpen);
+    const composer = screen.getByRole("textbox", { name: "Prompt" });
+    composer.focus();
+
+    const event = new KeyboardEvent("keydown", {
+      key: "f",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    composer.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(setSearchOpen).not.toHaveBeenCalled();
+    expect(composer).toHaveFocus();
+  });
+
+  it("opens Markdown source find-in-file with Cmd+F on macOS", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const setSearchOpen = vi.fn();
+    renderMarkdownViewer("source", setSearchOpen);
+
+    const event = new KeyboardEvent("keydown", {
+      key: "f",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(setSearchOpen).toHaveBeenCalledWith(true);
+  });
+
+  it("opens Markdown source find-in-file with Ctrl+F on Windows/Linux", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
+    const setSearchOpen = vi.fn();
+    renderMarkdownViewer("source", setSearchOpen);
+
+    const event = new KeyboardEvent("keydown", {
+      key: "f",
+      ctrlKey: true,
       bubbles: true,
       cancelable: true,
     });
