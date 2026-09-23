@@ -1179,9 +1179,10 @@ class HostProcess:
         # Warms the zygote at daemon start so the first launch doesn't pay
         # its one-time import; see run().
         self._zygote_prestart_task: asyncio.Task[ZygoteManager | None] | None = None
-        # Warms the store-backed native model catalogs once for this daemon's
-        # lifetime. A tunnel reconnect must neither restart nor cancel it.
-        self._model_options_prewarm_task: asyncio.Task[None] | None = None
+        # Warms the store-backed native model catalogs for this daemon's
+        # lifetime. A tunnel reconnect retains successful or in-flight work;
+        # a completed failed attempt may be retried.
+        self._model_options_prewarm_task: asyncio.Task[bool] | None = None
         # Discovery belongs to the daemon so connection retries share one
         # in-flight probe and registration waits for bounded discovery.
         self._capability_init_task: asyncio.Task[None] | None = None
@@ -3045,7 +3046,7 @@ class HostProcess:
             timeout=10.0,
         )
 
-    async def _prewarm_model_options(self) -> None:
+    async def _prewarm_model_options(self) -> bool:
         """
         Fill the on-disk model catalogs for the probing harnesses at boot.
 
@@ -3055,12 +3056,29 @@ class HostProcess:
         same single-flight probe through the shared store instead of
         starting a second one.
 
-        :returns: None. Probe failures are absorbed by the probe wrappers.
+        :returns: Whether both catalogs were available. Probe failures are
+            absorbed by the probe wrappers.
         """
-        await asyncio.gather(
+        results = await asyncio.gather(
             self._probed_codex_model_options(),
             self._probed_claude_model_options(),
             return_exceptions=True,
+        )
+        return all(
+            result is not None and not isinstance(result, BaseException) for result in results
+        )
+
+    def _ensure_model_options_prewarm(self) -> None:
+        """Start or retry the host-owned catalog prewarm when needed."""
+        task = self._model_options_prewarm_task
+        if task is not None:
+            if not task.done():
+                return
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                if task.result():
+                    return
+        self._model_options_prewarm_task = asyncio.create_task(
+            self._prewarm_model_options(), name="host-model-options-prewarm"
         )
 
     async def _probed_codex_model_options(self) -> ModelOptionsResult | None:
@@ -3719,15 +3737,17 @@ class HostProcess:
         # first picker or launch can use the shared store instead of waiting
         # on a harness probe. This is independent of any one server tunnel:
         # reconnecting must not discard useful cold-start work.
-        self._model_options_prewarm_task = asyncio.create_task(
-            self._prewarm_model_options(), name="host-model-options-prewarm"
-        )
+        self._ensure_model_options_prewarm()
         self._start_capability_discovery()
         backoff = _RECONNECT_BASE_S
         try:
             while True:
                 if self._lifecycle_lost.is_set():
                     break
+                # A completed failed boot probe gets another best-effort chance
+                # when the tunnel reconnects. Successful or in-flight host work
+                # is retained rather than restarted for each connection.
+                self._ensure_model_options_prewarm()
                 try:
                     await self._connect_and_serve()
                     backoff = _RECONNECT_BASE_S
@@ -3890,15 +3910,27 @@ class HostProcess:
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
+            model_options_prewarm_task = self._model_options_prewarm_task
+            if model_options_prewarm_task is not None:
+                model_options_prewarm_task.cancel()
             # Stop accepting lifecycle work before draining teardown tasks.
             # Cancelling an in-flight launch retains its shielded spawn in
             # _runner_stop_tasks, so quiescing frame handlers first closes the
             # race where shutdown took an incomplete snapshot of those tasks.
-            await self._quiesce_frame_tasks()
-            await self._drain_runner_stop_tasks()
-            if self._maintenance_janitor is not None:
-                await self._maintenance_janitor.shutdown()
-                self._maintenance_janitor = None
+            try:
+                await self._quiesce_frame_tasks()
+                await self._drain_runner_stop_tasks()
+                if self._maintenance_janitor is not None:
+                    await self._maintenance_janitor.shutdown()
+                    self._maintenance_janitor = None
+            finally:
+                if model_options_prewarm_task is not None:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await model_options_prewarm_task
+                self._model_options_prewarm_task = None
+                from omnigent.models.model_catalog_store import shutdown_catalog_probes
+
+                await shutdown_catalog_probes()
             if self._reaper_task is not None:
                 self._reaper_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -3919,14 +3951,6 @@ class HostProcess:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._capability_init_task
                 self._capability_init_task = None
-            if self._model_options_prewarm_task is not None:
-                self._model_options_prewarm_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await self._model_options_prewarm_task
-                self._model_options_prewarm_task = None
-            from omnigent.models.model_catalog_store import shutdown_catalog_probes
-
-            await shutdown_catalog_probes()
             if self._zygote_prestart_task is not None:
                 self._zygote_prestart_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
