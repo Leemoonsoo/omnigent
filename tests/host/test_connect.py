@@ -2301,6 +2301,7 @@ async def test_run_keeps_one_model_catalog_prewarm_across_reconnects(
     prewarm_cancelled = asyncio.Event()
     prewarm_calls = 0
     connect_calls = 0
+    prewarm_cancelled_while_connecting = False
 
     async def _prewarm() -> None:
         nonlocal prewarm_calls
@@ -2312,10 +2313,10 @@ async def test_run_keeps_one_model_catalog_prewarm_across_reconnects(
             prewarm_cancelled.set()
 
     async def _connect_and_serve() -> None:
-        nonlocal connect_calls
+        nonlocal connect_calls, prewarm_cancelled_while_connecting
         connect_calls += 1
         await asyncio.wait_for(prewarm_started.wait(), timeout=1.0)
-        assert not prewarm_cancelled.is_set()
+        prewarm_cancelled_while_connecting |= prewarm_cancelled.is_set()
         if connect_calls < 3:
             raise ConnectionError("test disconnect")
         raise KeyboardInterrupt
@@ -2327,6 +2328,7 @@ async def test_run_keeps_one_model_catalog_prewarm_across_reconnects(
 
     assert connect_calls == 3
     assert prewarm_calls == 1
+    assert not prewarm_cancelled_while_connecting
     assert prewarm_cancelled.is_set()
     assert host._model_options_prewarm_task is None
 
