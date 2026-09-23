@@ -148,9 +148,70 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe("CodeViewer find-in-file shortcut", () => {
+  function renderMarkdownEditor(setSearchOpen: (open: boolean) => void) {
+    render(
+      <>
+        <textarea aria-label="Prompt" />
+        <CodeViewer
+          conversationId="conv_1"
+          path="notes.md"
+          fileQuery={makeFileQuery("hello")}
+          comments={[]}
+          activeSelection={null}
+          onSetActiveSelection={() => {}}
+          panelOpen={true}
+          searchOpen={false}
+          setSearchOpen={setSearchOpen}
+          searchInputRef={noopRef}
+          viewMode="editor"
+        />
+      </>,
+    );
+  }
+
+  it("leaves Ctrl+F to a focused composer on macOS", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const setSearchOpen = vi.fn();
+    renderMarkdownEditor(setSearchOpen);
+    const composer = screen.getByRole("textbox", { name: "Prompt" });
+    composer.focus();
+
+    const event = new KeyboardEvent("keydown", {
+      key: "f",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    composer.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(setSearchOpen).not.toHaveBeenCalled();
+    expect(composer).toHaveFocus();
+  });
+
+  it("opens Markdown find-in-file with Cmd+F on macOS", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const setSearchOpen = vi.fn();
+    renderMarkdownEditor(setSearchOpen);
+
+    const event = new KeyboardEvent("keydown", {
+      key: "f",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(setSearchOpen).toHaveBeenCalledWith(true);
+  });
+});
 
 describe("CodeViewer Cmd+A select-all and copy interception", () => {
   it("copy after Cmd+A writes raw file content to clipboardData", () => {
