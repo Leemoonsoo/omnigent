@@ -25,6 +25,7 @@ from omnigent.host.connect import (
     HostConnectError,
     HostProcess,
     HostRetryableConnectionError,
+    ModelOptionsResult,
     _build_runner_env,
     _RunnerHandle,
     run_host_process,
@@ -82,6 +83,8 @@ from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
 
 pytestmark = pytest.mark.asyncio
 
+_REAL_PREWARM_MODEL_OPTIONS = HostProcess._prewarm_model_options
+
 
 @pytest.fixture(autouse=True)
 def _isolated_model_catalog_store(
@@ -119,8 +122,8 @@ def _no_real_zygote(monkeypatch: pytest.MonkeyPatch) -> None:
 def _no_real_model_catalog_prewarm(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep host-loop tests from executing installed native harness CLIs."""
 
-    async def _noop(_host: HostProcess) -> None:
-        return None
+    async def _noop(_host: HostProcess) -> bool:
+        return True
 
     monkeypatch.setattr(HostProcess, "_prewarm_model_options", _noop)
 
@@ -2333,10 +2336,10 @@ async def test_run_keeps_one_model_catalog_prewarm_across_reconnects(
     assert host._model_options_prewarm_task is None
 
 
-async def test_run_retries_failed_model_catalog_prewarm_after_reconnect(
+async def test_run_does_not_retry_failed_model_catalog_prewarm_while_offline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A transient boot failure gets another chance without restarting success."""
+    """Connection failures do not repeatedly restart native catalog probes."""
     host = _make_host_process()
     host._zygote_disabled = True
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
@@ -2349,7 +2352,7 @@ async def test_run_retries_failed_model_catalog_prewarm_after_reconnect(
         nonlocal prewarm_calls
         prewarm_calls += 1
         await asyncio.sleep(0)
-        return prewarm_calls >= 2
+        return False
 
     async def _connect_and_serve() -> None:
         nonlocal connect_calls
@@ -2367,8 +2370,67 @@ async def test_run_retries_failed_model_catalog_prewarm_after_reconnect(
     await host.run()
 
     assert connect_calls == 3
-    assert prewarm_calls == 2
+    assert prewarm_calls == 1
     assert host._model_options_prewarm_task is None
+
+
+async def test_registration_retries_failed_model_catalog_prewarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed boot probe gets another chance after host registration."""
+    host = _make_host_process()
+    monkeypatch.setattr(host, "_start_capability_discovery", lambda: None)
+
+    async def _failed_prewarm() -> bool:
+        return False
+
+    first_task = asyncio.create_task(_failed_prewarm())
+    await first_task
+    host._model_options_prewarm_task = first_task
+    prewarm_calls = 0
+
+    async def _successful_prewarm() -> bool:
+        nonlocal prewarm_calls
+        prewarm_calls += 1
+        return True
+
+    monkeypatch.setattr(host, "_prewarm_model_options", _successful_prewarm)
+
+    with pytest.raises(ConnectionError, match="test disconnect"):
+        await host._serve_frames(_FakeTunnel())  # type: ignore[arg-type]
+
+    retry_task = host._model_options_prewarm_task
+    assert retry_task is not None
+    assert retry_task is not first_task
+    assert await retry_task
+    assert prewarm_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("codex_available", "claude_available", "expected"),
+    [(False, True, False), (True, True, True)],
+)
+async def test_model_catalog_prewarm_requires_both_catalogs(
+    monkeypatch: pytest.MonkeyPatch,
+    codex_available: bool,
+    claude_available: bool,
+    expected: bool,
+) -> None:
+    """Only two available catalogs count as a successful prewarm."""
+    host = _make_host_process()
+    available = ModelOptionsResult(models=[], routable_models=[])
+    monkeypatch.setattr(
+        host,
+        "_probed_codex_model_options",
+        AsyncMock(return_value=available if codex_available else None),
+    )
+    monkeypatch.setattr(
+        host,
+        "_probed_claude_model_options",
+        AsyncMock(return_value=available if claude_available else None),
+    )
+
+    assert await _REAL_PREWARM_MODEL_OPTIONS(host) is expected
 
 
 async def test_model_catalog_prewarm_failure_does_not_block_host(

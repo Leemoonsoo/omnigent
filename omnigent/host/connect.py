@@ -3744,10 +3744,6 @@ class HostProcess:
             while True:
                 if self._lifecycle_lost.is_set():
                     break
-                # A completed failed boot probe gets another best-effort chance
-                # when the tunnel reconnects. Successful or in-flight host work
-                # is retained rather than restarted for each connection.
-                self._ensure_model_options_prewarm()
                 try:
                     await self._connect_and_serve()
                     backoff = _RECONNECT_BASE_S
@@ -4271,6 +4267,11 @@ class HostProcess:
         except Exception as exc:
             raise HostConnectError(f"Could not encode host.hello: {exc}") from exc
         await ws.send(encoded_hello)
+        # A completed failed boot probe gets another best-effort chance only
+        # after registration reaches the server. Keeping this out of the outer
+        # connection-attempt loop avoids repeatedly spawning native probes while
+        # the server is offline. Successful or in-flight work is retained.
+        self._ensure_model_options_prewarm()
         self._ws = ws
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
         try:
