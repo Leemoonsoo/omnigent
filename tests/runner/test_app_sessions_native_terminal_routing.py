@@ -650,16 +650,7 @@ async def test_auto_create_repl_terminal_launches_attach_and_stamps_label(
             resource_role: str | None = None,
             parent_os_env: Any = None,
         ) -> SessionResourceView:
-            """
-            Record the terminal launch request.
-
-            :param session_id: Session id being launched.
-            :param terminal_name: Terminal name, e.g. ``"tui"``.
-            :param session_key: Terminal session key, e.g. ``"main"``.
-            :param spec: Terminal launch spec.
-            :param resource_role: Private runner resource marker.
-            :returns: Terminal resource view.
-            """
+            """Record the terminal launch request."""
             assert session_id == "11c50cd73e9c32ccb0af5b9db291db8b"
             assert terminal_name == "tui"
             assert session_key == "main"
@@ -685,13 +676,7 @@ async def test_auto_create_repl_terminal_launches_attach_and_stamps_label(
             self.patches: list[_RecordedPatch] = []
 
         async def patch(self, url: str, **kwargs: Any) -> httpx.Response:
-            """
-            Record the PATCH and return a 200.
-
-            :param url: Request path, e.g. ``"/v1/sessions/11c50cd73e9c32ccb0af5b9db291db8b"``.
-            :param kwargs: Request keyword arguments carrying ``json``.
-            :returns: HTTP 200 response.
-            """
+            """Accept the presentation-label PATCH."""
             self.patches.append(_RecordedPatch(url=url, json=kwargs.get("json") or {}))
             return httpx.Response(200, json={}, request=httpx.Request("PATCH", url))
 
@@ -793,7 +778,7 @@ async def test_auto_create_repl_terminal_inherits_agent_sandbox(
             resource_role: str | None = None,
             parent_os_env: Any = None,
         ) -> SessionResourceView:
-            """Record the spec + parent_os_env and return a resource view."""
+            """Record the terminal launch request."""
             del terminal_name, session_key, resource_role
             captured["spec"] = spec
             captured["parent_os_env"] = parent_os_env
@@ -808,7 +793,7 @@ async def test_auto_create_repl_terminal_inherits_agent_sandbox(
         """Server client that absorbs the label PATCH from the helper."""
 
         async def patch(self, url: str, **kwargs: Any) -> httpx.Response:
-            """Return a 200 for the presentation-label PATCH."""
+            """Accept the presentation-label PATCH."""
             del kwargs
             return httpx.Response(200, json={}, request=httpx.Request("PATCH", url))
 
@@ -887,6 +872,10 @@ async def test_create_session_repl_terminal_dispatch(
     :param monkeypatch: Pytest monkeypatch fixture.
     :returns: None.
     """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(
+        "omnigent.runtime.workflow._resolve_provider_for_build", lambda *_args, **_kwargs: None
+    )
     # Keep the codex-native branch's bridge writes inside tmp_path.
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
 
@@ -1105,19 +1094,7 @@ async def test_auto_create_repl_terminal_survives_removed_process_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    REPL terminal creation must not read the process cwd when a workspace is set.
-
-    A directly-spawned runner keeps its launch cwd; deleting that directory
-    while the runner stays alive makes ``os.getcwd()`` raise
-    ``FileNotFoundError``. With ``OMNIGENT_RUNNER_WORKSPACE`` naming a valid
-    workspace, (re)creating the REPL terminal must pin its cwd to that
-    workspace instead of failing on the removed process cwd.
-
-    :param tmp_path: Temporary directory for the fake runner workspace.
-    :param monkeypatch: Pytest monkeypatch fixture.
-    :returns: None.
-    """
+    """Create the REPL from runner workspace without reading a deleted process cwd."""
     session_id = "11c50cd73e9c32ccb0af5b9db291db8b"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1144,17 +1121,7 @@ async def test_auto_create_repl_terminal_survives_removed_process_cwd(
             resource_role: str | None = None,
             parent_os_env: Any = None,
         ) -> SessionResourceView:
-            """
-            Record the terminal launch request.
-
-            :param session_id: Session id being launched.
-            :param terminal_name: Terminal name, e.g. ``"tui"``.
-            :param session_key: Terminal session key, e.g. ``"main"``.
-            :param spec: Terminal launch spec.
-            :param resource_role: Private runner resource marker.
-            :param parent_os_env: Agent os_env the terminal inherits.
-            :returns: Terminal resource view.
-            """
+            """Record the terminal launch request."""
             launched_specs.append(spec)
             return SessionResourceView(
                 id="terminal_tui_main",
@@ -1167,13 +1134,7 @@ async def test_auto_create_repl_terminal_survives_removed_process_cwd(
         """Server client that accepts the presentation-label PATCH."""
 
         async def patch(self, url: str, **kwargs: Any) -> httpx.Response:
-            """
-            Return a 200 for any PATCH.
-
-            :param url: Request path.
-            :param kwargs: Request keyword arguments.
-            :returns: HTTP 200 response.
-            """
+            """Accept the presentation-label PATCH."""
             return httpx.Response(200, json={}, request=httpx.Request("PATCH", url))
 
     terminal_view = await _auto_create_repl_terminal(

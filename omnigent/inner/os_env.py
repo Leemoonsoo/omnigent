@@ -946,9 +946,7 @@ def create_os_environment(spec: OSEnvSpec | None) -> OSEnvironment | None:
     try:
         cwd = Path(spec.cwd or os.getcwd()).resolve(strict=False)
     except OSError:
-        # A surviving runner can lose its process cwd (the directory it was
-        # launched from was deleted); resolve against the configured workspace
-        # instead of failing every os_env consumer (turn setup, tool relays).
+        # Recover a deleted process cwd from the configured runner workspace.
         workspace = os.environ.get("OMNIGENT_RUNNER_WORKSPACE")
         if not workspace:
             raise

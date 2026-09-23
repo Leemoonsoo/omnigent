@@ -77,7 +77,9 @@ def test_workspace_error_has_safe_recovery_message() -> None:
     error = OmnigentError(
         "private path and implementation details", code=ErrorCode.WORKSPACE_MISSING
     )
-    payload = orchestration._native_terminal_start_error_payload(error, "Claude")
+    payload = orchestration._native_terminal_start_error_payload(
+        error, "Claude", session_id="conv_workspace"
+    )
     assert payload["code"] == ErrorCode.WORKSPACE_MISSING
     assert "workspace" in payload["message"]
     assert "Restore" in payload["message"]
@@ -89,6 +91,6 @@ def test_workspace_error_has_safe_recovery_message() -> None:
 
 def test_unrelated_missing_file_is_not_a_workspace_error() -> None:
     payload = orchestration._native_terminal_start_error_payload(
-        FileNotFoundError("missing executable"), "Claude"
+        FileNotFoundError("missing executable"), "Claude", session_id="conv_workspace"
     )
     assert payload["code"] == "native_terminal_start_failed"
