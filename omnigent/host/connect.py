@@ -1179,6 +1179,9 @@ class HostProcess:
         # Warms the zygote at daemon start so the first launch doesn't pay
         # its one-time import; see run().
         self._zygote_prestart_task: asyncio.Task[ZygoteManager | None] | None = None
+        # Warms the store-backed native model catalogs once for this daemon's
+        # lifetime. A tunnel reconnect must neither restart nor cancel it.
+        self._model_options_prewarm_task: asyncio.Task[None] | None = None
         # Discovery belongs to the daemon so connection retries share one
         # in-flight probe and registration waits for bounded discovery.
         self._capability_init_task: asyncio.Task[None] | None = None
@@ -3712,6 +3715,13 @@ class HostProcess:
                 asyncio.to_thread(self._ensure_zygote_started),
                 name="host-zygote-prestart",
             )
+        # Warm the pre-launch model listings once for the host lifetime so a
+        # first picker or launch can use the shared store instead of waiting
+        # on a harness probe. This is independent of any one server tunnel:
+        # reconnecting must not discard useful cold-start work.
+        self._model_options_prewarm_task = asyncio.create_task(
+            self._prewarm_model_options(), name="host-model-options-prewarm"
+        )
         self._start_capability_discovery()
         backoff = _RECONNECT_BASE_S
         try:
@@ -3909,6 +3919,11 @@ class HostProcess:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._capability_init_task
                 self._capability_init_task = None
+            if self._model_options_prewarm_task is not None:
+                self._model_options_prewarm_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._model_options_prewarm_task
+                self._model_options_prewarm_task = None
             from omnigent.models.model_catalog_store import shutdown_catalog_probes
 
             await shutdown_catalog_probes()
@@ -4234,12 +4249,6 @@ class HostProcess:
         await ws.send(encoded_hello)
         self._ws = ws
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
-        # Warm the pre-launch model listings once a server can actually ask
-        # for them, so the first picker open is served from cache instead of
-        # waiting on a harness probe. Cache-fresh reconnects are a no-op.
-        prewarm_task = asyncio.create_task(
-            self._prewarm_model_options(), name="host-model-options-prewarm"
-        )
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
@@ -4277,9 +4286,6 @@ class HostProcess:
                     # _runner_lifecycle_lock in _dispatch_host_frame.
                     self._start_frame_task(ws, raw)
         finally:
-            prewarm_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await prewarm_task
             readiness_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await readiness_task
