@@ -651,10 +651,11 @@ class _TokenSource:
                 command,
                 capture_output=True,
                 check=False,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 timeout=_SECRET_COMMAND_TIMEOUT_S,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
             _diag("secret_command", "client-secret command failed: %s", type(exc).__name__)
             return None
         if completed.returncode != 0:

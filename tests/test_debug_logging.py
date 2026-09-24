@@ -92,8 +92,9 @@ def test_client_secret_command_is_lazy_and_memory_cached(
 
     command_calls: list[tuple[str, ...]] = []
 
-    def run(command: tuple[str, ...], **_: object) -> object:
+    def run(command: tuple[str, ...], **kwargs: object) -> object:
         command_calls.append(command)
+        assert kwargs["stdin"] is dl.subprocess.DEVNULL
         return type("Completed", (), {"returncode": 0, "stdout": "secret-from-provider\n"})()
 
     class Client:
@@ -108,6 +109,143 @@ def test_client_secret_command_is_lazy_and_memory_cached(
     assert source.token() == "token"
     assert source.token() == "token"
     assert command_calls == [("credential-helper", "--format", "raw")]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        dl.subprocess.TimeoutExpired("credential-helper", 30),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    ],
+    ids=["timeout", "invalid-encoding"],
+)
+def test_client_secret_command_errors_do_not_escape(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    monkeypatch.setenv(dl.CLIENT_ID_ENV_VAR, "cid")
+    monkeypatch.setenv(dl.CLIENT_SECRET_COMMAND_ENV_VAR, "credential-helper")
+    monkeypatch.setenv(dl.WORKSPACE_URL_ENV_VAR, "https://ws.cloud.databricks.com")
+    monkeypatch.setenv(dl.ENDPOINT_ENV_VAR, _INSERT_URL)
+    config = dl.config_from_env()
+    assert config is not None
+
+    def run(*_: object, **__: object) -> object:
+        raise error
+
+    monkeypatch.setattr(dl.subprocess, "run", run)
+    source = dl._TokenSource(config, client=None)  # type: ignore[arg-type]
+    assert source.token() is None
+
+
+@pytest.mark.parametrize(("returncode", "stdout"), [(1, "secret\n"), (0, " \n")])
+def test_client_secret_command_rejects_unsuccessful_or_empty_output(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str
+) -> None:
+    monkeypatch.setenv(dl.CLIENT_ID_ENV_VAR, "cid")
+    monkeypatch.setenv(dl.CLIENT_SECRET_COMMAND_ENV_VAR, "credential-helper")
+    monkeypatch.setenv(dl.WORKSPACE_URL_ENV_VAR, "https://ws.cloud.databricks.com")
+    monkeypatch.setenv(dl.ENDPOINT_ENV_VAR, _INSERT_URL)
+    config = dl.config_from_env()
+    assert config is not None
+
+    def run(*_: object, **__: object) -> object:
+        return type("Completed", (), {"returncode": returncode, "stdout": stdout})()
+
+    monkeypatch.setattr(dl.subprocess, "run", run)
+    source = dl._TokenSource(config, client=None)  # type: ignore[arg-type]
+    assert source.token() is None
+
+
+def test_token_mint_auth_rejection_reruns_client_secret_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(dl.CLIENT_ID_ENV_VAR, "cid")
+    monkeypatch.setenv(dl.CLIENT_SECRET_COMMAND_ENV_VAR, "credential-helper")
+    monkeypatch.setenv(dl.WORKSPACE_URL_ENV_VAR, "https://ws.cloud.databricks.com")
+    monkeypatch.setenv(dl.ENDPOINT_ENV_VAR, _INSERT_URL)
+    config = dl.config_from_env()
+    assert config is not None
+    secrets = iter(("old-secret", "new-secret"))
+    command_calls = 0
+
+    def run(*_: object, **__: object) -> object:
+        nonlocal command_calls
+        command_calls += 1
+        return type("Completed", (), {"returncode": 0, "stdout": next(secrets)})()
+
+    class Client:
+        def __init__(self) -> None:
+            self.auth: list[object] = []
+
+        def post(self, _url: str, **kwargs: object) -> httpx.Response:
+            self.auth.append(kwargs["auth"])
+            if len(self.auth) == 1:
+                return httpx.Response(401, text="invalid client")
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+
+    monkeypatch.setattr(dl.subprocess, "run", run)
+    client = Client()
+    source = dl._TokenSource(config, client)  # type: ignore[arg-type]
+
+    assert source.token() is None
+    assert source.token() == "token"
+    assert command_calls == 2
+    assert client.auth == [("cid", "old-secret"), ("cid", "new-secret")]
+
+
+def test_insert_auth_rejection_refreshes_credentials_and_retries_same_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(dl.CLIENT_ID_ENV_VAR, "cid")
+    monkeypatch.setenv(dl.CLIENT_SECRET_COMMAND_ENV_VAR, "credential-helper")
+    monkeypatch.setenv(dl.WORKSPACE_URL_ENV_VAR, "https://ws.cloud.databricks.com")
+    monkeypatch.setenv(dl.ENDPOINT_ENV_VAR, _INSERT_URL)
+    config = dl.config_from_env()
+    assert config is not None
+    secrets = iter(("old-secret", "new-secret"))
+    command_calls = 0
+
+    def run(*_: object, **__: object) -> object:
+        nonlocal command_calls
+        command_calls += 1
+        return type("Completed", (), {"returncode": 0, "stdout": next(secrets)})()
+
+    class Client:
+        def __init__(self) -> None:
+            self.insert_payloads: list[object] = []
+
+        def post(self, url: str, **kwargs: object) -> httpx.Response:
+            if url.endswith("/oidc/v1/token"):
+                secret = kwargs["auth"][1]  # type: ignore[index]
+                return httpx.Response(
+                    200, json={"access_token": f"token-for-{secret}", "expires_in": 3600}
+                )
+            self.insert_payloads.append(kwargs["content"])
+            if len(self.insert_payloads) == 1:
+                assert kwargs["headers"] == {  # type: ignore[comparison-overlap]
+                    "Authorization": "Bearer token-for-old-secret",
+                    "Content-Type": "application/json",
+                }
+                return httpx.Response(401, text="expired token")
+            assert kwargs["headers"] == {  # type: ignore[comparison-overlap]
+                "Authorization": "Bearer token-for-new-secret",
+                "Content-Type": "application/json",
+            }
+            return httpx.Response(200)
+
+    monkeypatch.setattr(dl.subprocess, "run", run)
+    client = Client()
+    sink = object.__new__(dl.ZerobusLogHandler)
+    sink._config = config
+    sink._client = client  # type: ignore[assignment]
+    sink._tokens = dl._TokenSource(config, client)  # type: ignore[arg-type]
+    sink._delivered_any = False
+    batch: list[dl.DebugLogRow] = [{"message": "same batch"}]
+
+    sink._post(batch)
+
+    assert command_calls == 2
+    assert client.insert_payloads == [json.dumps(batch), json.dumps(batch)]
 
 
 def test_client_secret_command_runs_on_uploader_thread(
