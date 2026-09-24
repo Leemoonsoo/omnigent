@@ -1353,6 +1353,30 @@ async def test_non_manager_cannot_revoke_permissions(
 # ── Session creator auto-grant ───────────────────────────────
 
 
+async def test_session_creator_uses_authoritative_grant_result(
+    auth_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create must not read back a permission that grant already returned."""
+    from omnigent.server.routes.sessions import routes_core
+
+    owner = "owner@example.com"
+    agent = await create_test_agent(auth_client, user=owner)
+
+    async def fail_readback(*args: object, **kwargs: object) -> int | None:
+        raise AssertionError("create performed a redundant permission readback")
+
+    monkeypatch.setattr(routes_core, "_get_permission_level", fail_readback)
+    resp = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"]},
+        headers={"X-Forwarded-Email": owner},
+    )
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["permission_level"] == LEVEL_OWNER
+
+
 async def test_session_creator_gets_manage_grant(
     auth_client: httpx.AsyncClient,
 ) -> None:

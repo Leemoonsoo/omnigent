@@ -129,7 +129,7 @@ from omnigent.server.background_session_titles import (
     prepare_background_session_title,
 )
 from omnigent.server.bundles import bundle_location, validate_agent_bundle
-from omnigent.server.creation_logging import creation_metadata, session_created
+from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
 from omnigent.server.managed_hosts import (
     MANAGED_REPO_LABEL_KEY,
@@ -8926,7 +8926,7 @@ async def _create_session_from_existing_agent(
     artifact_store: ArtifactStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
     project_store: ProjectStore | None = None,
-) -> SessionResponse:
+) -> tuple[SessionResponse, Conversation]:
     """
     Create a session bound to an already-registered agent.
 
@@ -8955,7 +8955,7 @@ async def _create_session_from_existing_agent(
         ``file_id`` references in ``initial_items`` before forwarding
         to the runner.
     :param artifact_store: Optional binary content store for the same.
-    :returns: The newly created session snapshot.
+    :returns: The newly created session snapshot and its conversation row.
     :raises OmnigentError: 404 if no agent matches ``body.agent_id``;
         403/404 if ``parent_session_id`` or session-scoped ``agent_id``
         fails authorization.
@@ -9451,24 +9451,56 @@ async def _create_session_from_existing_agent(
                 reasoning_effort=spec_effort,
             )
 
+    native_agent = native_coding_agent_for_agent_name(agent.name)
+    initial_labels = dict(body.labels) if body.labels else {}
+    if native_agent is not None:
+        initial_labels.update(native_agent.presentation_labels)
+    elif (
+        body.sub_agent_name
+        and sub_spec is not None
+        and not _force_auto_for_child
+        and (_subagent_labels := _native_subagent_wrapper_labels_from_spec(sub_spec))
+    ):
+        initial_labels.update(_subagent_labels)
+    elif body.sub_agent_name is None and body.host_id is not None:
+        repl_labels = _repl_terminal_ui_labels(
+            agent=agent,
+            agent_cache=agent_cache,
+            harness_override=harness_override,
+        )
+        if repl_labels:
+            initial_labels.update(repl_labels)
+
+    if harness_override == "auto" or _native_smart_routing:
+        from omnigent.runner.subagent_routing import AUTO_HARNESS_LABEL_KEY
+
+        initial_labels[AUTO_HARNESS_LABEL_KEY] = "1"
+
     snapshot_kwargs: dict[str, Any] = (
         {"inference_snapshot": inference_snapshot} if inference_snapshot is not None else {}
     )
     try:
-        conv = conversation_store.create_conversation(
-            agent_id=agent.id,
-            title=body.title,
-            parent_conversation_id=body.parent_session_id,
-            runner_id=inherited_runner_id,
-            kind="sub_agent" if body.parent_session_id else "default",
-            sub_agent_name=body.sub_agent_name,
-            host_id=body.host_id,
-            workspace=canonical_workspace,
-            git_branch=git_branch,
-            terminal_launch_args=validated_launch_args,
-            project_id=project_resolution.project_id,
-            **snapshot_kwargs,
-        )
+        with creation_stage("create_persistence_ms"):
+            conv = conversation_store.create_conversation(
+                agent_id=agent.id,
+                title=body.title,
+                parent_conversation_id=body.parent_session_id,
+                runner_id=inherited_runner_id,
+                kind="sub_agent" if body.parent_session_id else "default",
+                sub_agent_name=body.sub_agent_name,
+                host_id=body.host_id,
+                workspace=canonical_workspace,
+                git_branch=git_branch,
+                terminal_launch_args=validated_launch_args,
+                project_id=project_resolution.project_id,
+                labels=initial_labels or None,
+                model_override=model_override,
+                reasoning_effort=reasoning_effort,
+                cost_control_mode_override=cost_control_mode_override,
+                subagent_routing_override=subagent_routing_override,
+                harness_override=harness_override,
+                **snapshot_kwargs,
+            )
     except NameAlreadyExistsError as exc:
         if (
             created_worktree_path is not None
@@ -9519,95 +9551,6 @@ async def _create_session_from_existing_agent(
 
     session_created(conv.id, conv.runner_id)
     telemetry.set_session_id(conv.id)
-
-    if (
-        model_override is not None
-        or reasoning_effort is not None
-        or cost_control_mode_override is not None
-        or subagent_routing_override is not None
-        or harness_override is not None
-    ):
-        # ``create_conversation`` has no override params; reuse the
-        # PATCH path's store write before the runner reads the snapshot
-        # (the first turn / terminal launch happens only after this
-        # create returns and the caller posts a message event).
-        updated_conv = await asyncio.to_thread(
-            conversation_store.update_conversation,
-            conv.id,
-            model_override=model_override,
-            reasoning_effort=reasoning_effort,
-            cost_control_mode_override=cost_control_mode_override,
-            subagent_routing_override=subagent_routing_override,
-            harness_override=harness_override,
-        )
-        if updated_conv is None:
-            raise OmnigentError(
-                f"Session {conv.id!r} disappeared while persisting session overrides",
-                code=ErrorCode.INTERNAL_ERROR,
-            )
-        conv = updated_conv
-    # Set wrapper labels at creation time if the agent is a native
-    # terminal wrapper, so all messages
-    # (including early ones sent before the runner connects) take
-    # the native path and avoid double-persistence with the
-    # transcript forwarder.
-    native_agent = native_coding_agent_for_agent_name(agent.name)
-    if native_agent is not None:
-        _native_labels = dict(body.labels) if body.labels else {}
-        _native_labels.update(native_agent.presentation_labels)
-        await asyncio.to_thread(conversation_store.set_labels, conv.id, _native_labels)
-        conv.labels.update(_native_labels)
-    elif (
-        body.sub_agent_name
-        and sub_spec is not None
-        and not _force_auto_for_child
-        and (_sa_labels := _native_subagent_wrapper_labels_from_spec(sub_spec))
-    ):
-        # A native-harness sub-agent (claude-native / codex-native) must
-        # render terminal-first with the Chat/Terminal pill, same as a
-        # top-level wrapper session. Merge over any caller-supplied labels.
-        # Skipped when forcing auto: the harness is not decided until the
-        # first-message router runs, so native terminal labels would be
-        # premature (routing may pick a non-native SDK harness).
-        _merged = dict(body.labels) if body.labels else {}
-        _merged.update(_sa_labels)
-        await asyncio.to_thread(conversation_store.set_labels, conv.id, _merged)
-        conv.labels.update(_merged)
-    elif (
-        body.sub_agent_name is None
-        and body.host_id is not None
-        and (
-            _repl_labels := _repl_terminal_ui_labels(
-                agent=agent,
-                agent_cache=agent_cache,
-                harness_override=harness_override,
-            )
-        )
-    ):
-        # The runner stamps this label only once its REPL terminal exists,
-        # which leaves the web UI's "Starting up…" window empty; stamping at
-        # creation covers the whole launch. Host-bound only: an in-process
-        # session has no runner to host a terminal.
-        _merged = dict(body.labels) if body.labels else {}
-        _merged.update(_repl_labels)
-        await asyncio.to_thread(conversation_store.set_labels, conv.id, _merged)
-        conv.labels.update(_merged)
-    elif body.labels:
-        await asyncio.to_thread(conversation_store.set_labels, conv.id, body.labels)
-
-    if harness_override == "auto" or _native_smart_routing:
-        # Routing replaces the "auto" sentinel (at the first message for a
-        # bundle agent, at create time for a native one), so record the auto
-        # start durably: it is what lets subagent routing offer picks from the
-        # other harness family later in the session.
-        from omnigent.runner.subagent_routing import AUTO_HARNESS_LABEL_KEY
-
-        await asyncio.to_thread(
-            conversation_store.set_labels,
-            conv.id,
-            {AUTO_HARNESS_LABEL_KEY: "1"},
-        )
-        conv.labels[AUTO_HARNESS_LABEL_KEY] = "1"
 
     if _native_smart_routing:
         # Surface the create-time pick as a transcript card, so the user sees
@@ -9726,7 +9669,11 @@ async def _create_session_from_existing_agent(
         pass
 
     if body.initial_items:
-        runner_client = await _get_runner_client(conv.id, runner_router)
+        runner_client = await _get_runner_client(
+            conv.id,
+            runner_router,
+            conversation=conv,
+        )
         if runner_client is None:
             # No runner bound — persist initial items as history-only
             # seed via the conversation store. No execution fires; the
@@ -9773,17 +9720,24 @@ async def _create_session_from_existing_agent(
                 )
                 if pending_background_title is not None:
                     pending_background_title.schedule(expected_seed_title=conv.title)
-    # Re-read rather than reusing the local ``conv``: the label-only branch
-    # above and ``_forward_event_to_runner`` can mutate the row after it was
-    # built, so a fresh read is what keeps the create response current.
-    return await _get_session_snapshot(
+        with creation_stage("create_persistence_ms"):
+            refreshed = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
+        if refreshed is None:
+            raise OmnigentError(
+                f"Session {conv.id!r} disappeared after persisting initial items",
+                code=ErrorCode.INTERNAL_ERROR,
+            )
+        conv = refreshed
+    response = await _get_session_snapshot(
         conversation_store,
         conv.id,
         agent_store=agent_store,
         agent_cache=agent_cache,
         liveness_lookup=liveness_lookup,
+        conversation=conv,
         request=request,
     )
+    return response, conv
 
 
 def _create_session_from_bundle(

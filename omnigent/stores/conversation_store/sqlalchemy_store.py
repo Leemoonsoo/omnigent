@@ -1013,6 +1013,12 @@ class SqlAlchemyConversationStore(ConversationStore):
         conversation_id: str | None = None,
         project_id: str | None = None,
         inference_snapshot: dict[str, Any] | None = None,
+        labels: dict[str, str] | None = None,
+        reasoning_effort: str | None = None,
+        model_override: str | None = None,
+        cost_control_mode_override: str | None = None,
+        subagent_routing_override: str | None = None,
+        harness_override: str | None = None,
     ) -> Conversation:
         """
         Create a new conversation in the database.
@@ -1086,6 +1092,16 @@ class SqlAlchemyConversationStore(ConversationStore):
         encoded_inference_snapshot = (
             json.dumps(inference_snapshot) if inference_snapshot is not None else None
         )
+        encoded_overrides = _encode_session_overrides(
+            {
+                "reasoning_effort": reasoning_effort,
+                "model_override": model_override,
+                "cost_control_mode_override": cost_control_mode_override,
+                "subagent_routing_override": subagent_routing_override,
+                "harness_override": harness_override,
+            }
+        )
+        prepared_labels = dict(labels) if labels else {}
         try:
             # Get parent's root from AP, then write AP row and Omnigent meta separately.
             root_id = new_id
@@ -1145,8 +1161,11 @@ class SqlAlchemyConversationStore(ConversationStore):
                     parent_conversation_id=parent_conversation_id,
                     root_conversation_id=root_id,
                     agent_id=agent_id,
+                    session_overrides=encoded_overrides,
                 )
                 ap_sess.add(row)
+                if prepared_labels:
+                    _upsert_labels(ap_sess, new_id, prepared_labels, now)
                 return row
 
             row = run_write_transaction(
@@ -1176,7 +1195,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 "insert_conversation_metadata",
                 insert_metadata,
             )
-            return _to_conversation(row, meta)
+            return _to_conversation(row, meta, prepared_labels)
         except IntegrityError as exc:
             # Translate a caller-supplied-id PK collision into a clean exception
             # type. Per-parent title uniqueness is enforced by the SELECT above,
