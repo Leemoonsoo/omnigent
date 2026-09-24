@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import pytest
 from fastapi import HTTPException
 
+from omnigent import debug_logging
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import LEVEL_OWNER
@@ -211,6 +212,31 @@ class TestResolveHostLaunch:
             )
         assert exc_info.value.status_code == 404
         assert conv_store.reads == []
+
+    def test_standalone_resolution_does_not_record_create_timing(self) -> None:
+        """The shared host-launch route must not pollute create-only stages."""
+        host = _FakeHost(host_id="host_1", user_id="alice")
+        conv = Conversation(
+            id="s1",
+            created_at=1,
+            updated_at=1,
+            root_conversation_id="s1",
+            agent_id="ag_1",
+        )
+        permissions = _FakePermissionStore(grants={("alice", "s1")})
+        debug_logging.reset_request_audit_attrs()
+
+        resolve_host_launch(
+            user_id="alice",
+            host_id="host_1",
+            session_id="s1",
+            host_store=_FakeHostStore(hosts={"host_1": host}),
+            host_registry=_FakeHostRegistry(conns={"host_1": object()}),
+            conversation_store=_FakeConversationStore(convs={"s1": conv}),
+            permission_store=permissions,  # type: ignore[arg-type]
+        )
+
+        assert "create_acl_ms" not in debug_logging.current_request_audit_attrs()
 
     def test_mismatched_preloaded_conversation_is_denied_without_reads(self) -> None:
         host = _FakeHost(host_id="host_1", user_id="alice")

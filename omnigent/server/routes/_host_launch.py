@@ -27,7 +27,6 @@ from fastapi import HTTPException
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import LEVEL_OWNER
-from omnigent.server.creation_logging import creation_stage
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.permissions import check_session_access
 from omnigent.stores import ConversationStore
@@ -200,15 +199,14 @@ def resolve_host_launch(
     # and is rejected. 404 (not 403) avoids leaking the existence of
     # other users' sessions.
     if permission_store is not None:
-        with creation_stage("create_acl_ms"):
-            allowed = check_session_access(
-                user_id,
-                session_id,
-                LEVEL_OWNER,
-                permission_store,
-                conversation_store,
-                conversation=conv,
-            )
+        allowed = check_session_access(
+            user_id,
+            session_id,
+            LEVEL_OWNER,
+            permission_store,
+            conversation_store,
+            conversation=conv,
+        )
         if not allowed:
             raise HTTPException(status_code=404, detail="session not found")
 

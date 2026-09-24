@@ -178,7 +178,11 @@ def test_create_persists_initial_labels_and_overrides(
 ) -> None:
     """Create returns the initial session state without a follow-up update."""
     created = conversation_store.create_conversation(
-        labels={"omnigent.ui": "terminal", "custom": "value"},
+        labels={
+            "omnigent.ui": "terminal",
+            "custom": "value",
+            "long": "x" * 257,
+        },
         reasoning_effort="high",
         model_override="model-a",
         cost_control_mode_override="on",
@@ -186,7 +190,11 @@ def test_create_persists_initial_labels_and_overrides(
         harness_override="codex-native",
     )
 
-    assert created.labels == {"omnigent.ui": "terminal", "custom": "value"}
+    assert created.labels == {
+        "omnigent.ui": "terminal",
+        "custom": "value",
+        "long": "x" * 256,
+    }
     assert created.reasoning_effort == "high"
     assert created.model_override == "model-a"
     assert created.cost_control_mode_override == "on"

@@ -11930,9 +11930,18 @@ async def test_create_session_notifies_runner_with_init_envelope(
     try:
         resp = await client.post(
             "/v1/sessions",
-            json={"agent_id": agent["id"], "model_override": "model-x"},
+            json={
+                "agent_id": agent["id"],
+                "model_override": "model-x",
+                "labels": {"test.long": "x" * 257},
+            },
         )
         assert resp.status_code == 201, f"create failed: {resp.status_code} {resp.text}"
+        created_body = resp.json()
+        assert created_body["labels"]["test.long"] == "x" * 256
+        reread = await client.get(f"/v1/sessions/{created_body['id']}")
+        assert reread.status_code == 200, reread.text
+        assert reread.json()["labels"]["test.long"] == "x" * 256
     finally:
         await fake_runner.aclose()
 
@@ -11944,6 +11953,7 @@ async def test_create_session_notifies_runner_with_init_envelope(
     )
     envelope = parse_runner_session_init_envelope(body)
     assert envelope is not None
+    assert envelope.snapshot.labels["test.long"] == "x" * 256
     assert envelope.snapshot.model_override == "model-x", (
         "the init envelope must carry the persisted /model override so the "
         "runner seeds it into the first spawn; got "

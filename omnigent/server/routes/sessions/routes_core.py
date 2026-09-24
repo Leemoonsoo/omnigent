@@ -539,17 +539,18 @@ def register_core_routes(
         from omnigent.runner.identity import token_bound_runner_id
         from omnigent.server.routes._host_launch import resolve_host_launch
 
-        target = await asyncio.to_thread(
-            resolve_host_launch,
-            user_id=user_id,
-            host_id=host_id,
-            session_id=session_id,
-            host_store=host_store_inst,
-            host_registry=host_registry,
-            conversation_store=conversation_store,
-            permission_store=permission_store,
-            conversation=conversation,
-        )
+        with creation_stage("create_acl_ms"):
+            target = await asyncio.to_thread(
+                resolve_host_launch,
+                user_id=user_id,
+                host_id=host_id,
+                session_id=session_id,
+                host_store=host_store_inst,
+                host_registry=host_registry,
+                conversation_store=conversation_store,
+                permission_store=permission_store,
+                conversation=conversation,
+            )
         conn = target.conn
         await host_registry.admit_launch(conn, session_id)
         binding_token = secrets.token_urlsafe(32)
