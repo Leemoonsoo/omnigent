@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -1597,9 +1598,141 @@ def test_bridge_state_wait_preserves_legacy_and_configured_command_contracts(
     assert codex_native_executor._bridge_state_wait_poll_count(tmp_path) == 125
 
 
+@pytest.fixture
+def bridge_startup_polling_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable FIFO notifications for tests that count fallback intervals."""
+    monkeypatch.setattr(codex_native_executor, "open_bridge_startup_signal", lambda _path: None)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_wakes_when_bridge_state_is_published(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A queued first turn dispatches on publication without a fallback poll."""
+    if os.name != "posix":
+        pytest.skip("native Codex startup notifications require POSIX FIFOs")
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    signal_opened = asyncio.Event()
+    real_open = codex_native_executor.open_bridge_startup_signal
+
+    def _open_and_report(path: Path) -> int | None:
+        fd = real_open(path)
+        signal_opened.set()
+        return fd
+
+    monkeypatch.setattr(codex_native_executor, "open_bridge_startup_signal", _open_and_report)
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    async def _drive() -> list[Any]:
+        events: list[Any] = []
+        async for event in executor.run_turn(
+            [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            [],
+            "",
+        ):
+            events.append(event)
+        return events
+
+    task = asyncio.create_task(_drive())
+    await asyncio.wait_for(signal_opened.wait(), timeout=1.0)
+    _start_state(tmp_path)
+    events = await asyncio.wait_for(task, timeout=0.5)
+
+    assert any(isinstance(event, TurnComplete) for event in events)
+    assert [method for method, _params in _FakeCodexNativeClient.requests] == ["turn/start"]
+
+
+@pytest.mark.asyncio
+async def test_run_turn_wakes_when_startup_failure_is_published(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A queued first turn surfaces startup failure without a fallback poll."""
+    if os.name != "posix":
+        pytest.skip("native Codex startup notifications require POSIX FIFOs")
+    signal_opened = asyncio.Event()
+    real_open = codex_native_executor.open_bridge_startup_signal
+
+    def _open_and_report(path: Path) -> int | None:
+        fd = real_open(path)
+        signal_opened.set()
+        return fd
+
+    monkeypatch.setattr(codex_native_executor, "open_bridge_startup_signal", _open_and_report)
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    async def _drive() -> list[Any]:
+        events: list[Any] = []
+        async for event in executor.run_turn(
+            [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            [],
+            "",
+        ):
+            events.append(event)
+        return events
+
+    task = asyncio.create_task(_drive())
+    await asyncio.wait_for(signal_opened.wait(), timeout=1.0)
+    write_bridge_startup_error(tmp_path, "app-server exited")
+    events = await asyncio.wait_for(task, timeout=0.5)
+
+    assert len(events) == 1
+    assert isinstance(events[0], ExecutorError)
+    assert events[0].message == "Codex native thread never started: app-server exited"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_bridge_wait_closes_startup_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancelling a queued first turn releases its FIFO descriptor."""
+    if os.name != "posix":
+        pytest.skip("native Codex startup notifications require POSIX FIFOs")
+    signal_opened = asyncio.Event()
+    opened_fds: list[int] = []
+    real_open = codex_native_executor.open_bridge_startup_signal
+
+    def _open_and_report(path: Path) -> int | None:
+        fd = real_open(path)
+        if fd is not None:
+            opened_fds.append(fd)
+        signal_opened.set()
+        return fd
+
+    monkeypatch.setattr(codex_native_executor, "open_bridge_startup_signal", _open_and_report)
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    async def _drive() -> None:
+        async for _event in executor.run_turn(
+            [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            [],
+            "",
+        ):
+            pass
+
+    task = asyncio.create_task(_drive())
+    await asyncio.wait_for(signal_opened.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(opened_fds) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened_fds[0])
+
+
 def test_run_turn_without_marker_keeps_exact_legacy_poll_count(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    bridge_startup_polling_only: None,
 ) -> None:
     """The ordinary path remains the existing 60 one-second polls."""
     sleep_calls = 0
@@ -1621,6 +1754,7 @@ def test_run_turn_without_marker_keeps_exact_legacy_poll_count(
 async def test_extended_bridge_wait_does_not_block_concurrent_enqueue(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    bridge_startup_polling_only: None,
 ) -> None:
     """The configured-command wait remains outside the injection lock."""
     write_bridge_startup_timeout(tmp_path, 120.0)
@@ -1669,6 +1803,7 @@ def test_run_turn_honors_marker_published_after_wait_starts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    bridge_startup_polling_only: None,
 ) -> None:
     """A late persistent marker grants its full allowance exactly once."""
     sleep_calls = 0
@@ -1694,6 +1829,7 @@ def test_run_turn_rechecks_marker_before_reporting_the_generic_miss(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    bridge_startup_polling_only: None,
 ) -> None:
     """A marker first observed after the wait exhausts still extends it once.
 
@@ -1746,6 +1882,7 @@ def test_run_turn_rechecks_marker_before_reporting_the_generic_miss(
 async def test_late_marker_allows_state_after_absolute_advertised_poll_count(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    bridge_startup_polling_only: None,
 ) -> None:
     """A marker first seen at poll 10 still permits state published at poll 126."""
     _FakeCodexNativeClient.requests = []
@@ -1784,6 +1921,7 @@ async def test_late_marker_allows_state_after_absolute_advertised_poll_count(
 async def test_run_turn_honors_configured_command_wait_past_legacy_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    bridge_startup_polling_only: None,
 ) -> None:
     """A delayed wrapped launch can publish state after the legacy wait expires."""
     _FakeCodexNativeClient.requests = []

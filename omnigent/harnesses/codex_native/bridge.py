@@ -49,6 +49,7 @@ _CODEX_DISABLED_COMPOSER_TEXT = frozenset(
 
 _STATE_FILE = "state.json"
 _STATE_LOCK_FILE = "state.lock"
+_STARTUP_SIGNAL_FIFO = "startup_signal.fifo"
 _STARTUP_ERROR_FILE = "startup_error.json"
 _STARTUP_TIMEOUT_FILE = "startup_timeout.json"
 _STARTUP_TIMEOUT_MAX_BYTES = 256
@@ -880,6 +881,68 @@ def write_bridge_state(bridge_dir: Path, state: CodexNativeBridgeState) -> None:
     """
     with _bridge_state_lock(bridge_dir):
         _write_bridge_state_unlocked(bridge_dir, state)
+    notify_bridge_startup_waiters(bridge_dir)
+
+
+def open_bridge_startup_signal(bridge_dir: Path) -> int | None:
+    """Open the per-bridge startup notification FIFO for asynchronous reads.
+
+    The executor opens this before its first state read. Writers then persist
+    state (or a startup marker) before sending a byte, so a notification can
+    never expose a partially written payload. If FIFO creation is unavailable,
+    callers retain their bounded polling fallback.
+
+    :param bridge_dir: Native Codex bridge directory.
+    :returns: Non-blocking FIFO descriptor, or ``None`` when unavailable.
+    """
+    path = bridge_dir / _STARTUP_SIGNAL_FIFO
+    flags = os.O_RDWR | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    mkfifo = getattr(os, "mkfifo", None)
+    if mkfifo is None:  # pragma: no cover - native Codex is POSIX-only today.
+        return None
+    try:
+        bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            mkfifo(path, mode=0o600)
+        except FileExistsError:
+            if not stat.S_ISFIFO(path.lstat().st_mode):
+                return None
+        fd = os.open(path, flags)
+        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        return fd
+    except OSError:
+        return None
+
+
+def notify_bridge_startup_waiters(bridge_dir: Path) -> None:
+    """Wake an executor waiting for bridge startup state, best effort.
+
+    Opening the FIFO is non-blocking, so launches without an early queued
+    message pay no wait and create no background task. The state files remain
+    authoritative; this byte only removes up to one fallback-poll interval.
+
+    :param bridge_dir: Native Codex bridge directory.
+    :returns: None.
+    """
+    path = bridge_dir / _STARTUP_SIGNAL_FIFO
+    flags = os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        if not stat.S_ISFIFO(path.lstat().st_mode):
+            return
+        fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        if stat.S_ISFIFO(os.fstat(fd).st_mode):
+            os.write(fd, b"\0")
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _validated_startup_timeout(value: object) -> float | None:
@@ -919,6 +982,7 @@ def write_bridge_startup_timeout(bridge_dir: Path, timeout_seconds: float) -> No
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
+    notify_bridge_startup_waiters(bridge_dir)
 
 
 def read_bridge_startup_timeout(bridge_dir: Path) -> float | None:
@@ -987,6 +1051,7 @@ def write_bridge_startup_error(bridge_dir: Path, message: str) -> None:
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
+        notify_bridge_startup_waiters(bridge_dir)
     except OSError:
         return  # best-effort; the real failure is already logged
 
