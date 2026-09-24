@@ -8,6 +8,7 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 
 from omnigent import debug_logging as dl
@@ -32,6 +33,7 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         dl.CLIENT_ID_ENV_VAR,
         dl.CLIENT_SECRET_ENV_VAR,
+        dl.CLIENT_SECRET_COMMAND_ENV_VAR,
         dl.WORKSPACE_URL_ENV_VAR,
         dl.ENDPOINT_ENV_VAR,
         dl.USER_ID_ENV_VAR,
@@ -56,6 +58,104 @@ def test_config_parses_table_and_workspace_id(_configured_env: None) -> None:
     assert config.workspace_id == "3272836215725701"
     # Trailing slash on the workspace URL is trimmed so token minting can append.
     assert config.workspace_url == "https://ws.cloud.databricks.com"
+
+
+def test_config_accepts_client_secret_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(dl.CLIENT_ID_ENV_VAR, "cid")
+    monkeypatch.setenv(dl.CLIENT_SECRET_COMMAND_ENV_VAR, "credential-helper --format raw")
+    monkeypatch.setenv(dl.WORKSPACE_URL_ENV_VAR, "https://ws.cloud.databricks.com")
+    monkeypatch.setenv(dl.ENDPOINT_ENV_VAR, _INSERT_URL)
+
+    config = dl.config_from_env()
+
+    assert config is not None
+    assert config.client_secret is None
+    assert config.client_secret_command == ("credential-helper", "--format", "raw")
+
+
+def test_config_rejects_two_client_secret_sources(
+    monkeypatch: pytest.MonkeyPatch, _configured_env: None
+) -> None:
+    monkeypatch.setenv(dl.CLIENT_SECRET_COMMAND_ENV_VAR, "credential-helper")
+    assert dl.config_from_env() is None
+
+
+def test_client_secret_command_is_lazy_and_memory_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(dl.CLIENT_ID_ENV_VAR, "cid")
+    monkeypatch.setenv(dl.CLIENT_SECRET_COMMAND_ENV_VAR, "credential-helper --format raw")
+    monkeypatch.setenv(dl.WORKSPACE_URL_ENV_VAR, "https://ws.cloud.databricks.com")
+    monkeypatch.setenv(dl.ENDPOINT_ENV_VAR, _INSERT_URL)
+    config = dl.config_from_env()
+    assert config is not None
+
+    command_calls: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_: object) -> object:
+        command_calls.append(command)
+        return type("Completed", (), {"returncode": 0, "stdout": "secret-from-provider\n"})()
+
+    class Client:
+        def post(self, _url: str, **kwargs: object) -> httpx.Response:
+            assert kwargs["auth"] == ("cid", "secret-from-provider")
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+
+    monkeypatch.setattr(dl.subprocess, "run", run)
+    source = dl._TokenSource(config, Client())  # type: ignore[arg-type]
+    assert command_calls == []
+
+    assert source.token() == "token"
+    assert source.token() == "token"
+    assert command_calls == [("credential-helper", "--format", "raw")]
+
+
+def test_client_secret_command_runs_on_uploader_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(dl.CLIENT_ID_ENV_VAR, "cid")
+    monkeypatch.setenv(dl.CLIENT_SECRET_COMMAND_ENV_VAR, "credential-helper")
+    monkeypatch.setenv(dl.WORKSPACE_URL_ENV_VAR, "https://ws.cloud.databricks.com")
+    monkeypatch.setenv(dl.ENDPOINT_ENV_VAR, _INSERT_URL)
+    monkeypatch.setattr(dl.DebugLogHandler, "_FLUSH_WAIT", 0.01)
+    command_started = threading.Event()
+    release_command = threading.Event()
+    delivered = threading.Event()
+    command_thread: list[threading.Thread] = []
+
+    def run(_command: tuple[str, ...], **_: object) -> object:
+        command_thread.append(threading.current_thread())
+        command_started.set()
+        assert release_command.wait(timeout=1.0)
+        return type("Completed", (), {"returncode": 0, "stdout": "secret\n"})()
+
+    class Client:
+        def post(self, url: str, **_: object) -> httpx.Response:
+            if url.endswith("/oidc/v1/token"):
+                return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+            delivered.set()
+            return httpx.Response(200)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(dl.subprocess, "run", run)
+    monkeypatch.setattr(dl.httpx, "Client", lambda **_: Client())
+    config = dl.config_from_env()
+    assert config is not None
+    sink = dl.ZerobusLogHandler(config, "server")
+    try:
+        record = logging.LogRecord("omnigent.test", logging.INFO, __file__, 1, "ready", (), None)
+        sink.emit(record)
+
+        assert command_started.wait(timeout=1.0)
+        assert command_thread == [sink._thread]
+        assert not delivered.is_set()
+        release_command.set()
+        assert delivered.wait(timeout=1.0)
+    finally:
+        release_command.set()
+        sink.close()
 
 
 def test_malformed_endpoint_disables(
