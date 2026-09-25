@@ -3841,14 +3841,14 @@ class HostProcess:
                 asyncio.to_thread(self._ensure_zygote_started),
                 name="host-zygote-prestart",
             )
-        # Warm the pre-launch model listings once for the host lifetime so a
-        # first picker or launch can use the shared store instead of waiting
-        # on a harness probe. This is independent of any one server tunnel:
-        # reconnecting must not discard useful cold-start work.
-        self._ensure_model_options_prewarm()
-        self._start_capability_discovery()
         backoff = _RECONNECT_BASE_S
         try:
+            # Warm the pre-launch model listings once for the host lifetime so a
+            # first picker or launch can use the shared store instead of waiting
+            # on a harness probe. This is independent of any one server tunnel:
+            # reconnecting must not discard useful cold-start work.
+            self._ensure_model_options_prewarm()
+            self._start_capability_discovery()
             while True:
                 if self._lifecycle_lost.is_set():
                     break

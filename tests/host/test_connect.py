@@ -2783,6 +2783,40 @@ async def test_run_cleans_up_model_catalog_prewarm_after_teardown_failure(
     assert host._model_options_prewarm_task is None
 
 
+async def test_run_cleans_up_model_catalog_prewarm_after_startup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup failures after prewarm begins still run host-owned cleanup."""
+    host = _make_host_process()
+    host._zygote_disabled = True
+    monkeypatch.setattr(host, "_reap_orphans_once", lambda _child_pids=None: 0)
+    prewarm_started = asyncio.Event()
+    prewarm_cancelled = asyncio.Event()
+
+    async def _prewarm() -> bool:
+        prewarm_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            prewarm_cancelled.set()
+
+    prewarm_task = asyncio.create_task(_prewarm())
+    await asyncio.wait_for(prewarm_started.wait(), timeout=1.0)
+    host._model_options_prewarm_task = prewarm_task
+
+    def _fail_startup() -> None:
+        raise RuntimeError("test startup failure")
+
+    monkeypatch.setattr(host, "_start_capability_discovery", _fail_startup)
+
+    with pytest.raises(RuntimeError, match="test startup failure"):
+        await host.run()
+
+    assert prewarm_cancelled.is_set()
+    assert prewarm_task.cancelled()
+    assert host._model_options_prewarm_task is None
+
+
 async def test_run_cancels_inflight_capability_discovery_on_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
