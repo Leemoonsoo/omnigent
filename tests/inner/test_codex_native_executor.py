@@ -1604,6 +1604,14 @@ def bridge_startup_polling_only(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(codex_native_executor, "open_bridge_startup_signal", lambda _path: None)
 
 
+def _require_bridge_startup_fifo(bridge_dir: Path) -> None:
+    """Skip notification-specific tests when this filesystem lacks FIFOs."""
+    fd = codex_native_executor.open_bridge_startup_signal(bridge_dir)
+    if fd is None:
+        pytest.skip("POSIX FIFO notifications are unavailable")
+    os.close(fd)
+
+
 @pytest.mark.asyncio
 async def test_run_turn_wakes_when_bridge_state_is_published(
     monkeypatch: pytest.MonkeyPatch,
@@ -1612,6 +1620,7 @@ async def test_run_turn_wakes_when_bridge_state_is_published(
     """A queued first turn dispatches on publication without a fallback poll."""
     if os.name != "posix":
         pytest.skip("native Codex startup notifications require POSIX FIFOs")
+    _require_bridge_startup_fifo(tmp_path)
     _FakeCodexNativeClient.requests = []
     _FakeCodexNativeClient.created = []
     _FakeCodexNativeClient.next_turn = 1
@@ -1657,6 +1666,7 @@ async def test_run_turn_wakes_when_startup_failure_is_published(
     """A queued first turn surfaces startup failure without a fallback poll."""
     if os.name != "posix":
         pytest.skip("native Codex startup notifications require POSIX FIFOs")
+    _require_bridge_startup_fifo(tmp_path)
     signal_opened = asyncio.Event()
     real_open = codex_native_executor.open_bridge_startup_signal
 
@@ -1696,6 +1706,7 @@ async def test_cancelled_bridge_wait_closes_startup_signal(
     """Cancelling a queued first turn releases its FIFO descriptor."""
     if os.name != "posix":
         pytest.skip("native Codex startup notifications require POSIX FIFOs")
+    _require_bridge_startup_fifo(tmp_path)
     signal_opened = asyncio.Event()
     opened_fds: list[int] = []
     real_open = codex_native_executor.open_bridge_startup_signal
