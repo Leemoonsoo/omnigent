@@ -83,12 +83,17 @@ def _attach(page: Page, names: list[str]) -> None:
     )
 
 
-def _agents(*, skills: bool = False) -> list[dict]:
+def _agents(*, skills: bool = False, picker_navigation: bool = False) -> list[dict]:
     rows = []
     for agent_id, name, display, harness in [
         ("browser-chat-agent", "browser-chat-agent", "Browser agent", "claude-native"),
         ("browser-codex-agent", "browser-codex-agent", "Codex", "codex-native"),
-        ("browser-gemini-agent", "browser-gemini-agent", "Gemini", "gemini-cli"),
+        (
+            "browser-opencode-agent" if picker_navigation else "browser-gemini-agent",
+            "browser-opencode-agent" if picker_navigation else "browser-gemini-agent",
+            "OpenCode" if picker_navigation else "Gemini",
+            "opencode-native" if picker_navigation else "gemini-cli",
+        ),
     ]:
         rows.append(
             {
@@ -109,6 +114,21 @@ def _agents(*, skills: bool = False) -> list[dict]:
                 "mcp_servers": [],
                 "policies": [],
                 "terminals": [],
+            }
+        )
+    if picker_navigation:
+        rows.append(
+            {
+                "id": "browser-custom-agent",
+                "name": "custom-e2e",
+                "display_name": "Custom E2E",
+                "description": "Custom agent for picker geometry",
+                "harness": "claude-sdk",
+                "skills": [],
+                "mcp_servers": [],
+                "policies": [],
+                "terminals": [],
+                "builtin": False,
             }
         )
     return rows
@@ -290,8 +310,12 @@ def test_wrapped_attachment_rows_keep_the_grid(
         assert above[0]["y"] + above[0]["height"] - below[0]["y"] <= TOLERANCE
 
 
-def _register_agents(chat: ChatSessionContract, *, skills: bool = False) -> None:
-    chat.contract.json("/v1/agents", list_payload(_agents(skills=skills)))
+def _register_agents(
+    chat: ChatSessionContract, *, skills: bool = False, picker_navigation: bool = False
+) -> None:
+    chat.contract.json(
+        "/v1/agents", list_payload(_agents(skills=skills, picker_navigation=picker_navigation))
+    )
 
 
 @pytest.mark.parametrize("surface", ["landing", "live"])
@@ -379,7 +403,35 @@ def test_picker_rows_follow_the_row_grid(
     viewport: dict[str, int],
 ) -> None:
     chat = chat_session_contract
-    _register_agents(chat)
+    _register_agents(chat, picker_navigation=surface == "landing")
+    if surface == "landing":
+        chat.contract.json(
+            "/v1/info",
+            {
+                "accounts_enabled": False,
+                "single_user": True,
+                "needs_setup": False,
+                "smart_routing_enabled": True,
+                "smart_routing_sources": {"external": True, "oss": False},
+            },
+        )
+        chat.contract.json(
+            "/v1/hosts",
+            {
+                "hosts": [
+                    {
+                        "host_id": chat.host_id,
+                        "name": "Browser host",
+                        "owner": "local",
+                        "status": "online",
+                        "configured_harnesses": {
+                            "claude-native": True,
+                            "codex-native": True,
+                        },
+                    }
+                ]
+            },
+        )
     chat.set_catalog(
         harness="claude-native",
         models=[
@@ -425,6 +477,54 @@ def test_picker_rows_follow_the_row_grid(
     assert summaries[0]["x"] + summaries[0]["width"] == pytest.approx(
         summaries[1]["x"] + summaries[1]["width"], abs=TOLERANCE
     )
+    if surface == "landing":
+        menu = page.locator(".composer-agent-menu").first
+        smart_routing = page.get_by_test_id("new-chat-landing-harness-smart-routing")
+        expect(smart_routing).to_be_visible()
+        headers = menu.locator("[data-harness-menu-section-label]")
+        expect(headers).to_have_count(2)
+        navigation_rows = [
+            page.get_by_test_id("new-chat-landing-harness-more"),
+            page.get_by_test_id("new-chat-landing-custom-agents"),
+        ]
+        navigation_labels = [
+            row.locator("[data-harness-menu-navigation-label]") for row in navigation_rows
+        ]
+        navigation_chevrons = [row.locator("svg") for row in navigation_rows]
+        for header_text, row, label, chevron in zip(
+            ("Harnesses", "Agents"),
+            navigation_rows,
+            navigation_labels,
+            navigation_chevrons,
+            strict=True,
+        ):
+            expect(row).to_be_visible()
+            expect(chevron).to_have_count(1)
+            header = headers.filter(has_text=header_text)
+            header_text_x = header.evaluate(
+                "el => el.getBoundingClientRect().x + parseFloat(getComputedStyle(el).paddingLeft)"
+            )
+            label_text_x = label.evaluate(
+                "el => el.getBoundingClientRect().x + parseFloat(getComputedStyle(el).paddingLeft)"
+            )
+            assert label_text_x == pytest.approx(header_text_x, abs=TOLERANCE)
+            assert_same_vertical_center(box(row), box(label))
+            assert_same_vertical_center(box(row), box(chevron))
+
+        navigation_boxes = [box(row) for row in navigation_rows]
+        assert navigation_boxes[0]["height"] == pytest.approx(
+            navigation_boxes[1]["height"], abs=TOLERANCE
+        )
+        assert navigation_boxes[0]["height"] == pytest.approx(values[0]["height"], abs=TOLERANCE)
+        assert box(navigation_chevrons[0])["x"] == pytest.approx(
+            box(navigation_chevrons[1])["x"], abs=TOLERANCE
+        )
+
+        choice_labels = menu.locator("[data-harness-menu-choice-label]")
+        assert choice_labels.count() >= 3
+        choice_xs = [box(choice_labels.nth(index))["x"] for index in range(choice_labels.count())]
+        assert max(choice_xs) - min(choice_xs) <= TOLERANCE
+        assert choice_xs[0] - box(navigation_labels[0])["x"] > TOLERANCE
 
 
 @pytest.mark.parametrize("surface", ["landing", "live"])
