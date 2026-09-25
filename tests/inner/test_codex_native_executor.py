@@ -1699,6 +1699,70 @@ async def test_run_turn_wakes_when_startup_failure_is_published(
 
 
 @pytest.mark.asyncio
+async def test_timeout_policy_notification_extends_active_bridge_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A timeout-policy wake grants its full budget before state publication."""
+    if os.name != "posix":
+        pytest.skip("native Codex startup notifications require POSIX FIFOs")
+    _require_bridge_startup_fifo(tmp_path)
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    signal_opened = asyncio.Event()
+    real_open = codex_native_executor.open_bridge_startup_signal
+
+    def _open_and_report(path: Path) -> int | None:
+        fd = real_open(path)
+        signal_opened.set()
+        return fd
+
+    wait_calls = 0
+    real_wait_for_change = codex_native_executor._wait_for_bridge_startup_change
+
+    async def _wait_for_policy_then_advance(signal_fd: int | None) -> bool:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            return await real_wait_for_change(signal_fd)
+        if wait_calls == 61:
+            _start_state(tmp_path)
+        return False
+
+    monkeypatch.setattr(codex_native_executor, "open_bridge_startup_signal", _open_and_report)
+    monkeypatch.setattr(
+        codex_native_executor,
+        "_wait_for_bridge_startup_change",
+        _wait_for_policy_then_advance,
+    )
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    async def _drive() -> list[Any]:
+        events: list[Any] = []
+        async for event in executor.run_turn(
+            [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            [],
+            "",
+        ):
+            events.append(event)
+        return events
+
+    task = asyncio.create_task(_drive())
+    await asyncio.wait_for(signal_opened.wait(), timeout=1.0)
+    write_bridge_startup_timeout(tmp_path, 120.0)
+    events = await asyncio.wait_for(task, timeout=0.5)
+
+    assert wait_calls == 61
+    assert any(isinstance(event, TurnComplete) for event in events)
+    assert [method for method, _params in _FakeCodexNativeClient.requests] == ["turn/start"]
+
+
+@pytest.mark.asyncio
 async def test_cancelled_bridge_wait_closes_startup_signal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
