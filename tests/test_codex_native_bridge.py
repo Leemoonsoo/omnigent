@@ -613,6 +613,24 @@ def test_bridge_startup_publications_notify_waiter(
         os.close(fd)
 
 
+@pytest.mark.parametrize("missing_capability", ["O_NONBLOCK", "mkfifo"])
+def test_bridge_startup_publications_survive_missing_fifo_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    bridge_dir: Path,
+    missing_capability: str,
+) -> None:
+    """Authoritative files remain usable when FIFO support is incomplete."""
+    monkeypatch.delattr(os, missing_capability, raising=False)
+
+    _seed_active_turn(bridge_dir, None)
+    write_bridge_startup_timeout(bridge_dir, 120.0)
+    write_bridge_startup_error(bridge_dir, "startup failed")
+
+    assert read_bridge_state(bridge_dir) is not None
+    assert read_bridge_startup_timeout(bridge_dir) == 120.0
+    assert read_bridge_startup_error(bridge_dir) == "startup failed"
+
+
 def test_bridge_startup_signal_rejects_non_fifo_path(bridge_dir: Path) -> None:
     """A pre-existing non-FIFO signal path disables notification safely."""
     bridge_dir.mkdir(parents=True, exist_ok=True)

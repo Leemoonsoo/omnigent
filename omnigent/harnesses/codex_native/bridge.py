@@ -895,12 +895,13 @@ def open_bridge_startup_signal(bridge_dir: Path) -> int | None:
     :param bridge_dir: Native Codex bridge directory.
     :returns: Non-blocking FIFO descriptor, or ``None`` when unavailable.
     """
-    path = bridge_dir / _STARTUP_SIGNAL_FIFO
-    flags = os.O_RDWR | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
     mkfifo = getattr(os, "mkfifo", None)
-    if mkfifo is None:  # pragma: no cover - native Codex is POSIX-only today.
+    nonblocking = getattr(os, "O_NONBLOCK", None)
+    if mkfifo is None or nonblocking is None:
         return None
+    path = bridge_dir / _STARTUP_SIGNAL_FIFO
+    flags = os.O_RDWR | nonblocking | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
@@ -927,8 +928,11 @@ def notify_bridge_startup_waiters(bridge_dir: Path) -> None:
     :param bridge_dir: Native Codex bridge directory.
     :returns: None.
     """
+    nonblocking = getattr(os, "O_NONBLOCK", None)
+    if nonblocking is None:
+        return
     path = bridge_dir / _STARTUP_SIGNAL_FIFO
-    flags = os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_WRONLY | nonblocking | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         if not stat.S_ISFIFO(path.lstat().st_mode):

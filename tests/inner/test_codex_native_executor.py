@@ -1659,6 +1659,56 @@ async def test_run_turn_wakes_when_bridge_state_is_published(
 
 
 @pytest.mark.asyncio
+async def test_run_turn_polls_state_when_older_bridge_does_not_notify(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An enabled FIFO still falls back to polling a silent older publisher."""
+    if os.name != "posix":
+        pytest.skip("native Codex startup notifications require POSIX FIFOs")
+    _require_bridge_startup_fifo(tmp_path)
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.bridge.notify_bridge_startup_waiters",
+        lambda _path: None,
+    )
+    signal_opened = asyncio.Event()
+    real_open = codex_native_executor.open_bridge_startup_signal
+
+    def _open_and_report(path: Path) -> int | None:
+        fd = real_open(path)
+        signal_opened.set()
+        return fd
+
+    monkeypatch.setattr(codex_native_executor, "open_bridge_startup_signal", _open_and_report)
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    async def _drive() -> list[Any]:
+        events: list[Any] = []
+        async for event in executor.run_turn(
+            [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            [],
+            "",
+        ):
+            events.append(event)
+        return events
+
+    task = asyncio.create_task(_drive())
+    await asyncio.wait_for(signal_opened.wait(), timeout=1.0)
+    _start_state(tmp_path)
+    events = await asyncio.wait_for(task, timeout=2.0)
+
+    assert any(isinstance(event, TurnComplete) for event in events)
+    assert [method for method, _params in _FakeCodexNativeClient.requests] == ["turn/start"]
+
+
+@pytest.mark.asyncio
 async def test_run_turn_wakes_when_startup_failure_is_published(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1810,6 +1860,29 @@ def test_run_turn_without_marker_keeps_exact_legacy_poll_count(
     bridge_startup_polling_only: None,
 ) -> None:
     """The ordinary path remains the existing 60 one-second polls."""
+    sleep_calls = 0
+
+    async def _count_sleep(seconds: float) -> None:
+        nonlocal sleep_calls
+        assert seconds == 1.0
+        sleep_calls += 1
+
+    monkeypatch.setattr(asyncio, "sleep", _count_sleep)
+    events = _collect_turn_events(CodexNativeExecutor(bridge_dir=tmp_path), "hello")
+
+    assert sleep_calls == 60
+    assert len(events) == 1
+    assert isinstance(events[0], ExecutorError)
+
+
+@pytest.mark.parametrize("missing_capability", ["O_NONBLOCK", "mkfifo"])
+def test_run_turn_uses_polling_when_fifo_capability_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    missing_capability: str,
+) -> None:
+    """Incomplete platform FIFO support retains the bounded polling path."""
+    monkeypatch.delattr(os, missing_capability, raising=False)
     sleep_calls = 0
 
     async def _count_sleep(seconds: float) -> None:
