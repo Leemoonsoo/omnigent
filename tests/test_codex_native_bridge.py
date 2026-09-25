@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import select
 import threading
 from pathlib import Path
 
@@ -587,59 +586,6 @@ def test_bridge_startup_timeout_round_trips_and_is_cleared(bridge_dir: Path) -> 
 
     clear_bridge_state(bridge_dir)
     assert read_bridge_startup_timeout(bridge_dir) is None
-
-
-@pytest.mark.parametrize("publication", ["state", "timeout", "error"])
-def test_bridge_startup_publications_notify_waiter(
-    bridge_dir: Path,
-    publication: str,
-) -> None:
-    """State, timeout policy, and failure publications wake queued first turns."""
-    fd = codex_native_bridge.open_bridge_startup_signal(bridge_dir)
-    if fd is None:
-        pytest.skip("POSIX FIFO notifications are unavailable")
-    try:
-        if publication == "state":
-            _seed_active_turn(bridge_dir, None)
-        elif publication == "timeout":
-            write_bridge_startup_timeout(bridge_dir, 120.0)
-        else:
-            write_bridge_startup_error(bridge_dir, "startup failed")
-
-        readable, _, _ = select.select([fd], [], [], 1.0)
-        assert readable == [fd]
-        assert os.read(fd, 4096)
-    finally:
-        os.close(fd)
-
-
-@pytest.mark.parametrize("missing_capability", ["O_NONBLOCK", "mkfifo"])
-def test_bridge_startup_publications_survive_missing_fifo_capability(
-    monkeypatch: pytest.MonkeyPatch,
-    bridge_dir: Path,
-    missing_capability: str,
-) -> None:
-    """Authoritative files remain usable when FIFO support is incomplete."""
-    monkeypatch.delattr(os, missing_capability, raising=False)
-
-    _seed_active_turn(bridge_dir, None)
-    write_bridge_startup_timeout(bridge_dir, 120.0)
-    write_bridge_startup_error(bridge_dir, "startup failed")
-
-    assert read_bridge_state(bridge_dir) is not None
-    assert read_bridge_startup_timeout(bridge_dir) == 120.0
-    assert read_bridge_startup_error(bridge_dir) == "startup failed"
-
-
-def test_bridge_startup_signal_rejects_non_fifo_path(bridge_dir: Path) -> None:
-    """A pre-existing non-FIFO signal path disables notification safely."""
-    bridge_dir.mkdir(parents=True, exist_ok=True)
-    signal_path = bridge_dir / "startup_signal.fifo"
-    signal_path.write_text("do not overwrite", encoding="utf-8")
-
-    assert codex_native_bridge.open_bridge_startup_signal(bridge_dir) is None
-    _seed_active_turn(bridge_dir, None)
-    assert signal_path.read_text(encoding="utf-8") == "do not overwrite"
 
 
 @pytest.mark.parametrize("timeout", [0.0, -1.0, 120.1, float("inf"), float("nan")])

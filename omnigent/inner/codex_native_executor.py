@@ -7,7 +7,6 @@ import base64
 import binascii
 import json
 import logging
-import math
 import os
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
@@ -28,7 +27,6 @@ from omnigent.harnesses.codex_native.bridge import (
     cancel_pending_mcp_startup,
     clear_active_turn_id_if_matches,
     mcp_startup_waiting_detail,
-    open_bridge_startup_signal,
     read_bridge_startup_error,
     read_bridge_startup_timeout,
     read_bridge_state,
@@ -71,102 +69,60 @@ _logger = logging.getLogger(__name__)
 _NO_ACTIVE_TURN_ERROR_CODE = -32600
 _NO_ACTIVE_TURN_ERROR_MESSAGE = "no active turn to steer"
 _ACTIVE_TURN_MISMATCH_MARKERS = ("expected active turn id", "but found")
-_LEGACY_BRIDGE_STATE_POLL_COUNT = 60
-
-
-async def _wait_for_bridge_startup_change(signal_fd: int | None) -> bool:
-    """Wait for a bridge startup notification or one fallback interval.
-
-    :param signal_fd: FIFO descriptor from :func:`open_bridge_startup_signal`,
-        or ``None`` when notifications are unavailable.
-    :returns: ``True`` when signalled, ``False`` after the one-second fallback.
-    """
-    if signal_fd is None:
-        await asyncio.sleep(1.0)
-        return False
-
-    loop = asyncio.get_running_loop()
-    ready = loop.create_future()
-
-    def _set_ready() -> None:
-        if not ready.done():
-            ready.set_result(None)
-
-    try:
-        loop.add_reader(signal_fd, _set_ready)
-    except (NotImplementedError, OSError):
-        await asyncio.sleep(1.0)
-        return False
-    try:
-        try:
-            await asyncio.wait_for(ready, timeout=1.0)
-        except TimeoutError:
-            return False
-    finally:
-        loop.remove_reader(signal_fd)
-
-    # Collapse multiple marker writes into one authoritative state re-read.
-    try:
-        while os.read(signal_fd, 4096):
-            pass
-    except BlockingIOError:
-        pass
-    except OSError:
-        return False
-    return True
+_LEGACY_BRIDGE_STATE_WAIT_SECONDS = 60.0
+_BRIDGE_STATE_FAST_POLL_SECONDS = 0.05
+_BRIDGE_STATE_FAST_POLL_WINDOW_SECONDS = 2.0
+_BRIDGE_STATE_SLOW_POLL_SECONDS = 0.25
 
 
 async def _wait_for_bridge_state(
     bridge_dir: Path,
     *,
-    poll_count: int,
-    max_poll_count: int,
+    waited_seconds: float,
+    max_wait_seconds: float,
     startup_timeout_observed: bool,
-) -> tuple[CodexNativeBridgeState | None, int, int, bool]:
-    """Wait for startup state with FIFO wakeups and one-second fallback polls."""
-    signal_fd = open_bridge_startup_signal(bridge_dir)
-    try:
+) -> tuple[CodexNativeBridgeState | None, float, float, bool]:
+    """Poll startup files quickly at first, then back off to a modest cadence."""
+    state = read_bridge_state(bridge_dir)
+    while state is None and waited_seconds < max_wait_seconds:
+        if read_bridge_startup_error(bridge_dir) is not None:
+            break
+        poll_interval = (
+            _BRIDGE_STATE_FAST_POLL_SECONDS
+            if waited_seconds < _BRIDGE_STATE_FAST_POLL_WINDOW_SECONDS
+            else _BRIDGE_STATE_SLOW_POLL_SECONDS
+        )
+        sleep_seconds = min(poll_interval, max_wait_seconds - waited_seconds)
+        await asyncio.sleep(sleep_seconds)
+        waited_seconds += sleep_seconds
         state = read_bridge_state(bridge_dir)
-        while state is None and poll_count < max_poll_count:
-            if read_bridge_startup_error(bridge_dir) is not None:
-                break
-            await _wait_for_bridge_startup_change(signal_fd)
-            # Count every wake, not only fallback timeouts, so a broken or
-            # noisy writer cannot turn the bounded startup wait into an
-            # unbounded notification loop. Legitimate pre-state publications
-            # are limited to the timeout marker, then state or failure.
-            poll_count += 1
-            state = read_bridge_state(bridge_dir)
-            if state is not None:
-                break
-            if not startup_timeout_observed:
-                advertised_poll_count = _bridge_state_wait_poll_count(bridge_dir)
-                if advertised_poll_count > _LEGACY_BRIDGE_STATE_POLL_COUNT:
-                    extended_poll_count = max(
-                        max_poll_count,
-                        poll_count + advertised_poll_count,
-                    )
-                    _logger.debug(
-                        "Codex bridge-state wait extended from %d to %d polls by startup marker",
-                        max_poll_count,
-                        extended_poll_count,
-                    )
-                    max_poll_count = extended_poll_count
-                    startup_timeout_observed = True
-        return state, poll_count, max_poll_count, startup_timeout_observed
-    finally:
-        if signal_fd is not None:
-            os.close(signal_fd)
+        if state is not None:
+            break
+        if not startup_timeout_observed:
+            advertised_wait_seconds = _bridge_state_wait_seconds(bridge_dir)
+            if advertised_wait_seconds > _LEGACY_BRIDGE_STATE_WAIT_SECONDS:
+                extended_wait_seconds = max(
+                    max_wait_seconds,
+                    waited_seconds + advertised_wait_seconds,
+                )
+                _logger.debug(
+                    "Codex bridge-state wait extended from %.2f to %.2f seconds by startup marker",
+                    max_wait_seconds,
+                    extended_wait_seconds,
+                )
+                max_wait_seconds = extended_wait_seconds
+                startup_timeout_observed = True
+    return state, waited_seconds, max_wait_seconds, startup_timeout_observed
 
 
-def _bridge_state_wait_poll_count(bridge_dir: Path) -> int:
-    """Return 60 legacy polls or the advertised configured-command budget."""
+def _bridge_state_wait_seconds(bridge_dir: Path) -> float:
+    """Return the legacy wait or the advertised configured-command budget."""
     configured_timeout = read_bridge_startup_timeout(bridge_dir)
     if configured_timeout is None:
-        return _LEGACY_BRIDGE_STATE_POLL_COUNT
+        return _LEGACY_BRIDGE_STATE_WAIT_SECONDS
     return max(
-        _LEGACY_BRIDGE_STATE_POLL_COUNT,
-        math.ceil(configured_timeout + CODEX_NATIVE_STARTUP_PUBLICATION_GRACE_SECONDS),
+        _LEGACY_BRIDGE_STATE_WAIT_SECONDS,
+        configured_timeout + CODEX_NATIVE_STARTUP_PUBLICATION_GRACE_SECONDS,
     )
 
 
@@ -535,24 +491,22 @@ class CodexNativeExecutor(Executor):
         if not input_items:
             yield ExecutorError(message="Codex native turn had no user input to send")
             return
-        # Wait for the bridge to boot OUTSIDE the injection lock. The first
-        # turn receives a cross-process notification when state is published;
-        # one-second fallback checks preserve mixed-version and failed-FIFO
-        # behavior. Once state exists, the decision/RPC/write below runs under
-        # the lock — re-reading state so it's atomic with respect to a steer
-        # that landed during the wait.
+        # Wait for the bridge to boot OUTSIDE the injection lock. Poll quickly
+        # during the expected startup window, then back off. Once state exists,
+        # the decision/RPC/write below runs under the lock — re-reading state
+        # so it's atomic with respect to a steer that landed during the wait.
         state = read_bridge_state(self._bridge_dir)
-        poll_count = 0
-        max_poll_count = _LEGACY_BRIDGE_STATE_POLL_COUNT
+        waited_seconds = 0.0
+        max_wait_seconds = _LEGACY_BRIDGE_STATE_WAIT_SECONDS
         startup_timeout_observed = False
         if state is None:
-            max_poll_count = _bridge_state_wait_poll_count(self._bridge_dir)
-            startup_timeout_observed = max_poll_count > _LEGACY_BRIDGE_STATE_POLL_COUNT
+            max_wait_seconds = _bridge_state_wait_seconds(self._bridge_dir)
+            startup_timeout_observed = max_wait_seconds > _LEGACY_BRIDGE_STATE_WAIT_SECONDS
             if startup_timeout_observed:
                 _logger.debug(
-                    "Codex bridge-state wait extended from %d to %d polls by startup marker",
-                    _LEGACY_BRIDGE_STATE_POLL_COUNT,
-                    max_poll_count,
+                    "Codex bridge-state wait extended from %.2f to %.2f seconds by startup marker",
+                    _LEGACY_BRIDGE_STATE_WAIT_SECONDS,
+                    max_wait_seconds,
                 )
 
         error_msg: str | None = None
@@ -560,13 +514,13 @@ class CodexNativeExecutor(Executor):
             if state is None:
                 (
                     state,
-                    poll_count,
-                    max_poll_count,
+                    waited_seconds,
+                    max_wait_seconds,
                     startup_timeout_observed,
                 ) = await _wait_for_bridge_state(
                     self._bridge_dir,
-                    poll_count=poll_count,
-                    max_poll_count=max_poll_count,
+                    waited_seconds=waited_seconds,
+                    max_wait_seconds=max_wait_seconds,
                     startup_timeout_observed=startup_timeout_observed,
                 )
 
@@ -591,19 +545,19 @@ class CodexNativeExecutor(Executor):
                         # bounded wait — the allowance is still granted at
                         # most once — so the executor keeps outwaiting a
                         # forwarder healthily inside its advertised budget.
-                        advertised_poll_count = _bridge_state_wait_poll_count(self._bridge_dir)
-                        if advertised_poll_count > _LEGACY_BRIDGE_STATE_POLL_COUNT:
-                            extended_poll_count = max(
-                                max_poll_count,
-                                poll_count + advertised_poll_count,
+                        advertised_wait_seconds = _bridge_state_wait_seconds(self._bridge_dir)
+                        if advertised_wait_seconds > _LEGACY_BRIDGE_STATE_WAIT_SECONDS:
+                            extended_wait_seconds = max(
+                                max_wait_seconds,
+                                waited_seconds + advertised_wait_seconds,
                             )
                             _logger.debug(
-                                "Codex bridge-state wait extended from %d to %d "
-                                "polls by startup marker",
-                                max_poll_count,
-                                extended_poll_count,
+                                "Codex bridge-state wait extended from %.2f to %.2f "
+                                "seconds by startup marker",
+                                max_wait_seconds,
+                                extended_wait_seconds,
                             )
-                            max_poll_count = extended_poll_count
+                            max_wait_seconds = extended_wait_seconds
                             startup_timeout_observed = True
                             continue
                     error_msg = (
