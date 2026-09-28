@@ -8498,6 +8498,7 @@ async def _auto_create_claude_terminal(
             and claude_default_catalog_bypass_is_safe(
                 claude_config,
                 launch_config_resolution_failed=_launch_config_resolution_failed,
+                workspace=Path(workspace),
             )
             and catalog_outcome in {"joined_inflight", "cold_probe"}
         )
@@ -8550,6 +8551,7 @@ async def _auto_create_claude_terminal(
                 endpoint=claude_launch_endpoint_marker(
                     claude_config,
                     launch_config_resolution_failed=_launch_config_resolution_failed,
+                    workspace=Path(workspace),
                 ),
             ),
         )

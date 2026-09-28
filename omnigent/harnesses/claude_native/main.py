@@ -554,9 +554,8 @@ def _user_claude_settings_path() -> Path:
     return config_dir / "settings.json"
 
 
-def _user_claude_launch_marker() -> str | None:
-    """Classify user settings that can choose a provider or model."""
-    path = _user_claude_settings_path()
+def _claude_settings_launch_marker(path: Path, marker: str) -> str | None:
+    """Classify one Claude settings file that can choose a provider or model."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -564,22 +563,28 @@ def _user_claude_launch_marker() -> str | None:
     except (OSError, ValueError):
         # An existing settings file we cannot interpret is not positive proof
         # that Claude will use its canonical login route.
-        return "user_settings"
+        return marker
     if not isinstance(payload, dict):
-        return "user_settings"
+        return marker
 
     for key in ("apiKeyHelper", "model"):
-        if isinstance(value := payload.get(key), str) and value.strip():
-            return "user_settings"
+        if key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, str) or value.strip():
+            return marker
     for key in ("modelPicker", "modelOverrides"):
-        if isinstance(value := payload.get(key), dict) and value:
-            return "user_settings"
+        if key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, dict) or value:
+            return marker
 
     raw_env = payload.get("env")
     if raw_env is None:
         return None
     if not isinstance(raw_env, dict):
-        return "user_settings"
+        return marker
     for key, value in raw_env.items():
         if not isinstance(key, str) or not key.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_")):
             continue
@@ -590,7 +595,25 @@ def _user_claude_launch_marker() -> str | None:
         else:
             configured_value = value is not None
         if configured_value:
-            return "user_settings"
+            return marker
+    return None
+
+
+def _user_claude_launch_marker() -> str | None:
+    """Classify user settings that can choose a provider or model."""
+    return _claude_settings_launch_marker(_user_claude_settings_path(), "user_settings")
+
+
+def _workspace_claude_launch_marker(workspace: Path | None) -> str | None:
+    """Classify project settings that can choose a provider or model."""
+    if workspace is None:
+        return None
+    for filename in ("settings.json", "settings.local.json"):
+        marker = _claude_settings_launch_marker(
+            workspace / ".claude" / filename, "workspace_settings"
+        )
+        if marker is not None:
+            return marker
     return None
 
 
@@ -729,6 +752,7 @@ def claude_launch_endpoint_marker(
     claude_config: ClaudeNativeUcodeConfig | None,
     *,
     launch_config_resolution_failed: bool = False,
+    workspace: Path | None = None,
 ) -> str:
     """Return a bounded provider-shape marker suitable for launch telemetry."""
     try:
@@ -744,6 +768,9 @@ def claude_launch_endpoint_marker(
             user_launch = _user_claude_launch_marker()
             if user_launch is not None:
                 return user_launch
+            workspace_launch = _workspace_claude_launch_marker(workspace)
+            if workspace_launch is not None:
+                return workspace_launch
             from omnigent.onboarding.ambient import claude_managed_gateway
 
             managed_base_url, managed_gateway = claude_managed_gateway(_managed_settings_paths())
@@ -1641,6 +1668,7 @@ def claude_default_catalog_bypass_is_safe(
     claude_config: ClaudeNativeUcodeConfig | None,
     *,
     launch_config_resolution_failed: bool = False,
+    workspace: Path | None = None,
 ) -> bool:
     """Whether a bare Default launch can safely let Claude choose its model."""
     # Eligibility is intentionally stricter than telemetry classification:
@@ -1654,6 +1682,8 @@ def claude_default_catalog_bypass_is_safe(
         if _managed_claude_launch_marker() is not None:
             return False
         if _user_claude_launch_marker() is not None:
+            return False
+        if _workspace_claude_launch_marker(workspace) is not None:
             return False
 
         from omnigent.onboarding.ambient import claude_managed_gateway

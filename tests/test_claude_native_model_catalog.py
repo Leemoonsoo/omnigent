@@ -368,6 +368,31 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
     assert claude_native.claude_default_catalog_bypass_is_safe(None)
     user_settings.unlink()
 
+    workspace = tmp_path / "workspace"
+    workspace_settings_dir = workspace / ".claude"
+    workspace_settings_dir.mkdir(parents=True)
+    workspace_settings = workspace_settings_dir / "settings.json"
+    workspace_settings.write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"}}),
+        encoding="utf-8",
+    )
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None, workspace=workspace)
+    assert (
+        claude_native.claude_launch_endpoint_marker(None, workspace=workspace)
+        == "workspace_settings"
+    )
+    workspace_settings.write_text(json.dumps({"permissions": {"allow": []}}), encoding="utf-8")
+    assert claude_native.claude_default_catalog_bypass_is_safe(None, workspace=workspace)
+    workspace_settings.unlink()
+    workspace_local_settings = workspace_settings_dir / "settings.local.json"
+    workspace_local_settings.write_text("{malformed", encoding="utf-8")
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None, workspace=workspace)
+    assert (
+        claude_native.claude_launch_endpoint_marker(None, workspace=workspace)
+        == "workspace_settings"
+    )
+    workspace_local_settings.unlink()
+
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "ambient_gateway"

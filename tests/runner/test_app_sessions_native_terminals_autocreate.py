@@ -4952,6 +4952,7 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
         ("stale", "claude_login", "available", False),
         ("missing", "claude_login", "available", False),
         ("inflight", "claude_login", "available", False),
+        ("missing", "claude_login", "failed", False),
         ("missing", "claude_login", "available", True),
         ("missing", "ambient_models", "available", False),
         ("inflight", "ambient_models", "available", False),
@@ -4959,6 +4960,8 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
         ("inflight", "user_api_key_helper", "available", False),
         ("missing", "user_provider_env", "available", False),
         ("inflight", "user_provider_env", "available", False),
+        ("missing", "workspace_settings", "available", False),
+        ("missing", "workspace_local_settings", "available", False),
         ("missing", "resolution_failed", "available", False),
         ("inflight", "resolution_failed", "available", False),
         ("missing", "managed_models", "available", False),
@@ -5003,6 +5006,9 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     user_config_dir = tmp_path / "claude-config"
     user_config_dir.mkdir()
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_config_dir))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
     for name in (
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
@@ -5034,6 +5040,18 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         )
     elif provider_shape == "user_provider_env":
         (user_config_dir / "settings.json").write_text(
+            json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"}}),
+            encoding="utf-8",
+        )
+    elif provider_shape in {"workspace_settings", "workspace_local_settings"}:
+        workspace_settings_dir = workspace / ".claude"
+        workspace_settings_dir.mkdir()
+        filename = (
+            "settings.local.json"
+            if provider_shape == "workspace_local_settings"
+            else "settings.json"
+        )
+        (workspace_settings_dir / filename).write_text(
             json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"}}),
             encoding="utf-8",
         )
@@ -5079,12 +5097,15 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     refreshed = [{"id": "sonnet", "model": "claude-sonnet-5", "isDefault": True}]
     probe_started = asyncio.Event()
     release_probe = asyncio.Event()
+    probe_attempts = 0
 
     async def _fake_probe_catalog(config: object) -> list[dict[str, object]]:
+        nonlocal probe_attempts
         del config
+        probe_attempts += 1
         probe_started.set()
         await release_probe.wait()
-        if probe_result == "failed":
+        if probe_result == "failed" and probe_attempts == 1:
             raise RuntimeError("synthetic catalog failure")
         return refreshed
 
@@ -5203,7 +5224,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
             release_probe.set()
         task = model_catalog_store._inflight.get(("claude-native", fingerprint))
         if task is not None:
-            await task
+            await asyncio.gather(task, return_exceptions=True)
         if prewarm_task is not None:
             await prewarm_task
         # Successful discovery healed the picker store; a failed probe left the
@@ -5211,6 +5232,11 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         assert model_catalog_store.read_catalog("claude-native", fingerprint) == (
             refreshed if probe_result == "available" else None
         )
+        if provider_shape == "claude_login" and probe_result == "failed":
+            # A failed advisory probe leaves a real miss: a later picker read
+            # retries discovery and heals the shared store.
+            assert await REAL_CLAUDE_LAUNCH_CATALOG(None) == refreshed
+            assert model_catalog_store.read_catalog("claude-native", fingerprint) == refreshed
 
     records = [
         record
@@ -5221,7 +5247,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     attributes = records[-1].attributes
     expected_outcome = (
         "error"
-        if probe_result == "failed"
+        if probe_result == "failed" and synchronous_probe
         else {
             "fresh": "hit",
             "stale": "stale",
@@ -5236,6 +5262,8 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     assert attributes["catalog_probe_on_terminal_critical_path"] is synchronous_probe
     if provider_shape in {"user_api_key_helper", "user_provider_env"}:
         expected_endpoint = "user_settings"
+    elif provider_shape in {"workspace_settings", "workspace_local_settings"}:
+        expected_endpoint = "workspace_settings"
     elif provider_shape.startswith("malformed_endpoint_"):
         expected_endpoint = "unknown"
     else:
