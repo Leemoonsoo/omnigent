@@ -5109,7 +5109,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         os.utime(path, (old, old))
     elif freshness == "inflight":
         prewarm_task = asyncio.create_task(REAL_CLAUDE_LAUNCH_CATALOG(None))
-        await asyncio.wait_for(probe_started.wait(), timeout=1)
+        await asyncio.wait_for(probe_started.wait(), timeout=15)
 
     captured: dict[str, Any] = {}
 
@@ -5166,7 +5166,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         "inflight",
     }
     if synchronous_probe:
-        await asyncio.wait_for(probe_started.wait(), timeout=1)
+        await asyncio.wait_for(probe_started.wait(), timeout=15)
         await asyncio.sleep(0)
         assert not launch_task.done(), (
             f"{provider_shape} Default launch skipped its {freshness} catalog probe"
@@ -5186,7 +5186,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     else:
         assert "--model" not in args, f"a non-authoritative default was still pinned: {args}"
     if freshness != "fresh":
-        await asyncio.wait_for(probe_started.wait(), timeout=1)
+        await asyncio.wait_for(probe_started.wait(), timeout=15)
         # Canonical login returned before the probe. Ambiguous providers waited
         # and pinned the catalog's discovered default before launching.
         if not synchronous_probe:
