@@ -5788,8 +5788,11 @@ async def test_host_records_server_timing_from_accepted_upgrade(
 
     assert len(observations) == 1
     assert len(served) == 1
-    assert observations[0]["server_auth_upgrade"] == 12.5
-    assert observations[0]["network_handshake"] == max(0.0, observations[0]["upgrade_wait"] - 12.5)
+    expected_server = min(12.5, observations[0]["upgrade_wait"])
+    assert observations[0]["server_auth_upgrade"] == expected_server
+    assert observations[0]["network_handshake"] == (
+        observations[0]["upgrade_wait"] - expected_server
+    )
 
 
 async def test_host_runtime_setup_starts_only_after_accepted_upgrade(
@@ -5812,6 +5815,135 @@ async def test_host_runtime_setup_starts_only_after_accepted_upgrade(
     await host.run()
 
     assert calls == ["setup"]
+
+
+async def test_initial_capabilities_wait_for_host_runtime_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first hello reflects credentials materialized after authentication."""
+    setup_complete = threading.Event()
+    gateway_probes: list[bool] = []
+    tunnel = _BlockingTunnel()
+
+    def _setup() -> None:
+        setup_complete.set()
+
+    def _gateway() -> dict[str, bool]:
+        ready = setup_complete.is_set()
+        gateway_probes.append(ready)
+        return {"codex-native": ready}
+
+    class _AcceptedConnection:
+        async def __aenter__(self) -> _BlockingTunnel:
+            return tunnel
+
+        async def __aexit__(self, *exc_info: object) -> bool:
+            return False
+
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", _gateway)
+    monkeypatch.setattr(
+        "omnigent.host.connect.websockets.asyncio.client.connect",
+        lambda *args, **kwargs: _AcceptedConnection(),
+    )
+    identity = HostIdentity(host_id="host_test_connect", name="test-laptop")
+    host = HostProcess(
+        identity,
+        "https://app.example.databricks.com",
+        startup_setup=_setup,
+    )
+    monkeypatch.setattr(host, "_build_connect_headers", dict)
+    monkeypatch.setattr(host, "_ensure_owner_user_id", AsyncMock())
+    host._start_capability_discovery()
+    await asyncio.sleep(0)
+    assert gateway_probes == []
+
+    connect_task = asyncio.create_task(host._connect_and_serve())
+    try:
+        await asyncio.wait_for(tunnel.first_send.wait(), timeout=1.0)
+    finally:
+        await _cancel(connect_task)
+
+    hello = decode_host_frame(tunnel.sent[0])
+    assert isinstance(hello, HostHelloFrame)
+    assert gateway_probes == [True]
+    assert hello.gateway_inference == {"codex-native": True}
+
+
+async def test_host_runtime_setup_failure_releases_capability_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-effort setup errors cannot deadlock the first registration."""
+
+    def _setup() -> None:
+        raise RuntimeError("setup failed")
+
+    identity = HostIdentity(host_id="host_test_connect", name="test-laptop")
+    host = HostProcess(
+        identity,
+        "https://app.example.databricks.com",
+        startup_setup=_setup,
+    )
+    monkeypatch.setattr(host, "_probe_configured_harnesses", AsyncMock(return_value={}))
+    monkeypatch.setattr(host, "_probe_gateway_inference", AsyncMock(return_value={}))
+    host._start_capability_discovery()
+    setup_task = asyncio.create_task(host._complete_startup_setup())
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        await setup_task
+    assert host._capability_init_task is not None
+    await asyncio.wait_for(host._capability_init_task, timeout=1.0)
+    assert host._capabilities_initialized is True
+
+
+async def test_cancellation_during_telemetry_import_stops_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after upgrade cannot continue into registration or serving."""
+    telemetry_release = asyncio.Event()
+    upgrade_accepted = asyncio.Event()
+    tunnel = _BlockingTunnel()
+    served: list[object] = []
+
+    async def _load_telemetry() -> object:
+        await telemetry_release.wait()
+        return SimpleNamespace(init=lambda _service: None)
+
+    class _AcceptedConnection:
+        async def __aenter__(self) -> _BlockingTunnel:
+            upgrade_accepted.set()
+            return tunnel
+
+        async def __aexit__(self, *exc_info: object) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "omnigent.host.connect.websockets.asyncio.client.connect",
+        lambda *args, **kwargs: _AcceptedConnection(),
+    )
+    host = _host()
+    monkeypatch.setattr(host, "_build_connect_headers", dict)
+    monkeypatch.setattr(
+        host,
+        "_ensure_owner_user_id",
+        AsyncMock(side_effect=lambda **kwargs: served.append(kwargs)),
+    )
+    monkeypatch.setattr(host, "_serve_frames", AsyncMock(side_effect=lambda ws: served.append(ws)))
+    telemetry_task = asyncio.create_task(_load_telemetry())
+    host._telemetry_import_task = telemetry_task  # type: ignore[assignment]
+
+    connect_task = asyncio.create_task(host._connect_and_serve())
+    await asyncio.wait_for(upgrade_accepted.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    connect_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await connect_task
+    assert served == []
+    assert telemetry_task.done() is False
+
+    telemetry_release.set()
+    await telemetry_task
 
 
 async def test_rejected_upgrade_does_not_start_host_runtime_setup(

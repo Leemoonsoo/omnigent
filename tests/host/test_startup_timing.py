@@ -36,6 +36,22 @@ def test_decomposes_local_network_and_server_phases() -> None:
     }
 
 
+def test_caps_server_timing_at_measured_upgrade_wait() -> None:
+    """A server duration cannot exceed the client-observed upgrade wait."""
+    timing = HostStartupTiming(
+        marks_ns={
+            "upgrade_started": 1_000_000_000,
+            "upgrade_accepted": 1_010_000_000,
+        }
+    )
+
+    phases = timing.durations_ms(server_auth_ms=25.0)
+
+    assert phases["upgrade_wait"] == 10.0
+    assert phases["server_auth_upgrade"] == 10.0
+    assert phases["network_handshake"] == 0.0
+
+
 def test_parses_host_server_timing_among_other_metrics() -> None:
     """The client tolerates other standard Server-Timing entries."""
     assert (
@@ -54,3 +70,10 @@ def test_parses_host_timing_from_repeated_server_timing_fields() -> None:
     headers["Server-Timing"] = "omnigent-host-auth;dur=12.5"
 
     assert server_auth_timing_ms(headers) == 12.5
+
+
+def test_rejects_server_timing_that_overflows_float() -> None:
+    """An oversized decimal cannot inject an infinite histogram observation."""
+    oversized = "1" + ("0" * 400)
+
+    assert server_auth_timing_ms({"Server-Timing": f"omnigent-host-auth;dur={oversized}"}) is None

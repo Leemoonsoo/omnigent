@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections.abc import Mapping
@@ -50,12 +51,13 @@ class HostStartupTiming:
         for phase, duration in candidates.items():
             if duration is not None:
                 phases[phase] = duration
-        if server_auth_ms is not None:
+        if server_auth_ms is not None and math.isfinite(server_auth_ms):
             bounded_server = max(0.0, server_auth_ms)
-            phases["server_auth_upgrade"] = bounded_server
             upgrade_wait = phases.get("upgrade_wait")
             if upgrade_wait is not None:
+                bounded_server = min(bounded_server, upgrade_wait)
                 phases["network_handshake"] = max(0.0, upgrade_wait - bounded_server)
+            phases["server_auth_upgrade"] = bounded_server
         return phases
 
 
@@ -75,7 +77,8 @@ def server_auth_timing_ms(headers: Mapping[str, str] | None) -> float | None:
                 continue
             match = _SERVER_TIMING_RE.search(value)
             if match is not None:
-                return float(match.group(1))
+                duration = float(match.group(1))
+                return duration if math.isfinite(duration) else None
     except Exception:  # noqa: BLE001 - optional timing cannot disrupt registration
         # Timing metadata is optional and must never disrupt registration.
         return None

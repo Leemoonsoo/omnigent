@@ -1169,7 +1169,7 @@ class HostProcess:
             By default the host discovers its installed shells once at startup.
         :param startup_setup: Optional host credential/configuration preparation.
             It starts after the first accepted upgrade and is awaited before
-            the first runner launch.
+            initial capability discovery and the first runner launch.
         :param startup_timing: Cold auto-daemon milestones, when this host was
             launched through the lifecycle claim path.
         """
@@ -1192,6 +1192,9 @@ class HostProcess:
         self._startup_setup = startup_setup
         self._startup_timing = startup_timing
         self._startup_setup_task: asyncio.Task[None] | None = None
+        self._startup_setup_complete = asyncio.Event()
+        if startup_setup is None:
+            self._startup_setup_complete.set()
         self._telemetry_import_task: asyncio.Task[ModuleType] | None = None
         from omnigent.host.skills import HostSkillDiscovery
 
@@ -1455,6 +1458,18 @@ class HostProcess:
 
         task.add_done_callback(_release)
         return await asyncio.shield(task)
+
+    async def _complete_startup_setup(self) -> None:
+        """Run deferred host setup and release initial capability discovery."""
+        assert self._startup_setup is not None
+        try:
+            await self._run_host_subprocess_in_thread(self._startup_setup)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._startup_setup_complete.set()
+            raise
+        self._startup_setup_complete.set()
 
     def _alive_runner_ids(self) -> list[str]:
         """Return IDs of runners that are still alive.
@@ -3789,6 +3804,12 @@ class HostProcess:
         """Collect startup metadata before registration, with bounded fallback."""
         if self._capabilities_initialized:
             return
+        # Managed-host setup materializes the Databricks profile and broker
+        # sidecar used by gateway/readiness resolution. It cannot begin until
+        # the upgrade has authenticated, so keep pre-upgrade discovery pending
+        # rather than publishing an authoritative false snapshot from the
+        # unconfigured filesystem.
+        await self._startup_setup_complete.wait()
         generation = self._capability_generation
         try:
             configured, gateway = await asyncio.wait_for(
@@ -4311,11 +4332,11 @@ class HostProcess:
         if startup_timing is not None and not startup_timing.reported:
             startup_timing.mark("upgrade_accepted")
         # Credential/config preparation can write Databricks auth files, so it
-        # starts only after the upgrade's token resolution is complete. It does
-        # not gate registration; the first runner launch joins it instead.
+        # starts only after the upgrade's token resolution is complete. Initial
+        # capability discovery and the first runner launch both join it.
         if self._startup_setup is not None and self._startup_setup_task is None:
             self._startup_setup_task = asyncio.create_task(
-                self._run_host_subprocess_in_thread(self._startup_setup),
+                self._complete_startup_setup(),
                 name="host-startup-setup",
             )
         # An accepted upgrade proves the credentials work: login redirects
@@ -4330,36 +4351,38 @@ class HostProcess:
         # A completed upgrade proves the endpoint healthy — the next drop's
         # prompt reconnect is wanted again.
         self._recycle_streak = 0
-        if self._telemetry_import_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                telemetry = await asyncio.shield(self._telemetry_import_task)
-                telemetry.init("omni-host")
-        record_websocket_connected("host", reconnect=reconnect)
-        if startup_timing is not None and not startup_timing.reported:
-            response = getattr(ws, "response", None)
-            server_auth_ms = server_auth_timing_ms(getattr(response, "headers", None))
-            phases_ms = startup_timing.durations_ms(server_auth_ms=server_auth_ms)
-            startup_timing.reported = True
-            record_websocket_connect_bootstrap(phases_ms)
-            _logger.info(
-                "Cold host bootstrap reached accepted WebSocket upgrade",
-                extra=debug_event(
-                    "host_bootstrap",
-                    phase="upgrade_accepted",
-                    identity_config_ms=phases_ms.get("identity_config"),
-                    daemon_record_ms=phases_ms.get("daemon_record"),
-                    host_connect_import_ms=phases_ms.get("host_connect_import"),
-                    connect_headers_ms=phases_ms.get("connect_headers"),
-                    tls_context_ms=phases_ms.get("tls_context"),
-                    client_bootstrap_ms=phases_ms.get("client_bootstrap"),
-                    upgrade_wait_ms=phases_ms.get("upgrade_wait"),
-                    server_auth_upgrade_ms=phases_ms.get("server_auth_upgrade"),
-                    network_handshake_ms=phases_ms.get("network_handshake"),
-                    claim_to_upgrade_ms=phases_ms.get("claim_to_upgrade"),
-                ),
-            )
         disconnect_error: BaseException | None = None
         try:
+            if self._telemetry_import_task is not None:
+                # The import survives caller cancellation, but cancellation of
+                # the host connection itself must still reach run() shutdown.
+                with contextlib.suppress(Exception):
+                    telemetry = await asyncio.shield(self._telemetry_import_task)
+                    telemetry.init("omni-host")
+            record_websocket_connected("host", reconnect=reconnect)
+            if startup_timing is not None and not startup_timing.reported:
+                response = getattr(ws, "response", None)
+                server_auth_ms = server_auth_timing_ms(getattr(response, "headers", None))
+                phases_ms = startup_timing.durations_ms(server_auth_ms=server_auth_ms)
+                startup_timing.reported = True
+                record_websocket_connect_bootstrap(phases_ms)
+                _logger.info(
+                    "Cold host bootstrap reached accepted WebSocket upgrade",
+                    extra=debug_event(
+                        "host_bootstrap",
+                        phase="upgrade_accepted",
+                        identity_config_ms=phases_ms.get("identity_config"),
+                        daemon_record_ms=phases_ms.get("daemon_record"),
+                        host_connect_import_ms=phases_ms.get("host_connect_import"),
+                        connect_headers_ms=phases_ms.get("connect_headers"),
+                        tls_context_ms=phases_ms.get("tls_context"),
+                        client_bootstrap_ms=phases_ms.get("client_bootstrap"),
+                        upgrade_wait_ms=phases_ms.get("upgrade_wait"),
+                        server_auth_upgrade_ms=phases_ms.get("server_auth_upgrade"),
+                        network_handshake_ms=phases_ms.get("network_handshake"),
+                        claim_to_upgrade_ms=phases_ms.get("claim_to_upgrade"),
+                    ),
+                )
             await self._ensure_owner_user_id(headers=headers)
             await self._serve_frames(ws)
         except BaseException as exc:
