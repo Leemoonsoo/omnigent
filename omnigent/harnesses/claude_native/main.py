@@ -664,7 +664,7 @@ def claude_launch_endpoint_marker(claude_config: ClaudeNativeUcodeConfig | None)
             return managed_provider
         from omnigent.onboarding.ambient import claude_managed_gateway
 
-        managed_base_url, managed_gateway = claude_managed_gateway()
+        managed_base_url, managed_gateway = claude_managed_gateway(_managed_settings_paths())
         if managed_gateway:
             return "managed_gateway"
         return "managed_endpoint" if managed_base_url else "claude_login"

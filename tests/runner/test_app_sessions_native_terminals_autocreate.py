@@ -4946,23 +4946,25 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("freshness", "provider_shape", "probe_result"),
+    ("freshness", "provider_shape", "probe_result", "custom_launcher"),
     [
-        ("fresh", "claude_login", "available"),
-        ("stale", "claude_login", "available"),
-        ("missing", "claude_login", "available"),
-        ("inflight", "claude_login", "available"),
-        ("missing", "vertex", "available"),
-        ("inflight", "vertex", "available"),
-        ("missing", "managed_endpoint", "available"),
-        ("inflight", "managed_endpoint", "available"),
-        ("missing", "managed_endpoint", "failed"),
+        ("fresh", "claude_login", "available", False),
+        ("stale", "claude_login", "available", False),
+        ("missing", "claude_login", "available", False),
+        ("inflight", "claude_login", "available", False),
+        ("missing", "claude_login", "available", True),
+        ("missing", "vertex", "available", False),
+        ("inflight", "vertex", "available", False),
+        ("missing", "managed_endpoint", "available", False),
+        ("inflight", "managed_endpoint", "available", False),
+        ("missing", "managed_endpoint", "failed", False),
     ],
 )
 async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     freshness: str,
     provider_shape: str,
     probe_result: str,
+    custom_launcher: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -5007,8 +5009,14 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     elif provider_shape == "managed_endpoint":
         managed_gateway = ("https://gateway.example/anthropic", False)
     monkeypatch.setattr(
-        "omnigent.onboarding.ambient.claude_managed_gateway", lambda: managed_gateway
+        "omnigent.onboarding.ambient.claude_managed_gateway", lambda _paths=None: managed_gateway
     )
+    harness_config: dict[str, object] = {}
+    if custom_launcher:
+        harness_config = {
+            "harness": {"claude-native": {"command": "synthetic-wrapper", "args": ["--"]}}
+        }
+    monkeypatch.setattr("omnigent.config.load_effective_config", lambda: harness_config)
     caplog.set_level(logging.INFO, logger="omnigent.runner.app")
 
     async def _no_op_forwarder(**kwargs: Any) -> None:
@@ -5110,7 +5118,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
             resolve_launch_config=_resolve,
         )
     )
-    synchronous_probe = provider_shape != "claude_login" and freshness in {
+    synchronous_probe = (provider_shape != "claude_login" or custom_launcher) and freshness in {
         "missing",
         "inflight",
     }
@@ -5123,6 +5131,8 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         release_probe.set()
     await asyncio.wait_for(launch_task, timeout=5)
     args = captured["spec"].args
+    if custom_launcher:
+        assert captured["spec"].command == "synthetic-wrapper"
     if freshness == "fresh":
         assert args[args.index("--model") + 1] == "claude-3-5-sonnet-20241022"
     elif synchronous_probe and probe_result == "available":

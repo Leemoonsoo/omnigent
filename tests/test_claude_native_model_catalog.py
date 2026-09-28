@@ -307,7 +307,7 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(
-        "omnigent.onboarding.ambient.claude_managed_gateway", lambda: (None, False)
+        "omnigent.onboarding.ambient.claude_managed_gateway", lambda _paths=None: (None, False)
     )
 
     assert claude_native.claude_default_catalog_bypass_is_safe(None)
@@ -326,20 +326,20 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
     monkeypatch.delenv("ANTHROPIC_BASE_URL")
     monkeypatch.setattr(
         "omnigent.onboarding.ambient.claude_managed_gateway",
-        lambda: ("https://gateway.example/anthropic", True),
+        lambda _paths=None: ("https://gateway.example/anthropic", True),
     )
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "managed_gateway"
 
     monkeypatch.setattr(
         "omnigent.onboarding.ambient.claude_managed_gateway",
-        lambda: ("https://gateway.example/anthropic", False),
+        lambda _paths=None: ("https://gateway.example/anthropic", False),
     )
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "managed_endpoint"
 
     monkeypatch.setattr(
-        "omnigent.onboarding.ambient.claude_managed_gateway", lambda: (None, False)
+        "omnigent.onboarding.ambient.claude_managed_gateway", lambda _paths=None: (None, False)
     )
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "synthetic-project")

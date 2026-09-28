@@ -8185,6 +8185,24 @@ async def _auto_create_claude_terminal(
     fork_source_external_id = launch_metadata.fork_source_external_id
     fork_carry_history = launch_metadata.fork_carry_history
 
+    # Resolve the actual launcher before deciding whether Claude itself owns a
+    # Default choice. A configured wrapper can alter credentials, endpoint, or
+    # model selection in ways the canonical Claude catalog cannot observe, so
+    # only the built-in bare ``claude`` command is eligible for the cold-probe
+    # bypass. Reuse this same config snapshot when the final augmented argv is
+    # assembled below.
+    from omnigent.config import load_effective_config  # noqa: FlagLocalImports
+    from omnigent.harness_startup_config import (  # noqa: FlagLocalImports
+        resolve_harness_args,
+        resolve_harness_command,
+    )
+
+    _harness_cfg = load_effective_config()
+    launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
+    launch_passthrough_args = resolve_harness_args(
+        "claude-native", tuple(session_launch_args or ()), cfg=_harness_cfg
+    )
+
     # The server GET may miss the external_session_id binding when the
     # reconnect request arrives without a workspace-scoped context (the
     # ContextVar defaults to 0 on fresh tasks). Fall back to the claude_session_id
@@ -8471,14 +8489,12 @@ async def _auto_create_claude_terminal(
         launch_catalog_was_stale = False
         catalog_outcome = claude_launch_catalog_state(claude_config)
         catalog_wait_started = time.perf_counter()
-        passthrough_model = any(
-            arg == "--model" or arg.startswith("--model=") for arg in (session_launch_args or ())
-        )
         default_bypass = (
             session_model_override is None
             and launch_model is None
             and not launch_metadata.routing_enabled
-            and not passthrough_model
+            and launch_command == "claude"
+            and not launch_passthrough_args
             and claude_default_catalog_bypass_is_safe(claude_config)
             and catalog_outcome in {"joined_inflight", "cold_probe"}
         )
@@ -8763,14 +8779,6 @@ async def _auto_create_claude_terminal(
     # appended above, so the ``--`` stays first). Identity by default. This is
     # the same resolver the local-CLI native launch uses (see cli_native.py), so
     # both terminal-creation paths honour one config surface.
-    from omnigent.config import load_effective_config  # noqa: FlagLocalImports
-    from omnigent.harness_startup_config import (  # noqa: FlagLocalImports
-        resolve_harness_args,
-        resolve_harness_command,
-    )
-
-    _harness_cfg = load_effective_config()
-    launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
     launch_args = resolve_harness_args("claude-native", tuple(claude_args), cfg=_harness_cfg)
     # Validate the binary this terminal will actually spawn: ``launch_command``
     # already reflects the OMNIGENT_CLAUDE_PATH / config overrides, and a bare
