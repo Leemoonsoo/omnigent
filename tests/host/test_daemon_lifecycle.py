@@ -351,6 +351,54 @@ def test_background_daemon_cleans_up_early_zygote_on_bootstrap_failure(
     assert record_flock_is_held(daemon_record_path(target, base_dir=tmp_path)) is False
 
 
+def test_background_daemon_continues_when_early_prestart_thread_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Optional prewarm thread failure must not abort the elected daemon."""
+    from omnigent.host import _daemon_entry
+    from omnigent.host import identity as identity_module
+    from omnigent.process_logging import DATA_DIR_ENV_VAR
+
+    target = "https://server.example.com"
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["omnigent.host._daemon_entry", "--server", target])
+    monkeypatch.setattr(
+        "omnigent.process_logging.configure_process_logging",
+        lambda *_a, **_kw: tmp_path / "host.log",
+    )
+    monkeypatch.setattr(
+        identity_module,
+        "load_or_create_host_identity",
+        lambda: HostIdentity(host_id="host_elected", name="elected"),
+    )
+    monkeypatch.setattr(
+        "omnigent.host.runner_zygote.ZygotePrestart.start",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("can't start new thread")),
+    )
+    connected = False
+
+    def _run(
+        *,
+        server_url: str,
+        daemon_target: str,
+        lifecycle_lock: object,
+        zygote_prestart: object,
+    ) -> None:
+        nonlocal connected
+        assert server_url == target
+        assert daemon_target == target
+        assert lifecycle_lock is not None
+        assert zygote_prestart is None
+        connected = True
+
+    monkeypatch.setattr("omnigent.host.connect.run_host_process", _run)
+
+    _daemon_entry.main()
+
+    assert connected
+    assert record_flock_is_held(daemon_record_path(target, base_dir=tmp_path)) is False
+
+
 def _record(target: str, pid: int) -> HostDaemonRecord:
     from omnigent import cli
 

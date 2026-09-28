@@ -135,7 +135,18 @@ def begin_early_zygote_prestart() -> ZygotePrestart | None:
     if not IS_POSIX or (optout is not None and not env_truthy(optout)):
         return None
     prestart = ZygotePrestart(ZygoteManager(startup_origin="daemon_claim"))
-    prestart.start()
+    try:
+        prestart.start()
+    except RuntimeError as exc:
+        # Thread creation itself can fail before ``_run`` gets a chance to
+        # capture startup errors or set ``_done``.  The prewarm is optional;
+        # leave its unstarted manager for collection and let HostProcess use
+        # the normal lazy-start/direct-spawn fallback path.
+        logger.warning(
+            "Runner zygote early prestart thread failed (%s); falling back to host startup",
+            exc,
+        )
+        return None
     return prestart
 
 
