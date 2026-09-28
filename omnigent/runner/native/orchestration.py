@@ -8482,6 +8482,7 @@ async def _auto_create_claude_terminal(
             and claude_default_catalog_bypass_is_safe(claude_config)
             and catalog_outcome in {"joined_inflight", "cold_probe"}
         )
+        catalog_probe_on_terminal_critical_path = False
         try:
             if default_bypass:
                 # Claude's own canonical login owns the Default choice. Start
@@ -8492,12 +8493,17 @@ async def _auto_create_claude_terminal(
                 )
                 catalog_outcome = "default_bypass"
             else:
+                catalog_probe_on_terminal_critical_path = catalog_outcome in {
+                    "joined_inflight",
+                    "cold_probe",
+                }
                 # Read staleness BEFORE the fetch: the fetch itself kicks the
                 # background re-probe, which could land between the two reads and
                 # make a same-launch check call yesterday's rows fresh.
                 launch_catalog_was_stale = claude_launch_catalog_is_stale(claude_config)
                 launch_catalog = await claude_launch_catalog(claude_config)
         except Exception:  # noqa: BLE001 — no catalog means no validation/default
+            catalog_outcome = "error"
             _logger.warning(
                 "claude launch catalog unavailable for session=%s",
                 session_id,
@@ -8505,10 +8511,6 @@ async def _auto_create_claude_terminal(
                 extra={"session_id": session_id},
             )
         catalog_wait_ms = round((time.perf_counter() - catalog_wait_started) * 1000, 3)
-        catalog_probe_on_terminal_critical_path = catalog_outcome in {
-            "joined_inflight",
-            "cold_probe",
-        }
         catalog_on_terminal_critical_path = not default_bypass
         _logger.info(
             "Claude launch catalog resolved: session=%s outcome=%s "

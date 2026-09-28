@@ -293,6 +293,7 @@ async def test_catalog_keeps_enabled_fable_and_future_picker_models(
 
 def test_default_catalog_bypass_requires_claude_owned_routing(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     for name in (
         "ANTHROPIC_API_KEY",
@@ -345,3 +346,12 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
     monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "vertex"
+
+    monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX")
+    managed_settings = tmp_path / "managed-settings.json"
+    managed_settings.write_text(
+        json.dumps({"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(claude_native, "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS", (managed_settings,))
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "bedrock"

@@ -4946,21 +4946,23 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("freshness", "provider_shape"),
+    ("freshness", "provider_shape", "probe_result"),
     [
-        ("fresh", "claude_login"),
-        ("stale", "claude_login"),
-        ("missing", "claude_login"),
-        ("inflight", "claude_login"),
-        ("missing", "vertex"),
-        ("inflight", "vertex"),
-        ("missing", "managed_endpoint"),
-        ("inflight", "managed_endpoint"),
+        ("fresh", "claude_login", "available"),
+        ("stale", "claude_login", "available"),
+        ("missing", "claude_login", "available"),
+        ("inflight", "claude_login", "available"),
+        ("missing", "vertex", "available"),
+        ("inflight", "vertex", "available"),
+        ("missing", "managed_endpoint", "available"),
+        ("inflight", "managed_endpoint", "available"),
+        ("missing", "managed_endpoint", "failed"),
     ],
 )
 async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     freshness: str,
     provider_shape: str,
+    probe_result: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -5029,6 +5031,8 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         del config
         probe_started.set()
         await release_probe.wait()
+        if probe_result == "failed":
+            raise RuntimeError("synthetic catalog failure")
         return refreshed
 
     monkeypatch.setattr(
@@ -5121,7 +5125,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     args = captured["spec"].args
     if freshness == "fresh":
         assert args[args.index("--model") + 1] == "claude-3-5-sonnet-20241022"
-    elif synchronous_probe:
+    elif synchronous_probe and probe_result == "available":
         assert args[args.index("--model") + 1] == "claude-sonnet-5"
     else:
         assert "--model" not in args, f"a non-authoritative default was still pinned: {args}"
@@ -5137,8 +5141,11 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
             await task
         if prewarm_task is not None:
             await prewarm_task
-        # The background re-probe healed the store for the next launch.
-        assert model_catalog_store.read_catalog("claude-native", fingerprint) == refreshed
+        # Successful discovery healed the picker store; a failed probe left the
+        # miss intact while the terminal still launched without a model pin.
+        assert model_catalog_store.read_catalog("claude-native", fingerprint) == (
+            refreshed if probe_result == "available" else None
+        )
 
     records = [
         record
@@ -5147,12 +5154,16 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     ]
     assert records
     attributes = records[-1].attributes
-    expected_outcome = {
-        "fresh": "hit",
-        "stale": "stale",
-        "missing": "cold_probe" if synchronous_probe else "default_bypass",
-        "inflight": "joined_inflight" if synchronous_probe else "default_bypass",
-    }[freshness]
+    expected_outcome = (
+        "error"
+        if probe_result == "failed"
+        else {
+            "fresh": "hit",
+            "stale": "stale",
+            "missing": "cold_probe" if synchronous_probe else "default_bypass",
+            "inflight": "joined_inflight" if synchronous_probe else "default_bypass",
+        }[freshness]
+    )
     assert attributes["catalog_outcome"] == expected_outcome
     assert attributes["catalog_on_terminal_critical_path"] is (
         freshness in {"fresh", "stale"} or synchronous_probe

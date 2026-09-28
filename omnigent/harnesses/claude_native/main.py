@@ -467,9 +467,14 @@ def _ambient_env_is_non_anthropic_gateway() -> bool:
     return host != "anthropic.com" and not host.endswith(".anthropic.com")
 
 
+def _provider_flag_is_truthy(value: object) -> bool:
+    """Whether an inherited or managed-settings provider-mode flag is enabled."""
+    return str(value).strip().lower() not in ("", "0", "false", "no", "none")
+
+
 def _env_flag_is_truthy(name: str) -> bool:
     """Whether an inherited Claude provider-mode flag is enabled."""
-    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no")
+    return _provider_flag_is_truthy(os.environ.get(name))
 
 
 def _ambient_claude_endpoint_marker() -> str | None:
@@ -489,6 +494,31 @@ def _ambient_claude_endpoint_marker() -> str | None:
         return "ambient_gateway"
     if os.environ.get(_ANTHROPIC_API_KEY_ENV) or os.environ.get(_ANTHROPIC_AUTH_TOKEN_ENV):
         return "anthropic"
+    return None
+
+
+def _managed_claude_provider_marker() -> str | None:
+    """Classify provider modes applied only through Claude managed settings."""
+    for path in _managed_settings_paths():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        raw_env = payload.get("env")
+        env = raw_env if isinstance(raw_env, dict) else {}
+        if _provider_flag_is_truthy(env.get(_CLAUDE_CODE_USE_VERTEX_ENV)):
+            return "vertex"
+        if _provider_flag_is_truthy(env.get(_CLAUDE_CODE_USE_BEDROCK_ENV)) or env.get(
+            _ANTHROPIC_BEDROCK_BASE_URL_ENV
+        ):
+            return "bedrock"
+        if _provider_flag_is_truthy(env.get(_CLAUDE_CODE_USE_FOUNDRY_ENV)):
+            return "foundry"
+        if _provider_flag_is_truthy(env.get(_CLAUDE_CODE_USE_GATEWAY_ENV)):
+            return "managed_gateway"
+        return None
     return None
 
 
@@ -629,6 +659,9 @@ def claude_launch_endpoint_marker(claude_config: ClaudeNativeUcodeConfig | None)
         ambient_marker = _ambient_claude_endpoint_marker()
         if ambient_marker is not None:
             return ambient_marker
+        managed_provider = _managed_claude_provider_marker()
+        if managed_provider is not None:
+            return managed_provider
         from omnigent.onboarding.ambient import claude_managed_gateway
 
         managed_base_url, managed_gateway = claude_managed_gateway()
