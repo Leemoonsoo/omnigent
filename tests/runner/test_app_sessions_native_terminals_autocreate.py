@@ -4968,8 +4968,8 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
         ("missing", "managed_endpoint", "available", False),
         ("inflight", "managed_endpoint", "available", False),
         ("missing", "managed_endpoint", "failed", False),
-        ("missing", "malformed_endpoint_default", "available", False),
-        ("missing", "malformed_endpoint_explicit", "available", False),
+        ("missing", "malformed_endpoint_default", "failed", False),
+        ("missing", "malformed_endpoint_explicit", "failed", False),
     ],
 )
 async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
@@ -5027,7 +5027,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     elif provider_shape == "ambient_models":
         monkeypatch.setenv("ANTHROPIC_MODEL", "synthetic-default")
     elif provider_shape.startswith("malformed_endpoint_"):
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://[malformed")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://[::1")
     elif provider_shape == "user_api_key_helper":
         (user_config_dir / "settings.json").write_text(
             json.dumps({"apiKeyHelper": "printf synthetic"}), encoding="utf-8"
@@ -5186,7 +5186,9 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     args = captured["spec"].args
     if custom_launcher:
         assert captured["spec"].command == "synthetic-wrapper"
-    if freshness == "fresh":
+    if provider_shape == "malformed_endpoint_explicit":
+        assert args[args.index("--model") + 1] == "claude-sonnet-5"
+    elif freshness == "fresh":
         assert args[args.index("--model") + 1] == "claude-3-5-sonnet-20241022"
     elif synchronous_probe and probe_result == "available":
         assert args[args.index("--model") + 1] == "claude-sonnet-5"
