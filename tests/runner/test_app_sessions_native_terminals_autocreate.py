@@ -5172,7 +5172,10 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
             f"{provider_shape} Default launch skipped its {freshness} catalog probe"
         )
         release_probe.set()
-    await asyncio.wait_for(launch_task, timeout=5)
+    # Full runner shards can spend several seconds rendering a synthetic probe
+    # traceback and waiting for the shared thread pool. Keep a bounded guard,
+    # but leave enough headroom for that CI-only contention.
+    await asyncio.wait_for(launch_task, timeout=15)
     args = captured["spec"].args
     if custom_launcher:
         assert captured["spec"].command == "synthetic-wrapper"
