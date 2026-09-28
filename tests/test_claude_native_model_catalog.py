@@ -300,6 +300,12 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_BEDROCK_BASE_URL",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_MODEL",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_FOUNDRY",
         "CLAUDE_CODE_USE_GATEWAY",
@@ -320,6 +326,11 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
             model="gateway-default",
         )
     )
+
+    monkeypatch.setenv("ANTHROPIC_MODEL", "synthetic-default")
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "ambient_models"
+    monkeypatch.delenv("ANTHROPIC_MODEL")
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
@@ -364,6 +375,13 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
     )
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "managed_models"
+
+    managed_settings.write_text(
+        json.dumps({"env": {"ANTHROPIC_API_KEY": "configured-by-enterprise"}}),
+        encoding="utf-8",
+    )
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "managed_settings"
 
     managed_settings.write_text(
         json.dumps(

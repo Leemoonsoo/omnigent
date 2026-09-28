@@ -492,6 +492,15 @@ def _ambient_claude_endpoint_marker() -> str | None:
         return "ambient_gateway" if _ambient_env_is_non_anthropic_gateway() else "anthropic"
     if _env_flag_is_truthy(_CLAUDE_CODE_USE_GATEWAY_ENV):
         return "ambient_gateway"
+    model_env_keys = {
+        _ANTHROPIC_MODEL_ENV,
+        *_UCODE_CLAUDE_TIER_TO_ENV.values(),
+        _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV,
+    }
+    if any(
+        isinstance(value := os.environ.get(key), str) and value.strip() for key in model_env_keys
+    ):
+        return "ambient_models"
     if os.environ.get(_ANTHROPIC_API_KEY_ENV) or os.environ.get(_ANTHROPIC_AUTH_TOKEN_ENV):
         return "anthropic"
     return None
@@ -531,7 +540,10 @@ def _managed_claude_launch_marker() -> str | None:
         model_overrides = payload.get("modelOverrides")
         if isinstance(model_overrides, dict) and model_overrides:
             return "managed_models"
-        return None
+        # Even credential-only or otherwise unrecognized enterprise settings
+        # make this launch managed rather than a positively identified
+        # canonical login. Keep that entire cohort on synchronous discovery.
+        return "managed_settings"
     return None
 
 

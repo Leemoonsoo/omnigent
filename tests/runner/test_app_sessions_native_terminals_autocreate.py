@@ -4953,6 +4953,8 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
         ("missing", "claude_login", "available", False),
         ("inflight", "claude_login", "available", False),
         ("missing", "claude_login", "available", True),
+        ("missing", "ambient_models", "available", False),
+        ("inflight", "ambient_models", "available", False),
         ("missing", "managed_models", "available", False),
         ("inflight", "managed_models", "available", False),
         ("missing", "vertex", "available", False),
@@ -4995,6 +4997,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_BEDROCK_BASE_URL",
+        "ANTHROPIC_MODEL",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_FOUNDRY",
         "CLAUDE_CODE_USE_GATEWAY",
@@ -5010,6 +5013,8 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
     elif provider_shape == "managed_endpoint":
         managed_gateway = ("https://gateway.example/anthropic", False)
+    elif provider_shape == "ambient_models":
+        monkeypatch.setenv("ANTHROPIC_MODEL", "synthetic-default")
     managed_settings_paths: tuple[Path, ...] = ()
     if provider_shape == "managed_models":
         managed_settings = tmp_path / "managed-settings.json"
