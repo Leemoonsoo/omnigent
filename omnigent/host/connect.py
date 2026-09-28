@@ -2006,8 +2006,15 @@ class HostProcess:
         if zygote is None or self._zygote_disabled:
             return None
         try:
-            if self._zygote_prestart is not None:
-                self._zygote_prestart.wait()
+            prestart = self._zygote_prestart
+            if prestart is not None:
+                prestart.wait()
+                # The early prestart is a one-time handoff, not an alternate
+                # lifecycle manager.  Consume it after adoption so a zygote
+                # that later dies reaches ``ZygoteManager.start()`` and can be
+                # respawned on the following launch.
+                if self._zygote_prestart is prestart:
+                    self._zygote_prestart = None
             else:
                 zygote.start()
         except ZygoteUnavailable as exc:

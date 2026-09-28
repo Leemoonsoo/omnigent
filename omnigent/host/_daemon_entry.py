@@ -70,11 +70,11 @@ def main() -> None:
             "Another host daemon already claimed target %s; exiting", daemon_target
         )
         return
+    claim_ns = time.monotonic_ns()
 
     from omnigent.debug_logging import debug_event
     from omnigent.host.runner_zygote import begin_early_zygote_prestart
 
-    claim_ns = time.monotonic_ns()
     logging.getLogger(__name__).info(
         "Host daemon claimed target %s",
         daemon_target,

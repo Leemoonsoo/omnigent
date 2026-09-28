@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -135,6 +136,39 @@ def test_manager_starts_and_pings(manager: ZygoteManager) -> None:
     assert manager.is_running()
     assert manager.is_ready()
     assert isinstance(manager.pid, int)
+
+
+def test_start_milestones_use_actual_spawn_and_ready_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Spawn telemetry follows Popen while readiness covers the full startup."""
+
+    class _Proc:
+        pid = 4242
+
+    manager = ZygoteManager(startup_origin="test")
+    stamps = iter([1_000_000_000, 1_100_000_000, 1_900_000_000])
+    monkeypatch.setattr("omnigent.host.runner_zygote.time.monotonic_ns", lambda: next(stamps))
+    monkeypatch.setattr(manager, "_spawn_zygote_process", lambda _fd: _Proc())
+    monkeypatch.setattr(manager, "_exchange", lambda _request: {"pong": True})
+
+    with caplog.at_level(logging.INFO, logger="omnigent.host.runner_zygote"):
+        manager.start()
+
+    events = {
+        record.event_name: record.attributes
+        for record in caplog.records
+        if getattr(record, "event_name", None) in {"runner_zygote_spawned", "runner_zygote_ready"}
+    }
+    assert events["runner_zygote_spawned"]["monotonic_ns"] == 1_100_000_000
+    assert events["runner_zygote_ready"]["monotonic_ns"] == 1_900_000_000
+    assert events["runner_zygote_ready"]["duration_ms"] == "900.0"
+
+    assert manager._sock is not None
+    manager._sock.close()
+    manager._sock = None
+    manager._proc = None
 
 
 def test_early_prestart_runs_in_background_and_transfers_manager() -> None:

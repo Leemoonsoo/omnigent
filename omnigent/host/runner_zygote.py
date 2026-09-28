@@ -263,10 +263,10 @@ class ZygoteManager:
         :raises ZygoteUnavailable: If the process could not be spawned or does
             not answer an initial ping.
         """
-        started_ns = time.monotonic_ns()
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 return
+            started_ns = time.monotonic_ns()
             self._ready = False
             parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
@@ -280,6 +280,7 @@ class ZygoteManager:
             parent_sock.settimeout(_CONTROL_TIMEOUT_S)
             self._proc = proc
             self._sock = parent_sock
+            spawned_ns = time.monotonic_ns()
             logger.info(
                 "Runner zygote spawned (pid=%s, origin=%s)",
                 proc.pid,
@@ -288,7 +289,7 @@ class ZygoteManager:
                     "runner_zygote_spawned",
                     zygote_pid=proc.pid,
                     startup_origin=self._startup_origin,
-                    monotonic_ns=started_ns,
+                    monotonic_ns=spawned_ns,
                 ),
             )
 
