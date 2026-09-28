@@ -6,6 +6,7 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import cast
 
 _SERVER_TIMING_RE = re.compile(
     r"(?:^|,)\s*omnigent-host-auth\s*;\s*dur=([0-9]+(?:\.[0-9]+)?)",
@@ -62,13 +63,20 @@ def server_auth_timing_ms(headers: Mapping[str, str] | None) -> float | None:
     """Read the server's bounded pre-accept duration from ``Server-Timing``."""
     if headers is None:
         return None
-    value = headers.get("Server-Timing") or headers.get("server-timing")
-    if not value:
-        return None
-    match = _SERVER_TIMING_RE.search(value)
-    if match is None:
-        return None
     try:
-        return float(match.group(1))
-    except ValueError:
+        get_all = getattr(headers, "get_all", None)
+        if callable(get_all):
+            values = cast(list[str], get_all("Server-Timing"))
+        else:
+            value = headers.get("Server-Timing") or headers.get("server-timing")
+            values = [value] if value else []
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            match = _SERVER_TIMING_RE.search(value)
+            if match is not None:
+                return float(match.group(1))
+    except Exception:  # noqa: BLE001 - optional timing cannot disrupt registration
+        # Timing metadata is optional and must never disrupt registration.
         return None
+    return None

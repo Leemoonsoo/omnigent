@@ -1865,7 +1865,7 @@ class HostProcess:
             include a machine-readable ``error_code``.
         """
         if self._startup_setup_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(Exception):
                 await asyncio.shield(self._startup_setup_task)
 
         # Refuse to spawn for a harness this machine can't actually run —

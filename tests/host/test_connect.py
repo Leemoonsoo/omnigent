@@ -738,6 +738,51 @@ async def test_handle_launch_spawns_subprocess(
     _cleanup_host(host)
 
 
+async def test_cancelled_launch_does_not_bypass_startup_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation stops launch work without cancelling shared startup setup."""
+    host = _make_host_process()
+    setup_started = asyncio.Event()
+    release_setup = asyncio.Event()
+    readiness_calls: list[str] = []
+
+    async def _setup() -> None:
+        setup_started.set()
+        await release_setup.wait()
+
+    def _readiness(harness: str) -> bool:
+        readiness_calls.append(harness)
+        return True
+
+    monkeypatch.setattr("omnigent.host.connect.harness_is_configured", _readiness)
+    setup_task = asyncio.create_task(_setup())
+    host._startup_setup_task = setup_task
+    await setup_started.wait()
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    frame = HostLaunchRunnerFrame(
+        request_id="req_cancelled_during_setup",
+        binding_token="test_token_abc",
+        workspace=str(workspace),
+        harness="codex",
+    )
+
+    launch_task = asyncio.create_task(host._handle_launch(frame))
+    await asyncio.sleep(0)
+    launch_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await launch_task
+    assert setup_task.done() is False
+    assert readiness_calls == []
+    assert host._runners == {}
+
+    release_setup.set()
+    await setup_task
+
+
 @pytest.mark.parametrize("binding_token", ["token_xyz", "", "   "])
 async def test_handle_launch_fails_for_bad_workspace(
     caplog: pytest.LogCaptureFixture,
@@ -5714,22 +5759,35 @@ async def test_host_records_server_timing_from_accepted_upgrade(
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
-    headers = Headers({"Server-Timing": "omnigent-host-auth;dur=12.5"})
+    headers = Headers()
+    headers["Server-Timing"] = "proxy;dur=4.2"
+    headers["Server-Timing"] = "omnigent-host-auth;dur=12.5"
     _patch_connect(monkeypatch, _ConnectSpy([headers, asyncio.CancelledError()]))
     observations: list[dict[str, float]] = []
+    served: list[object] = []
     monkeypatch.setattr(
         "omnigent.host.connect.record_websocket_connect_bootstrap",
         observations.append,
     )
     identity = HostIdentity(host_id="host_test_connect", name="test-laptop")
 
-    await HostProcess(
+    host = HostProcess(
         identity,
         "https://app.example.databricks.com",
         startup_timing=HostStartupTiming(),
-    ).run()
+    )
+    original_serve_frames = host._serve_frames
+
+    async def _record_serve(ws: object) -> None:
+        served.append(ws)
+        await original_serve_frames(ws)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(host, "_serve_frames", _record_serve)
+
+    await host.run()
 
     assert len(observations) == 1
+    assert len(served) == 1
     assert observations[0]["server_auth_upgrade"] == 12.5
     assert observations[0]["network_handshake"] == max(0.0, observations[0]["upgrade_wait"] - 12.5)
 

@@ -1,5 +1,7 @@
 """Tests for cold host bootstrap timing decomposition."""
 
+from websockets.datastructures import Headers
+
 from omnigent.host.startup_timing import HostStartupTiming, server_auth_timing_ms
 
 
@@ -43,3 +45,12 @@ def test_parses_host_server_timing_among_other_metrics() -> None:
         == 12.7
     )
     assert server_auth_timing_ms({"Server-Timing": "app;dur=9"}) is None
+
+
+def test_parses_host_timing_from_repeated_server_timing_fields() -> None:
+    """A proxy-appended timing field cannot break optional timing extraction."""
+    headers = Headers()
+    headers["Server-Timing"] = "proxy;dur=4.2"
+    headers["Server-Timing"] = "omnigent-host-auth;dur=12.5"
+
+    assert server_auth_timing_ms(headers) == 12.5
