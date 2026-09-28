@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -213,14 +214,16 @@ def test_record_flock_is_held_states(tmp_path: Path) -> None:
 
 
 def test_background_daemon_claims_record_before_connecting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The elected child owns and records the target before opening a tunnel."""
     from omnigent.host import _daemon_entry
     from omnigent.host import identity as identity_module
     from omnigent.process_logging import DATA_DIR_ENV_VAR
 
-    target = "https://server.example.com"
+    target = "https://dummyuser:dummypass123@example.invalid/api?opaque=value#fragment"
     log_path = tmp_path / "host.log"
     monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
     monkeypatch.setenv("OMNIGENT_HOST_DAEMON_CONFIG_SIG", "config-signature")
@@ -268,6 +271,7 @@ def test_background_daemon_claims_record_before_connecting(
 
     monkeypatch.setattr("omnigent.host.connect.run_host_process", _run)
 
+    caplog.set_level(logging.INFO, logger="omnigent.host._daemon_entry")
     _daemon_entry.main()
 
     payload = json.loads(daemon_record_path(target, base_dir=tmp_path).read_text())
@@ -277,6 +281,18 @@ def test_background_daemon_claims_record_before_connecting(
     assert connected == [f"{target}|{target}"]
     assert events == ["prestart", "connect", "stop"]
     assert record_flock_is_held(daemon_record_path(target, base_dir=tmp_path)) is False
+
+    claim_record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "host_daemon_claimed"
+    )
+    rendered_claim = f"{claim_record.getMessage()} {claim_record.attributes}"
+    assert claim_record.getMessage() == "Host daemon lifecycle claim acquired"
+    assert set(claim_record.attributes) == {"monotonic_ns"}
+    assert "dummyuser" not in rendered_claim
+    assert "dummypass123" not in rendered_claim
+    assert "opaque=value" not in rendered_claim
 
 
 def test_background_daemon_loser_exits_before_connecting(

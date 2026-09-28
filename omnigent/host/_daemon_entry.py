@@ -76,11 +76,9 @@ def main() -> None:
     from omnigent.host.runner_zygote import begin_early_zygote_prestart
 
     logging.getLogger(__name__).info(
-        "Host daemon claimed target %s",
-        daemon_target,
+        "Host daemon lifecycle claim acquired",
         extra=debug_event(
             "host_daemon_claimed",
-            daemon_target=daemon_target,
             monotonic_ns=claim_ns,
         ),
     )

@@ -1770,7 +1770,11 @@ class HostProcess:
                     stage="runner_launch",
                     host_request_id=frame.request_id,
                     harness=frame.harness,
-                    zygote_ready=(self._zygote.is_ready() if self._zygote is not None else False),
+                    zygote_ready=(
+                        self._zygote is not None
+                        and not self._zygote_disabled
+                        and self._zygote.is_ready()
+                    ),
                 ),
             )
             return await self._handle_launch_impl(frame)
@@ -2009,6 +2013,12 @@ class HostProcess:
             prestart = self._zygote_prestart
             if prestart is not None:
                 prestart.wait()
+                # Re-enter the manager's idempotent start path after the
+                # handoff.  Usually this is a no-op, but it respawns a zygote
+                # that completed prestart and then died before the first
+                # runner request instead of sacrificing that request to the
+                # direct-spawn fallback.
+                zygote.start()
                 # The early prestart is a one-time handoff, not an alternate
                 # lifecycle manager.  Consume it after adoption so a zygote
                 # that later dies reaches ``ZygoteManager.start()`` and can be
