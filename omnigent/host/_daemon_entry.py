@@ -71,7 +71,22 @@ def main() -> None:
         )
         return
 
+    from omnigent.debug_logging import debug_event
+    from omnigent.host.runner_zygote import begin_early_zygote_prestart
+
+    claim_ns = time.monotonic_ns()
+    logging.getLogger(__name__).info(
+        "Host daemon claimed target %s",
+        daemon_target,
+        extra=debug_event(
+            "host_daemon_claimed",
+            daemon_target=daemon_target,
+            monotonic_ns=claim_ns,
+        ),
+    )
+    zygote_prestart = None
     try:
+        zygote_prestart = begin_early_zygote_prestart()
         from omnigent.host.identity import load_or_create_host_identity
 
         identity = load_or_create_host_identity()
@@ -102,8 +117,11 @@ def main() -> None:
             server_url=server_url,
             daemon_target=daemon_target,
             lifecycle_lock=lifecycle_lock,
+            zygote_prestart=zygote_prestart,
         )
     finally:
+        if zygote_prestart is not None:
+            zygote_prestart.stop()
         lifecycle_lock.release()
 
 

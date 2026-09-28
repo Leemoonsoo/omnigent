@@ -15,6 +15,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,8 +26,10 @@ import omnigent
 from omnigent.host.runner_zygote import (
     _ZYGOTE_LOST_EXIT_CODE,
     ZygoteManager,
+    ZygotePrestart,
     ZygoteRunnerProc,
     ZygoteUnavailable,
+    begin_early_zygote_prestart,
 )
 from omnigent.runner import _zygote
 from omnigent.runner._zygote import (
@@ -130,7 +133,76 @@ def test_manager_starts_and_pings(manager: ZygoteManager) -> None:
     :param manager: The started manager fixture.
     """
     assert manager.is_running()
+    assert manager.is_ready()
     assert isinstance(manager.pid, int)
+
+
+def test_early_prestart_runs_in_background_and_transfers_manager() -> None:
+    """The daemon can overlap import, then transfer the exact manager."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        def start(self) -> None:
+            started.set()
+            assert release.wait(timeout=1.0)
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    manager = _Manager()
+    prestart = ZygotePrestart(manager)  # type: ignore[arg-type]
+    prestart.start()
+
+    assert started.wait(timeout=1.0)
+    release.set()
+    assert prestart.wait() is manager
+    prestart.stop()
+    assert manager.stop_calls == 1
+
+
+def test_early_prestart_preserves_start_failure_for_adopter() -> None:
+    """An early import failure reaches HostProcess's normal fallback latch."""
+
+    class _Manager:
+        def start(self) -> None:
+            raise ZygoteUnavailable("early import failed")
+
+        def stop(self) -> None:
+            return
+
+    prestart = ZygotePrestart(_Manager())  # type: ignore[arg-type]
+    prestart.start()
+
+    with pytest.raises(ZygoteUnavailable, match="early import failed"):
+        prestart.wait()
+
+
+def test_early_prestart_wraps_unexpected_failure_for_fallback() -> None:
+    """Unexpected thread failures still select the normal direct-spawn path."""
+
+    class _Manager:
+        def start(self) -> None:
+            raise OSError("socketpair failed")
+
+        def stop(self) -> None:
+            return
+
+    prestart = ZygotePrestart(_Manager())  # type: ignore[arg-type]
+    prestart.start()
+
+    with pytest.raises(ZygoteUnavailable, match="unexpected early zygote start failure"):
+        prestart.wait()
+
+
+def test_early_prestart_honors_operator_optout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The background entrypoint must preserve direct-spawn opt-out."""
+    monkeypatch.setenv("OMNIGENT_RUNNER_ZYGOTE", "0")
+
+    assert begin_early_zygote_prestart() is None
 
 
 @pytest.fixture

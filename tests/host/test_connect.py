@@ -6481,6 +6481,10 @@ class _FakeZygote:
         """Report the scripted liveness."""
         return self._running
 
+    def is_ready(self) -> bool:
+        """Report readiness for launch-at-request instrumentation."""
+        return self._running
+
     def start(self) -> None:
         """Raise when scripted to fail at start."""
         self.start_calls += 1
@@ -6495,6 +6499,56 @@ class _FakeZygote:
     def stop(self) -> None:
         """Record the reap."""
         self.stop_calls += 1
+
+
+def test_host_adopts_early_prestarted_zygote() -> None:
+    """HostProcess waits for and owns the daemon's exact zygote manager."""
+    zygote = _FakeZygote(fail_at="none", running=True)
+
+    class _Prestart:
+        manager = zygote
+
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        def wait(self) -> _FakeZygote:
+            self.wait_calls += 1
+            return zygote
+
+    prestart = _Prestart()
+    host = HostProcess(
+        HostIdentity(host_id="host_test", name="test"),
+        "https://example.com",
+        interactive_shells=["bash"],
+        zygote_prestart=prestart,  # type: ignore[arg-type]
+    )
+
+    assert host._zygote is zygote
+    assert host._ensure_zygote_started() is zygote
+    assert prestart.wait_calls == 1
+    assert zygote.start_calls == 0
+
+
+def test_host_latches_early_prestart_failure_to_direct_spawn() -> None:
+    """An early import failure keeps the existing per-daemon fallback."""
+    zygote = _FakeZygote(fail_at="none", running=False)
+
+    class _Prestart:
+        manager = zygote
+
+        def wait(self) -> _FakeZygote:
+            raise ZygoteUnavailable("early import failed")
+
+    host = HostProcess(
+        HostIdentity(host_id="host_test", name="test"),
+        "https://example.com",
+        interactive_shells=["bash"],
+        zygote_prestart=_Prestart(),  # type: ignore[arg-type]
+    )
+
+    assert host._ensure_zygote_started() is None
+    assert host._zygote_disabled is True
+    assert zygote.start_calls == 0
 
 
 class _FakeSpawnedProc:
