@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import BinaryIO
 
 from omnigent._platform import IS_POSIX
-from omnigent.debug_logging import debug_event
 from omnigent.inner import _proc
 from omnigent.process_logging import child_logging_popen_kwargs, env_truthy
 from omnigent.runner._zygote import ZYGOTE_CONTROL_FD_ENV_VAR, ZYGOTE_ENABLED_ENV_VAR
@@ -292,6 +291,10 @@ class ZygoteManager:
             self._proc = proc
             self._sock = parent_sock
             spawned_ns = time.monotonic_ns()
+            # Imported after spawning so debug-sink setup overlaps the child
+            # importing the runner graph instead of delaying early prestart.
+            from omnigent.debug_logging import debug_event
+
             logger.info(
                 "Runner zygote spawned (pid=%s, origin=%s)",
                 proc.pid,
@@ -403,6 +406,8 @@ class ZygoteManager:
         if not isinstance(pid, int):
             raise ZygoteUnavailable(f"zygote returned no pid: {reply!r}")
         completed_ns = time.monotonic_ns()
+        from omnigent.debug_logging import debug_event
+
         logger.info(
             "Runner zygote fork completed (zygote pid=%s, runner pid=%s, duration_ms=%.1f)",
             self.pid,

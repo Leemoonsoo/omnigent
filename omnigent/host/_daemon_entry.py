@@ -72,19 +72,24 @@ def main() -> None:
         return
     claim_ns = time.monotonic_ns()
 
-    from omnigent.debug_logging import debug_event
     from omnigent.host.runner_zygote import begin_early_zygote_prestart
 
-    logging.getLogger(__name__).info(
-        "Host daemon lifecycle claim acquired",
-        extra=debug_event(
-            "host_daemon_claimed",
-            monotonic_ns=claim_ns,
-        ),
-    )
     zygote_prestart = None
     try:
         zygote_prestart = begin_early_zygote_prestart()
+
+        # Keep the debug-sink import off the zygote's prestart critical path.
+        # The claim timestamp above still records the exact lifecycle boundary;
+        # emitting its event can overlap the child importing the runner graph.
+        from omnigent.debug_logging import debug_event
+
+        logging.getLogger(__name__).info(
+            "Host daemon lifecycle claim acquired",
+            extra=debug_event(
+                "host_daemon_claimed",
+                monotonic_ns=claim_ns,
+            ),
+        )
         from omnigent.host.identity import load_or_create_host_identity
 
         identity = load_or_create_host_identity()
