@@ -8495,7 +8495,10 @@ async def _auto_create_claude_terminal(
             and not launch_metadata.routing_enabled
             and launch_command == "claude"
             and not launch_passthrough_args
-            and claude_default_catalog_bypass_is_safe(claude_config)
+            and claude_default_catalog_bypass_is_safe(
+                claude_config,
+                launch_config_resolution_failed=_launch_config_resolution_failed,
+            )
             and catalog_outcome in {"joined_inflight", "cold_probe"}
         )
         catalog_probe_on_terminal_critical_path = False
@@ -8544,7 +8547,10 @@ async def _auto_create_claude_terminal(
                 catalog_wait_ms=catalog_wait_ms,
                 catalog_on_terminal_critical_path=catalog_on_terminal_critical_path,
                 catalog_probe_on_terminal_critical_path=catalog_probe_on_terminal_critical_path,
-                endpoint=claude_launch_endpoint_marker(claude_config),
+                endpoint=claude_launch_endpoint_marker(
+                    claude_config,
+                    launch_config_resolution_failed=_launch_config_resolution_failed,
+                ),
             ),
         )
         if session_model_override and launch_catalog:

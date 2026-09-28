@@ -4955,6 +4955,12 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
         ("missing", "claude_login", "available", True),
         ("missing", "ambient_models", "available", False),
         ("inflight", "ambient_models", "available", False),
+        ("missing", "user_api_key_helper", "available", False),
+        ("inflight", "user_api_key_helper", "available", False),
+        ("missing", "user_provider_env", "available", False),
+        ("inflight", "user_provider_env", "available", False),
+        ("missing", "resolution_failed", "available", False),
+        ("inflight", "resolution_failed", "available", False),
         ("missing", "managed_models", "available", False),
         ("inflight", "managed_models", "available", False),
         ("missing", "vertex", "available", False),
@@ -4992,6 +4998,9 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+    user_config_dir = tmp_path / "claude-config"
+    user_config_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_config_dir))
     for name in (
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
@@ -5015,6 +5024,15 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         managed_gateway = ("https://gateway.example/anthropic", False)
     elif provider_shape == "ambient_models":
         monkeypatch.setenv("ANTHROPIC_MODEL", "synthetic-default")
+    elif provider_shape == "user_api_key_helper":
+        (user_config_dir / "settings.json").write_text(
+            json.dumps({"apiKeyHelper": "printf synthetic"}), encoding="utf-8"
+        )
+    elif provider_shape == "user_provider_env":
+        (user_config_dir / "settings.json").write_text(
+            json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"}}),
+            encoding="utf-8",
+        )
     managed_settings_paths: tuple[Path, ...] = ()
     if provider_shape == "managed_models":
         managed_settings = tmp_path / "managed-settings.json"
@@ -5130,7 +5148,9 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     )
 
     async def _resolve() -> None:
-        return None
+        if provider_shape == "resolution_failed":
+            raise RuntimeError("synthetic provider resolution failure")
+        return
 
     launch_task = asyncio.create_task(
         _auto_create_claude_terminal(
@@ -5202,6 +5222,11 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         freshness in {"fresh", "stale"} or synchronous_probe
     )
     assert attributes["catalog_probe_on_terminal_critical_path"] is synchronous_probe
-    assert attributes["endpoint"] == provider_shape
+    expected_endpoint = (
+        "user_settings"
+        if provider_shape in {"user_api_key_helper", "user_provider_env"}
+        else provider_shape
+    )
+    assert attributes["endpoint"] == expected_endpoint
 
     await fake_client.aclose()

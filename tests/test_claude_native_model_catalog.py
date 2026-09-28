@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -262,11 +263,19 @@ async def test_legacy_catalog_failure_preserves_probe_failure(
 
 async def test_cancelled_catalog_probe_never_starts_a_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="omnigent.harnesses.claude_native.main")
     launches = _stub_picker(monkeypatch, None, control_failure="cancelled")
     with pytest.raises(asyncio.CancelledError):
         await claude_native.claude_model_catalog(None)
     assert len(launches) == 1
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "claude_model_catalog_probe"
+    ]
+    assert records[-1].attributes["outcome"] == "cancelled"
 
 
 async def test_catalog_keeps_enabled_fable_and_future_picker_models(
@@ -314,12 +323,22 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(claude_native, "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS", ())
     monkeypatch.setattr("omnigent.onboarding.ambient.CLAUDE_CODE_MANAGED_SETTINGS_PATHS", ())
+    user_config_dir = tmp_path / "claude-config"
+    user_config_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_config_dir))
     monkeypatch.setattr(
         "omnigent.onboarding.ambient.claude_managed_gateway", lambda _paths=None: (None, False)
     )
 
     assert claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "claude_login"
+    assert not claude_native.claude_default_catalog_bypass_is_safe(
+        None, launch_config_resolution_failed=True
+    )
+    assert (
+        claude_native.claude_launch_endpoint_marker(None, launch_config_resolution_failed=True)
+        == "resolution_failed"
+    )
     assert not claude_native.claude_default_catalog_bypass_is_safe(
         claude_native.ClaudeNativeUcodeConfig(
             env={"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"},
@@ -331,6 +350,23 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "ambient_models"
     monkeypatch.delenv("ANTHROPIC_MODEL")
+
+    user_settings = user_config_dir / "settings.json"
+    user_settings.write_text(json.dumps({"apiKeyHelper": "printf synthetic"}), encoding="utf-8")
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "user_settings"
+    user_settings.write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"}}),
+        encoding="utf-8",
+    )
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "user_settings"
+    user_settings.write_text(json.dumps({"model": "synthetic-default"}), encoding="utf-8")
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "user_settings"
+    user_settings.write_text(json.dumps({"permissions": {"allow": []}}), encoding="utf-8")
+    assert claude_native.claude_default_catalog_bypass_is_safe(None)
+    user_settings.unlink()
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
