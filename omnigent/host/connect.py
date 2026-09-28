@@ -1893,6 +1893,7 @@ class HostProcess:
                 harness_is_configured, frame.harness
             )
         if not harness_ready:
+            assert frame.harness is not None
             return self._launch_failed(
                 frame,
                 (
@@ -4345,7 +4346,16 @@ class HostProcess:
                 extra=debug_event(
                     "host_bootstrap",
                     phase="upgrade_accepted",
-                    **{name + "_ms": round(duration, 1) for name, duration in phases_ms.items()},
+                    identity_config_ms=phases_ms.get("identity_config"),
+                    daemon_record_ms=phases_ms.get("daemon_record"),
+                    host_connect_import_ms=phases_ms.get("host_connect_import"),
+                    connect_headers_ms=phases_ms.get("connect_headers"),
+                    tls_context_ms=phases_ms.get("tls_context"),
+                    client_bootstrap_ms=phases_ms.get("client_bootstrap"),
+                    upgrade_wait_ms=phases_ms.get("upgrade_wait"),
+                    server_auth_upgrade_ms=phases_ms.get("server_auth_upgrade"),
+                    network_handshake_ms=phases_ms.get("network_handshake"),
+                    claim_to_upgrade_ms=phases_ms.get("claim_to_upgrade"),
                 ),
             )
         disconnect_error: BaseException | None = None
