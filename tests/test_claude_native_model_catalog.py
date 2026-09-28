@@ -306,6 +306,8 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
         "CLAUDE_CODE_USE_VERTEX",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(claude_native, "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS", ())
+    monkeypatch.setattr("omnigent.onboarding.ambient.CLAUDE_CODE_MANAGED_SETTINGS_PATHS", ())
     monkeypatch.setattr(
         "omnigent.onboarding.ambient.claude_managed_gateway", lambda _paths=None: (None, False)
     )
@@ -355,3 +357,24 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
     monkeypatch.setattr(claude_native, "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS", (managed_settings,))
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "bedrock"
+
+    managed_settings.write_text(
+        json.dumps({"env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "synthetic-sonnet"}}),
+        encoding="utf-8",
+    )
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "managed_models"
+
+    managed_settings.write_text(
+        json.dumps(
+            {
+                "modelPicker": {
+                    "replaceBuiltInOptions": True,
+                    "options": [{"model": "synthetic-sonnet", "label": "Synthetic Sonnet"}],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "managed_models"

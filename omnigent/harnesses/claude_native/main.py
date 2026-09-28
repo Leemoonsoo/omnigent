@@ -497,8 +497,8 @@ def _ambient_claude_endpoint_marker() -> str | None:
     return None
 
 
-def _managed_claude_provider_marker() -> str | None:
-    """Classify provider modes applied only through Claude managed settings."""
+def _managed_claude_launch_marker() -> str | None:
+    """Classify routing or model controls applied through managed settings."""
     for path in _managed_settings_paths():
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -518,6 +518,19 @@ def _managed_claude_provider_marker() -> str | None:
             return "foundry"
         if _provider_flag_is_truthy(env.get(_CLAUDE_CODE_USE_GATEWAY_ENV)):
             return "managed_gateway"
+        model_env_keys = {
+            _ANTHROPIC_MODEL_ENV,
+            *_UCODE_CLAUDE_TIER_TO_ENV.values(),
+            _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV,
+        }
+        if any(isinstance(value := env.get(key), str) and value.strip() for key in model_env_keys):
+            return "managed_models"
+        model_picker = payload.get("modelPicker")
+        if isinstance(model_picker, dict) and model_picker.get("replaceBuiltInOptions") is True:
+            return "managed_models"
+        model_overrides = payload.get("modelOverrides")
+        if isinstance(model_overrides, dict) and model_overrides:
+            return "managed_models"
         return None
     return None
 
@@ -659,9 +672,9 @@ def claude_launch_endpoint_marker(claude_config: ClaudeNativeUcodeConfig | None)
         ambient_marker = _ambient_claude_endpoint_marker()
         if ambient_marker is not None:
             return ambient_marker
-        managed_provider = _managed_claude_provider_marker()
-        if managed_provider is not None:
-            return managed_provider
+        managed_launch = _managed_claude_launch_marker()
+        if managed_launch is not None:
+            return managed_launch
         from omnigent.onboarding.ambient import claude_managed_gateway
 
         managed_base_url, managed_gateway = claude_managed_gateway(_managed_settings_paths())

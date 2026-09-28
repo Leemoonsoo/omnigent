@@ -4953,6 +4953,8 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
         ("missing", "claude_login", "available", False),
         ("inflight", "claude_login", "available", False),
         ("missing", "claude_login", "available", True),
+        ("missing", "managed_models", "available", False),
+        ("inflight", "managed_models", "available", False),
         ("missing", "vertex", "available", False),
         ("inflight", "vertex", "available", False),
         ("missing", "managed_endpoint", "available", False),
@@ -5008,6 +5010,22 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
     elif provider_shape == "managed_endpoint":
         managed_gateway = ("https://gateway.example/anthropic", False)
+    managed_settings_paths: tuple[Path, ...] = ()
+    if provider_shape == "managed_models":
+        managed_settings = tmp_path / "managed-settings.json"
+        managed_settings.write_text(
+            json.dumps({"env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "synthetic-sonnet"}}),
+            encoding="utf-8",
+        )
+        managed_settings_paths = (managed_settings,)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.main._CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
+        managed_settings_paths,
+    )
+    monkeypatch.setattr(
+        "omnigent.onboarding.ambient.CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
+        managed_settings_paths,
+    )
     monkeypatch.setattr(
         "omnigent.onboarding.ambient.claude_managed_gateway", lambda _paths=None: managed_gateway
     )
