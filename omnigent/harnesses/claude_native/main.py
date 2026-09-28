@@ -511,10 +511,12 @@ def _managed_claude_launch_marker() -> str | None:
     for path in _managed_settings_paths():
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
         except (OSError, ValueError):
-            continue
+            return "managed_settings"
         if not isinstance(payload, dict):
-            continue
+            return "managed_settings"
         raw_env = payload.get("env")
         env = raw_env if isinstance(raw_env, dict) else {}
         if _provider_flag_is_truthy(env.get(_CLAUDE_CODE_USE_VERTEX_ENV)):

@@ -4986,6 +4986,7 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
         ("inflight", "resolution_failed", "available", False),
         ("missing", "managed_models", "available", False),
         ("inflight", "managed_models", "available", False),
+        ("missing", "managed_malformed", "available", False),
         ("missing", "vertex", "available", False),
         ("inflight", "vertex", "available", False),
         ("missing", "managed_endpoint", "available", False),
@@ -5076,12 +5077,15 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
             encoding="utf-8",
         )
     managed_settings_paths: tuple[Path, ...] = ()
-    if provider_shape == "managed_models":
+    if provider_shape in {"managed_models", "managed_malformed"}:
         managed_settings = tmp_path / "managed-settings.json"
-        managed_settings.write_text(
-            json.dumps({"env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "synthetic-sonnet"}}),
-            encoding="utf-8",
-        )
+        if provider_shape == "managed_malformed":
+            managed_settings.write_text("{malformed", encoding="utf-8")
+        else:
+            managed_settings.write_text(
+                json.dumps({"env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "synthetic-sonnet"}}),
+                encoding="utf-8",
+            )
         managed_settings_paths = (managed_settings,)
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.main._CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
@@ -5284,6 +5288,8 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         expected_endpoint = "user_settings"
     elif provider_shape in {"workspace_settings", "workspace_local_settings"}:
         expected_endpoint = "workspace_settings"
+    elif provider_shape == "managed_malformed":
+        expected_endpoint = "managed_settings"
     elif provider_shape.startswith("malformed_endpoint_"):
         expected_endpoint = "unknown"
     else:

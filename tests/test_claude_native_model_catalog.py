@@ -427,10 +427,14 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
 
     monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX")
     managed_settings = tmp_path / "managed-settings.json"
+    managed_settings.write_text("{malformed", encoding="utf-8")
+    monkeypatch.setattr(claude_native, "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS", (managed_settings,))
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "managed_settings"
+
     managed_settings.write_text(
         json.dumps({"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}), encoding="utf-8"
     )
-    monkeypatch.setattr(claude_native, "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS", (managed_settings,))
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "bedrock"
 
