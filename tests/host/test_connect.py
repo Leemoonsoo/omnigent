@@ -69,6 +69,7 @@ from omnigent.host.frames import (
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteUnavailable
+from omnigent.host.startup_timing import HostStartupTiming
 from omnigent.runner.identity import (
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
@@ -4809,9 +4810,14 @@ class _DroppedTunnel:
         ``0`` (the default) models an accepted-but-silent connection.
     """
 
-    def __init__(self, frames_before_drop: int = 0) -> None:
+    def __init__(
+        self,
+        frames_before_drop: int = 0,
+        response_headers: Headers | None = None,
+    ) -> None:
         """Store the inbound-frame script."""
         self._frames_left = frames_before_drop
+        self.response = SimpleNamespace(headers=response_headers or Headers())
 
     async def send(self, data: str | bytes) -> None:
         """Accept any outbound frame (the ``host.hello``) silently.
@@ -4839,19 +4845,24 @@ class _AcceptingConnect:
     :param frames_before_drop: Passed through to :class:`_DroppedTunnel`.
     """
 
-    def __init__(self, frames_before_drop: int = 0) -> None:
+    def __init__(
+        self,
+        frames_before_drop: int = 0,
+        response_headers: Headers | None = None,
+    ) -> None:
         """Store the tunnel's inbound-frame script.
 
         :param frames_before_drop: Frames the tunnel serves before dropping.
         """
         self._frames_before_drop = frames_before_drop
+        self._response_headers = response_headers
 
     async def __aenter__(self) -> _DroppedTunnel:
         """Complete the handshake with a tunnel that later drops.
 
         :returns: A :class:`_DroppedTunnel`.
         """
-        return _DroppedTunnel(self._frames_before_drop)
+        return _DroppedTunnel(self._frames_before_drop, self._response_headers)
 
     async def __aexit__(self, *exc_info: object) -> bool:
         """No-op async-CM exit.
@@ -4878,7 +4889,7 @@ class _ConnectSpy:
         ``[None, InvalidStatus(resp_503), asyncio.CancelledError()]``.
     """
 
-    def __init__(self, exceptions: list[BaseException | int | None]) -> None:
+    def __init__(self, exceptions: list[BaseException | Headers | int | None]) -> None:
         """Initialize the spy with a handshake script.
 
         :param exceptions: Exception to raise (``None`` or an int frame
@@ -4901,6 +4912,8 @@ class _ConnectSpy:
         self.calls.append(kwargs)
         exc = self._exceptions[min(self.call_count, len(self._exceptions) - 1)]
         self.call_count += 1
+        if isinstance(exc, Headers):
+            return _AcceptingConnect(response_headers=exc)
         if exc is None or isinstance(exc, int):
             return _AcceptingConnect(exc or 0)
         return _HandshakeFailingConnect(exc)
@@ -5692,6 +5705,74 @@ async def test_host_records_accepted_connection_and_disconnect(
     assert len(disconnected) == 1
     assert disconnected[0][0] == "host"
     assert isinstance(disconnected[0][1], ConnectionClosedError)
+
+
+async def test_host_records_server_timing_from_accepted_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The accepted response's Server-Timing contributes server and network phases."""
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    headers = Headers({"Server-Timing": "omnigent-host-auth;dur=12.5"})
+    _patch_connect(monkeypatch, _ConnectSpy([headers, asyncio.CancelledError()]))
+    observations: list[dict[str, float]] = []
+    monkeypatch.setattr(
+        "omnigent.host.connect.record_websocket_connect_bootstrap",
+        observations.append,
+    )
+    identity = HostIdentity(host_id="host_test_connect", name="test-laptop")
+
+    await HostProcess(
+        identity,
+        "https://app.example.databricks.com",
+        startup_timing=HostStartupTiming(),
+    ).run()
+
+    assert len(observations) == 1
+    assert observations[0]["server_auth_upgrade"] == 12.5
+    assert observations[0]["network_handshake"] == max(0.0, observations[0]["upgrade_wait"] - 12.5)
+
+
+async def test_host_runtime_setup_starts_only_after_accepted_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credential-file preparation cannot race upgrade token resolution."""
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    spy = _ConnectSpy([None, asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+    calls: list[str] = []
+    identity = HostIdentity(host_id="host_test_connect", name="test-laptop")
+    host = HostProcess(
+        identity,
+        "https://app.example.databricks.com",
+        startup_setup=lambda: calls.append("setup"),
+    )
+
+    await host.run()
+
+    assert calls == ["setup"]
+
+
+async def test_rejected_upgrade_does_not_start_host_runtime_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unauthenticated daemon leaves credential/config files untouched."""
+    _patch_connect(monkeypatch, _ConnectSpy([_invalid_status(403)]))
+    calls: list[str] = []
+    identity = HostIdentity(host_id="host_test_connect", name="test-laptop")
+    host = HostProcess(
+        identity,
+        "https://app.example.databricks.com",
+        startup_setup=lambda: calls.append("setup"),
+    )
+
+    with pytest.raises(HostConnectError):
+        await host.run()
+
+    assert calls == []
 
 
 def _refused_exc() -> ConnectionRefusedError:
