@@ -192,9 +192,12 @@ _UCODE_CLAUDE_AGENT_NAME = "claude"
 _UCODE_CLAUDE_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
 _ANTHROPIC_MODEL_ENV = "ANTHROPIC_MODEL"
 _ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
+_ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 _ANTHROPIC_BEDROCK_BASE_URL_ENV = "ANTHROPIC_BEDROCK_BASE_URL"
 _AWS_BEARER_TOKEN_BEDROCK_ENV = "AWS_BEARER_TOKEN_BEDROCK"
 _CLAUDE_CODE_USE_BEDROCK_ENV = "CLAUDE_CODE_USE_BEDROCK"
+_CLAUDE_CODE_USE_FOUNDRY_ENV = "CLAUDE_CODE_USE_FOUNDRY"
+_CLAUDE_CODE_USE_VERTEX_ENV = "CLAUDE_CODE_USE_VERTEX"
 # Bedrock mode reads the token from the env (not an apiKeyHelper), so a
 # provider ``auth_command`` is resolved to a concrete token at launch.
 _BEDROCK_AUTH_COMMAND_TIMEOUT_S = 15.0
@@ -464,6 +467,31 @@ def _ambient_env_is_non_anthropic_gateway() -> bool:
     return host != "anthropic.com" and not host.endswith(".anthropic.com")
 
 
+def _env_flag_is_truthy(name: str) -> bool:
+    """Whether an inherited Claude provider-mode flag is enabled."""
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no")
+
+
+def _ambient_claude_endpoint_marker() -> str | None:
+    """Classify inherited routing that makes a ``None`` config non-login-shaped."""
+    if _env_flag_is_truthy(_CLAUDE_CODE_USE_VERTEX_ENV):
+        return "vertex"
+    if _env_flag_is_truthy(_CLAUDE_CODE_USE_BEDROCK_ENV) or os.environ.get(
+        _ANTHROPIC_BEDROCK_BASE_URL_ENV
+    ):
+        return "bedrock"
+    if _env_flag_is_truthy(_CLAUDE_CODE_USE_FOUNDRY_ENV):
+        return "foundry"
+    base_url = os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
+    if base_url:
+        return "ambient_gateway" if _ambient_env_is_non_anthropic_gateway() else "anthropic"
+    if _env_flag_is_truthy(_CLAUDE_CODE_USE_GATEWAY_ENV):
+        return "ambient_gateway"
+    if os.environ.get(_ANTHROPIC_API_KEY_ENV) or os.environ.get(_ANTHROPIC_AUTH_TOKEN_ENV):
+        return "anthropic"
+    return None
+
+
 def _claude_family(token: str) -> str | None:
     """
     The family alias a model id or alias folds onto, bracket markers dropped.
@@ -598,12 +626,15 @@ def claude_launch_endpoint_label(claude_config: ClaudeNativeUcodeConfig | None) 
 def claude_launch_endpoint_marker(claude_config: ClaudeNativeUcodeConfig | None) -> str:
     """Return a bounded provider-shape marker suitable for launch telemetry."""
     if claude_config is None:
-        if _ambient_env_is_non_anthropic_gateway():
-            return "ambient_gateway"
+        ambient_marker = _ambient_claude_endpoint_marker()
+        if ambient_marker is not None:
+            return ambient_marker
         from omnigent.onboarding.ambient import claude_managed_gateway
 
-        _base_url, managed_gateway = claude_managed_gateway()
-        return "managed_gateway" if managed_gateway else "claude_login"
+        managed_base_url, managed_gateway = claude_managed_gateway()
+        if managed_gateway:
+            return "managed_gateway"
+        return "managed_endpoint" if managed_base_url else "claude_login"
     if claude_config.env.get(_ANTHROPIC_BEDROCK_BASE_URL_ENV):
         return "bedrock"
     if claude_config.env.get(_UCODE_CLAUDE_BASE_URL_ENV):
@@ -1481,14 +1512,10 @@ def claude_default_catalog_bypass_is_safe(
     claude_config: ClaudeNativeUcodeConfig | None,
 ) -> bool:
     """Whether a bare Default launch can safely let Claude choose its model."""
-    if claude_config is not None or _ambient_env_is_non_anthropic_gateway():
-        return False
-    # Managed settings can route Claude through a gateway without exposing its
-    # endpoint in this process. Keep that ambiguous provider shape synchronous.
-    from omnigent.onboarding.ambient import claude_managed_gateway
-
-    _base_url, managed_gateway = claude_managed_gateway()
-    return not managed_gateway
+    # Reuse the telemetry classifier so eligibility and observability cannot
+    # disagree. Only a positively identified, unmodified Claude login route can
+    # let the CLI own Default while discovery continues in the background.
+    return claude_launch_endpoint_marker(claude_config) == "claude_login"
 
 
 def stored_claude_picker_values(

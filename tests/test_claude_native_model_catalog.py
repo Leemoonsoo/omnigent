@@ -294,12 +294,23 @@ async def test_catalog_keeps_enabled_fable_and_future_picker_models(
 def test_default_catalog_bypass_requires_claude_owned_routing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_GATEWAY",
+        "CLAUDE_CODE_USE_VERTEX",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(
         "omnigent.onboarding.ambient.claude_managed_gateway", lambda: (None, False)
     )
 
     assert claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "claude_login"
     assert not claude_native.claude_default_catalog_bypass_is_safe(
         claude_native.ClaudeNativeUcodeConfig(
             env={"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"},
@@ -309,6 +320,7 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "ambient_gateway"
 
     monkeypatch.delenv("ANTHROPIC_BASE_URL")
     monkeypatch.setattr(
@@ -316,3 +328,20 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
         lambda: ("https://gateway.example/anthropic", True),
     )
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "managed_gateway"
+
+    monkeypatch.setattr(
+        "omnigent.onboarding.ambient.claude_managed_gateway",
+        lambda: ("https://gateway.example/anthropic", False),
+    )
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "managed_endpoint"
+
+    monkeypatch.setattr(
+        "omnigent.onboarding.ambient.claude_managed_gateway", lambda: (None, False)
+    )
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "synthetic-project")
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "vertex"

@@ -4945,9 +4945,22 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("freshness", ["fresh", "stale", "missing", "inflight"])
+@pytest.mark.parametrize(
+    ("freshness", "provider_shape"),
+    [
+        ("fresh", "claude_login"),
+        ("stale", "claude_login"),
+        ("missing", "claude_login"),
+        ("inflight", "claude_login"),
+        ("missing", "vertex"),
+        ("inflight", "vertex"),
+        ("missing", "managed_endpoint"),
+        ("inflight", "managed_endpoint"),
+    ],
+)
 async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     freshness: str,
+    provider_shape: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -4971,6 +4984,29 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_GATEWAY",
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    managed_gateway: tuple[str | None, bool] = (None, False)
+    if provider_shape == "vertex":
+        monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "synthetic-project")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+    elif provider_shape == "managed_endpoint":
+        managed_gateway = ("https://gateway.example/anthropic", False)
+    monkeypatch.setattr(
+        "omnigent.onboarding.ambient.claude_managed_gateway", lambda: managed_gateway
+    )
     caplog.set_level(logging.INFO, logger="omnigent.runner.app")
 
     async def _no_op_forwarder(**kwargs: Any) -> None:
@@ -5061,23 +5097,41 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     async def _resolve() -> None:
         return None
 
-    await _auto_create_claude_terminal(
-        "9b1d2c3e4f5a6b7c8d9e0f1a2b3c4d5e",
-        _FakeResourceRegistry(),
-        lambda _sid, _evt: None,
-        server_client=fake_client,
-        resolve_launch_config=_resolve,
+    launch_task = asyncio.create_task(
+        _auto_create_claude_terminal(
+            "9b1d2c3e4f5a6b7c8d9e0f1a2b3c4d5e",
+            _FakeResourceRegistry(),
+            lambda _sid, _evt: None,
+            server_client=fake_client,
+            resolve_launch_config=_resolve,
+        )
     )
+    synchronous_probe = provider_shape != "claude_login" and freshness in {
+        "missing",
+        "inflight",
+    }
+    if synchronous_probe:
+        await asyncio.wait_for(probe_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not launch_task.done(), (
+            f"{provider_shape} Default launch skipped its {freshness} catalog probe"
+        )
+        release_probe.set()
+    await asyncio.wait_for(launch_task, timeout=5)
     args = captured["spec"].args
     if freshness == "fresh":
         assert args[args.index("--model") + 1] == "claude-3-5-sonnet-20241022"
+    elif synchronous_probe:
+        assert args[args.index("--model") + 1] == "claude-sonnet-5"
     else:
         assert "--model" not in args, f"a non-authoritative default was still pinned: {args}"
+    if freshness != "fresh":
         await asyncio.wait_for(probe_started.wait(), timeout=1)
-        # The terminal launch completed while the deliberately blocked probe is
-        # still pending, so discovery was not on its critical path.
-        assert not release_probe.is_set()
-        release_probe.set()
+        # Canonical login returned before the probe. Ambiguous providers waited
+        # and pinned the catalog's discovered default before launching.
+        if not synchronous_probe:
+            assert not release_probe.is_set()
+            release_probe.set()
         task = model_catalog_store._inflight.get(("claude-native", fingerprint))
         if task is not None:
             await task
@@ -5093,16 +5147,17 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     ]
     assert records
     attributes = records[-1].attributes
-    assert (
-        attributes["catalog_outcome"]
-        == {
-            "fresh": "hit",
-            "stale": "stale",
-            "missing": "default_bypass",
-            "inflight": "default_bypass",
-        }[freshness]
+    expected_outcome = {
+        "fresh": "hit",
+        "stale": "stale",
+        "missing": "cold_probe" if synchronous_probe else "default_bypass",
+        "inflight": "joined_inflight" if synchronous_probe else "default_bypass",
+    }[freshness]
+    assert attributes["catalog_outcome"] == expected_outcome
+    assert attributes["catalog_on_terminal_critical_path"] is (
+        freshness in {"fresh", "stale"} or synchronous_probe
     )
-    assert attributes["catalog_on_terminal_critical_path"] is (freshness in {"fresh", "stale"})
-    assert attributes["catalog_probe_on_terminal_critical_path"] is False
+    assert attributes["catalog_probe_on_terminal_critical_path"] is synchronous_probe
+    assert attributes["endpoint"] == provider_shape
 
     await fake_client.aclose()
