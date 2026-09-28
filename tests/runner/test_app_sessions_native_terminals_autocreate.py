@@ -4945,11 +4945,12 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("freshness", ["fresh", "stale"])
+@pytest.mark.parametrize("freshness", ["fresh", "stale", "missing", "inflight"])
 async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     freshness: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
     A Default launch pins the stored default only while the entry is fresh.
@@ -4957,8 +4958,8 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     The store never forgets an entry, so its ``isDefault`` row can outlive
     the model it names (a retirement or an entitlement change); pinning it
     as ``--model`` then hard-fails every Default launch on the host. A
-    stale entry defers to the CLI's own default — no ``--model`` at all —
-    while the store re-probes in the background.
+    stale entry and a cold miss defer to the CLI's own default — no ``--model``
+    at all — while the store probes in the background.
     """
     import os
     import time
@@ -4970,6 +4971,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+    caplog.set_level(logging.INFO, logger="omnigent.runner.app")
 
     async def _no_op_forwarder(**kwargs: Any) -> None:
         del kwargs
@@ -4984,32 +4986,41 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         "omnigent.harnesses.claude_native.main.claude_launch_catalog", REAL_CLAUDE_LAUNCH_CATALOG
     )
     refreshed = [{"id": "sonnet", "model": "claude-sonnet-5", "isDefault": True}]
+    probe_started = asyncio.Event()
+    release_probe = asyncio.Event()
 
     async def _fake_probe_catalog(config: object) -> list[dict[str, object]]:
         del config
+        probe_started.set()
+        await release_probe.wait()
         return refreshed
 
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.main.claude_model_catalog", _fake_probe_catalog
     )
     fingerprint = claude_catalog_fingerprint(None)
-    model_catalog_store.write_catalog(
-        "claude-native",
-        fingerprint,
-        [
-            {"id": "opus", "model": "claude-opus-5", "displayName": "Opus 5"},
-            {
-                "id": "claude-3-5-sonnet-20241022",
-                "model": "claude-3-5-sonnet-20241022",
-                "displayName": "Claude 3.5 Sonnet",
-                "isDefault": True,
-            },
-        ],
-    )
+    prewarm_task: asyncio.Task[list[dict[str, object]] | None] | None = None
+    if freshness not in {"missing", "inflight"}:
+        model_catalog_store.write_catalog(
+            "claude-native",
+            fingerprint,
+            [
+                {"id": "opus", "model": "claude-opus-5", "displayName": "Opus 5"},
+                {
+                    "id": "claude-3-5-sonnet-20241022",
+                    "model": "claude-3-5-sonnet-20241022",
+                    "displayName": "Claude 3.5 Sonnet",
+                    "isDefault": True,
+                },
+            ],
+        )
     if freshness == "stale":
         path = model_catalog_store.catalog_path("claude-native", fingerprint)
         old = time.time() - (model_catalog_store.CATALOG_STALE_AFTER_S + 60)
         os.utime(path, (old, old))
+    elif freshness == "inflight":
+        prewarm_task = asyncio.create_task(REAL_CLAUDE_LAUNCH_CATALOG(None))
+        await asyncio.wait_for(probe_started.wait(), timeout=1)
 
     captured: dict[str, Any] = {}
 
@@ -5061,11 +5072,37 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     if freshness == "fresh":
         assert args[args.index("--model") + 1] == "claude-3-5-sonnet-20241022"
     else:
-        assert "--model" not in args, f"a stale default was still pinned: {args}"
+        assert "--model" not in args, f"a non-authoritative default was still pinned: {args}"
+        await asyncio.wait_for(probe_started.wait(), timeout=1)
+        # The terminal launch completed while the deliberately blocked probe is
+        # still pending, so discovery was not on its critical path.
+        assert not release_probe.is_set()
+        release_probe.set()
         task = model_catalog_store._inflight.get(("claude-native", fingerprint))
         if task is not None:
             await task
+        if prewarm_task is not None:
+            await prewarm_task
         # The background re-probe healed the store for the next launch.
         assert model_catalog_store.read_catalog("claude-native", fingerprint) == refreshed
+
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "claude_launch_catalog_resolution"
+    ]
+    assert records
+    attributes = records[-1].attributes
+    assert (
+        attributes["catalog_outcome"]
+        == {
+            "fresh": "hit",
+            "stale": "stale",
+            "missing": "default_bypass",
+            "inflight": "default_bypass",
+        }[freshness]
+    )
+    assert attributes["catalog_on_terminal_critical_path"] is (freshness in {"fresh", "stale"})
+    assert attributes["catalog_probe_on_terminal_critical_path"] is False
 
     await fake_client.aclose()

@@ -20,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
 
 from omnigent.llms.adapters._content import redact_binary_payloads
@@ -592,6 +593,22 @@ def claude_launch_endpoint_label(claude_config: ClaudeNativeUcodeConfig | None) 
         if base_url:
             return f"the gateway at {_endpoint_origin(base_url)}"
     return "Claude Code's own login"
+
+
+def claude_launch_endpoint_marker(claude_config: ClaudeNativeUcodeConfig | None) -> str:
+    """Return a bounded provider-shape marker suitable for launch telemetry."""
+    if claude_config is None:
+        if _ambient_env_is_non_anthropic_gateway():
+            return "ambient_gateway"
+        from omnigent.onboarding.ambient import claude_managed_gateway
+
+        _base_url, managed_gateway = claude_managed_gateway()
+        return "managed_gateway" if managed_gateway else "claude_login"
+    if claude_config.env.get(_ANTHROPIC_BEDROCK_BASE_URL_ENV):
+        return "bedrock"
+    if claude_config.env.get(_UCODE_CLAUDE_BASE_URL_ENV):
+        return "anthropic" if _serves_canonical_anthropic_ids(claude_config) else "gateway"
+    return "configured_provider"
 
 
 def resolve_claude_native_model_selection(
@@ -1331,7 +1348,34 @@ async def claude_model_catalog(
     :param claude_config: The resolved launch config, or ``None``.
     :returns: Catalog rows, or ``None`` when the probe failed.
     """
-    probe = await probe_claude_model_options(claude_config)
+    from omnigent.debug_logging import debug_event
+
+    probe_started = time.perf_counter()
+    try:
+        probe = await probe_claude_model_options(claude_config)
+    except BaseException:
+        _logger.info(
+            "Claude model catalog probe failed after %.1fms",
+            (time.perf_counter() - probe_started) * 1000,
+            extra=debug_event(
+                "claude_model_catalog_probe",
+                outcome="failed",
+                endpoint=claude_launch_endpoint_marker(claude_config),
+                probe_duration_ms=round((time.perf_counter() - probe_started) * 1000, 3),
+            ),
+        )
+        raise
+    probe_duration_ms = round((time.perf_counter() - probe_started) * 1000, 3)
+    _logger.info(
+        "Claude model catalog probe completed in %.1fms",
+        probe_duration_ms,
+        extra=debug_event(
+            "claude_model_catalog_probe",
+            outcome="available" if probe is not None else "unavailable",
+            endpoint=claude_launch_endpoint_marker(claude_config),
+            probe_duration_ms=probe_duration_ms,
+        ),
+    )
     if probe is None:
         return None
     if probe.empty_picker:
@@ -1414,6 +1458,37 @@ def stored_claude_catalog_rows(
     return model_catalog_store.read_catalog(
         "claude-native", claude_catalog_fingerprint(claude_config)
     )
+
+
+def claude_launch_catalog_state(claude_config: ClaudeNativeUcodeConfig | None) -> str:
+    """Classify the store access a synchronous launch would perform."""
+    from omnigent.models import model_catalog_store
+
+    fingerprint = claude_catalog_fingerprint(claude_config)
+    rows = model_catalog_store.read_catalog("claude-native", fingerprint)
+    if rows is not None:
+        return (
+            "stale"
+            if model_catalog_store.catalog_is_stale("claude-native", fingerprint)
+            else "hit"
+        )
+    if model_catalog_store.catalog_probe_inflight("claude-native", fingerprint):
+        return "joined_inflight"
+    return "cold_probe"
+
+
+def claude_default_catalog_bypass_is_safe(
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> bool:
+    """Whether a bare Default launch can safely let Claude choose its model."""
+    if claude_config is not None or _ambient_env_is_non_anthropic_gateway():
+        return False
+    # Managed settings can route Claude through a gateway without exposing its
+    # endpoint in this process. Keep that ambiguous provider shape synchronous.
+    from omnigent.onboarding.ambient import claude_managed_gateway
+
+    _base_url, managed_gateway = claude_managed_gateway()
+    return not managed_gateway
 
 
 def stored_claude_picker_values(

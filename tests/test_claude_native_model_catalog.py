@@ -289,3 +289,30 @@ async def test_catalog_keeps_enabled_fable_and_future_picker_models(
         },
         {"id": "future", "model": "vendor-future", "displayName": "Future model"},
     ]
+
+
+def test_default_catalog_bypass_requires_claude_owned_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        "omnigent.onboarding.ambient.claude_managed_gateway", lambda: (None, False)
+    )
+
+    assert claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert not claude_native.claude_default_catalog_bypass_is_safe(
+        claude_native.ClaudeNativeUcodeConfig(
+            env={"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"},
+            model="gateway-default",
+        )
+    )
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL")
+    monkeypatch.setattr(
+        "omnigent.onboarding.ambient.claude_managed_gateway",
+        lambda: ("https://gateway.example/anthropic", True),
+    )
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
