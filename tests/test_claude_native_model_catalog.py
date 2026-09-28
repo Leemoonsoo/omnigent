@@ -372,6 +372,10 @@ def test_default_catalog_bypass_requires_claude_owned_routing(
     assert not claude_native.claude_default_catalog_bypass_is_safe(None)
     assert claude_native.claude_launch_endpoint_marker(None) == "ambient_gateway"
 
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://[malformed")
+    assert not claude_native.claude_default_catalog_bypass_is_safe(None)
+    assert claude_native.claude_launch_endpoint_marker(None) == "unknown"
+
     monkeypatch.delenv("ANTHROPIC_BASE_URL")
     monkeypatch.setattr(
         "omnigent.onboarding.ambient.claude_managed_gateway",

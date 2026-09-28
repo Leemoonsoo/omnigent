@@ -731,29 +731,32 @@ def claude_launch_endpoint_marker(
     launch_config_resolution_failed: bool = False,
 ) -> str:
     """Return a bounded provider-shape marker suitable for launch telemetry."""
-    if launch_config_resolution_failed:
-        return "resolution_failed"
-    if claude_config is None:
-        ambient_marker = _ambient_claude_endpoint_marker()
-        if ambient_marker is not None:
-            return ambient_marker
-        managed_launch = _managed_claude_launch_marker()
-        if managed_launch is not None:
-            return managed_launch
-        user_launch = _user_claude_launch_marker()
-        if user_launch is not None:
-            return user_launch
-        from omnigent.onboarding.ambient import claude_managed_gateway
+    try:
+        if launch_config_resolution_failed:
+            return "resolution_failed"
+        if claude_config is None:
+            ambient_marker = _ambient_claude_endpoint_marker()
+            if ambient_marker is not None:
+                return ambient_marker
+            managed_launch = _managed_claude_launch_marker()
+            if managed_launch is not None:
+                return managed_launch
+            user_launch = _user_claude_launch_marker()
+            if user_launch is not None:
+                return user_launch
+            from omnigent.onboarding.ambient import claude_managed_gateway
 
-        managed_base_url, managed_gateway = claude_managed_gateway(_managed_settings_paths())
-        if managed_gateway:
-            return "managed_gateway"
-        return "managed_endpoint" if managed_base_url else "claude_login"
-    if claude_config.env.get(_ANTHROPIC_BEDROCK_BASE_URL_ENV):
-        return "bedrock"
-    if claude_config.env.get(_UCODE_CLAUDE_BASE_URL_ENV):
-        return "anthropic" if _serves_canonical_anthropic_ids(claude_config) else "gateway"
-    return "configured_provider"
+            managed_base_url, managed_gateway = claude_managed_gateway(_managed_settings_paths())
+            if managed_gateway:
+                return "managed_gateway"
+            return "managed_endpoint" if managed_base_url else "claude_login"
+        if claude_config.env.get(_ANTHROPIC_BEDROCK_BASE_URL_ENV):
+            return "bedrock"
+        if claude_config.env.get(_UCODE_CLAUDE_BASE_URL_ENV):
+            return "anthropic" if _serves_canonical_anthropic_ids(claude_config) else "gateway"
+        return "configured_provider"
+    except Exception:  # noqa: BLE001 — telemetry classification must never block launch
+        return "unknown"
 
 
 def resolve_claude_native_model_selection(
@@ -1643,19 +1646,22 @@ def claude_default_catalog_bypass_is_safe(
     # Eligibility is intentionally stricter than telemetry classification:
     # each source of launch configuration must be known-safe before discovery
     # can leave the terminal critical path.
-    if launch_config_resolution_failed or claude_config is not None:
-        return False
-    if _ambient_claude_endpoint_marker() is not None:
-        return False
-    if _managed_claude_launch_marker() is not None:
-        return False
-    if _user_claude_launch_marker() is not None:
-        return False
+    try:
+        if launch_config_resolution_failed or claude_config is not None:
+            return False
+        if _ambient_claude_endpoint_marker() is not None:
+            return False
+        if _managed_claude_launch_marker() is not None:
+            return False
+        if _user_claude_launch_marker() is not None:
+            return False
 
-    from omnigent.onboarding.ambient import claude_managed_gateway
+        from omnigent.onboarding.ambient import claude_managed_gateway
 
-    managed_base_url, managed_gateway = claude_managed_gateway(_managed_settings_paths())
-    return not managed_base_url and not managed_gateway
+        managed_base_url, managed_gateway = claude_managed_gateway(_managed_settings_paths())
+        return not managed_base_url and not managed_gateway
+    except Exception:  # noqa: BLE001 — uncertain routing must keep discovery synchronous
+        return False
 
 
 def stored_claude_picker_values(

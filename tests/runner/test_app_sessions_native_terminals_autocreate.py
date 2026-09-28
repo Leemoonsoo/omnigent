@@ -4968,6 +4968,8 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
         ("missing", "managed_endpoint", "available", False),
         ("inflight", "managed_endpoint", "available", False),
         ("missing", "managed_endpoint", "failed", False),
+        ("missing", "malformed_endpoint_default", "available", False),
+        ("missing", "malformed_endpoint_explicit", "available", False),
     ],
 )
 async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
@@ -5024,6 +5026,8 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         managed_gateway = ("https://gateway.example/anthropic", False)
     elif provider_shape == "ambient_models":
         monkeypatch.setenv("ANTHROPIC_MODEL", "synthetic-default")
+    elif provider_shape.startswith("malformed_endpoint_"):
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://[malformed")
     elif provider_shape == "user_api_key_helper":
         (user_config_dir / "settings.json").write_text(
             json.dumps({"apiKeyHelper": "printf synthetic"}), encoding="utf-8"
@@ -5140,7 +5144,10 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
             )
 
     def _handle_request(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"labels": {}})
+        payload: dict[str, object] = {"labels": {}}
+        if provider_shape == "malformed_endpoint_explicit":
+            payload["model_override"] = "claude-sonnet-5"
+        return httpx.Response(200, json=payload)
 
     fake_client = httpx.AsyncClient(
         base_url="http://test-server",
@@ -5225,11 +5232,12 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         freshness in {"fresh", "stale"} or synchronous_probe
     )
     assert attributes["catalog_probe_on_terminal_critical_path"] is synchronous_probe
-    expected_endpoint = (
-        "user_settings"
-        if provider_shape in {"user_api_key_helper", "user_provider_env"}
-        else provider_shape
-    )
+    if provider_shape in {"user_api_key_helper", "user_provider_env"}:
+        expected_endpoint = "user_settings"
+    elif provider_shape.startswith("malformed_endpoint_"):
+        expected_endpoint = "unknown"
+    else:
+        expected_endpoint = provider_shape
     assert attributes["endpoint"] == expected_endpoint
 
     await fake_client.aclose()
