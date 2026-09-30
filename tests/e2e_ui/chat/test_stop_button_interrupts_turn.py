@@ -418,7 +418,10 @@ def test_composer_interrupts_running_turn(
 
             session_metadata_url = re.compile(rf".*/v1/sessions/{re.escape(session_id)}(?:\?.*)?$")
             page.route(session_metadata_url, without_active_response)
-            page.reload()
+            # The document load can finish before this background snapshot, so
+            # wait for the routed response before checking the interception.
+            with page.expect_response(session_metadata_url):
+                page.reload()
             assert metadata_route_intercepted, "session metadata response was not intercepted"
             expect(interrupt_button).to_be_visible(timeout=30_000)
             expect(interrupt_button).to_be_enabled()
