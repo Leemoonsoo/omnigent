@@ -54,6 +54,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -412,7 +413,8 @@ def test_composer_interrupts_running_turn(
                     snapshot["active_response_id"] = None
                 route.fulfill(response=response, json=snapshot)
 
-            page.route(f"**/v1/sessions/{session_id}", without_active_response)
+            session_metadata_url = re.compile(rf".*/v1/sessions/{re.escape(session_id)}(?:\?.*)?$")
+            page.route(session_metadata_url, without_active_response)
             page.reload()
             expect(interrupt_button).to_be_visible(timeout=30_000)
             expect(interrupt_button).to_be_enabled()
