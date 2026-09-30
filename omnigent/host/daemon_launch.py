@@ -307,6 +307,45 @@ async def launch_or_reuse_daemon_runner(
     return runner_id
 
 
+async def claim_daemon_runner_workspace(
+    client: httpx.AsyncClient,
+    *,
+    host_id: str,
+    runner_id: str,
+    session_id: str,
+    workspace: str,
+) -> None:
+    """Bind an online prepared runner to the caller's current workspace."""
+    resp = await client.post(
+        f"/v1/hosts/{url_component(host_id)}/runners/{url_component(runner_id)}/claim-workspace",
+        json={"session_id": session_id, "workspace": workspace},
+        timeout=15.0,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(
+            f"Failed to claim prepared runner workspace ({resp.status_code}): {error_text(resp)}"
+        )
+
+
+async def require_online_prepared_runner(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+) -> str:
+    """Return the session's online runner without launching a replacement."""
+    resp = await client.get(f"/v1/sessions/{url_component(session_id)}")
+    if resp.status_code >= 400:
+        raise click.ClickException(
+            f"Failed to load prepared session ({resp.status_code}): {error_text(resp)}"
+        )
+    runner_id = _json_body(resp).get("runner_id")
+    if not isinstance(runner_id, str) or not runner_id:
+        raise click.ClickException("Prepared session has no runner bound.")
+    if not await runner_is_online(client, runner_id):
+        raise click.ClickException("Prepared session runner is not online.")
+    return runner_id
+
+
 def error_text(resp: httpx.Response) -> str:
     """
     Extract a concise server error message from an HTTP response.

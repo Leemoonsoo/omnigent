@@ -183,6 +183,12 @@ def register_native_commands(cli: click.Group) -> None:
             "you type in the TUI is what gets routed, so this takes no -p."
         ),
     )
+    @click.option(
+        "--claim-workspace",
+        is_flag=True,
+        default=False,
+        help="Bind an online prepared runner to the current directory when resuming its session.",
+    )
     @click.argument("claude_args", nargs=-1, type=click.UNPROCESSED)
     @observe_native_startup("claude-native")
     def claude(
@@ -195,6 +201,7 @@ def register_native_commands(cli: click.Group) -> None:
         claude_command: str | None,
         prompt: str | None,
         smart_routing: bool,
+        claim_workspace: bool,
         claude_args: tuple[str, ...],
     ) -> None:
         # Param docs live in comments — Click uses the docstring for --help.
@@ -250,6 +257,10 @@ def register_native_commands(cli: click.Group) -> None:
                 "--session and --resume are mutually exclusive; "
                 "prefer --resume (--session is deprecated).",
             )
+        if claim_workspace and (
+            choice.picker or (choice.conversation_id is None and session_id is None)
+        ):
+            raise click.UsageError("--claim-workspace requires --resume <session-id>.")
         if smart_routing:
             _reject_smart_routing_resume(
                 resuming=choice.picker
@@ -307,6 +318,7 @@ def register_native_commands(cli: click.Group) -> None:
             extra_args=extra_args,
             prompt=prompt,
             use_claude_config=use_claude_config,
+            claim_workspace=claim_workspace,
             auto_open_conversation=auto_open_conversation,
             startup_profiler=startup_profiler,
             command=resolved_command,
@@ -366,6 +378,12 @@ def register_native_commands(cli: click.Group) -> None:
             "you type in the TUI is what gets routed, so this takes no -p."
         ),
     )
+    @click.option(
+        "--claim-workspace",
+        is_flag=True,
+        default=False,
+        help="Bind an online prepared runner to the current directory when resuming its session.",
+    )
     @click.argument("codex_args", nargs=-1, type=click.UNPROCESSED)
     @observe_native_startup("codex-native")
     def codex(
@@ -375,6 +393,7 @@ def register_native_commands(cli: click.Group) -> None:
         model: str | None,
         prompt: str | None,
         smart_routing: bool,
+        claim_workspace: bool,
         codex_args: tuple[str, ...],
     ) -> None:
         # Param docs live in comments — Click uses the docstring for --help.
@@ -407,6 +426,10 @@ def register_native_commands(cli: click.Group) -> None:
                 "--session and --resume are mutually exclusive; "
                 "prefer --resume (--session is deprecated).",
             )
+        if claim_workspace and (
+            choice.picker or (choice.conversation_id is None and session_id is None)
+        ):
+            raise click.UsageError("--claim-workspace requires --resume <session-id>.")
         if smart_routing:
             _reject_smart_routing_resume(
                 resuming=choice.picker
@@ -453,6 +476,7 @@ def register_native_commands(cli: click.Group) -> None:
             extra_args=codex_args,  # raw; runner is the sole arg-merge point (see claude)
             model=model,
             prompt=prompt,
+            claim_workspace=claim_workspace,
             auto_open_conversation=auto_open_conversation,
             command=resolved_command,
         )

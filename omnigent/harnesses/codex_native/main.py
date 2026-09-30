@@ -75,9 +75,11 @@ from omnigent.harnesses.codex_native.forwarder import (
 )
 from omnigent.harnesses.codex_native.state import read_launch_state, write_launch_state
 from omnigent.host.daemon_launch import (
+    claim_daemon_runner_workspace,
     error_text,
     launch_or_reuse_daemon_runner,
     open_daemon_client,
+    require_online_prepared_runner,
     wait_for_host_online,
     wait_for_runner_online,
 )
@@ -422,6 +424,7 @@ def run_codex_native(
     command: str = _DEFAULT_CODEX_COMMAND,
     model: str | None = None,
     prompt: str | None = None,
+    claim_workspace: bool = False,
     auto_open_conversation: bool = False,
 ) -> None:
     """
@@ -444,6 +447,10 @@ def run_codex_native(
     codex_args = _normalize_extra_args(
         extra_args=extra_args, legacy_args=codex_args, legacy_param="codex_args"
     )
+    if claim_workspace and (server is None or session_id is None or resume_picker):
+        raise click.ClickException(
+            "Workspace claiming requires --server and --resume <session-id>."
+        )
     resolved_command = command.strip()
     if not resolved_command:
         raise click.ClickException("Codex command must not be empty.")
@@ -463,6 +470,7 @@ def run_codex_native(
             codex_args=codex_args,
             model=model,
             prompt=prompt,
+            claim_workspace=claim_workspace,
             auto_open_conversation=auto_open_conversation,
         )
 
@@ -773,6 +781,7 @@ def _run_with_remote_server(
     codex_args: tuple[str, ...],
     model: str | None,
     prompt: str | None,
+    claim_workspace: bool = False,
     auto_open_conversation: bool = False,
 ) -> None:
     """
@@ -809,7 +818,7 @@ def _run_with_remote_server(
         )
         if resolved_session_id is None and resume_picker and session_id is None:
             return
-        if resolved_session_id is not None:
+        if resolved_session_id is not None and not claim_workspace:
             _align_working_directory_with_session(resolved_session_id)
 
         async def _drive() -> None:
@@ -831,6 +840,7 @@ def _run_with_remote_server(
                     model=model,
                     host_id=host_id,
                     workspace=str(Path.cwd().resolve()),
+                    claim_workspace=claim_workspace,
                     startup_progress=progress,
                 )
             if resolved_session_id is None:
@@ -898,6 +908,7 @@ async def _prepare_codex_terminal_via_daemon(
     model: str | None,
     host_id: str,
     workspace: str,
+    claim_workspace: bool = False,
     startup_progress: RunnerStartupProgress | None = None,
 ) -> PreparedCodexTerminal:
     """
@@ -1001,16 +1012,29 @@ async def _prepare_codex_terminal_via_daemon(
             await wait_for_host_online(client, host_id, timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S)
         _update_startup_progress(startup_progress, "Starting runner...")
         record_startup_event("runner_requested", session_id=session_id)
-        runner_id = await launch_or_reuse_daemon_runner(
-            client,
-            host_id=host_id,
-            session_id=session_id,
-            workspace=workspace,
-            fresh=fresh_session,
-        )
+        if claim_workspace:
+            runner_id = await require_online_prepared_runner(
+                client, session_id=session_id
+            )
+        else:
+            runner_id = await launch_or_reuse_daemon_runner(
+                client,
+                host_id=host_id,
+                session_id=session_id,
+                workspace=workspace,
+                fresh=fresh_session,
+            )
         _update_startup_progress(startup_progress, "Waiting for runner...")
         await wait_for_runner_online(client, runner_id, timeout_s=_DAEMON_RUNNER_ONLINE_TIMEOUT_S)
         record_startup_event("runner_connected")
+        if claim_workspace:
+            await claim_daemon_runner_workspace(
+                client,
+                host_id=host_id,
+                runner_id=runner_id,
+                session_id=session_id,
+                workspace=workspace,
+            )
         # Must run AFTER wait_for_runner_online — unregistered runners
         # 400 on replace_runner_id. The daemon bind paths don't route
         # through replace_runner_id, so without this re-bind a stopped

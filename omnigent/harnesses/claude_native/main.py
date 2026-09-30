@@ -104,10 +104,12 @@ from omnigent.harnesses.claude_native.state import (
     write_launch_state,
 )
 from omnigent.host.daemon_launch import (
+    claim_daemon_runner_workspace,
     daemon_poll_intervals,
     error_text,
     launch_or_reuse_daemon_runner,
     open_daemon_client,
+    require_online_prepared_runner,
     wait_for_host_online,
     wait_for_runner_online,
 )
@@ -1576,6 +1578,7 @@ def run_claude_native(
     prompt: str | None = None,
     command: str = _DEFAULT_CLAUDE_COMMAND,
     use_claude_config: bool = False,
+    claim_workspace: bool = False,
     auto_open_conversation: bool = False,
     startup_profiler: StartupProfiler | None = None,
 ) -> None:
@@ -1617,6 +1620,10 @@ def run_claude_native(
     claude_args = _normalize_extra_args(
         extra_args=extra_args, legacy_args=claude_args, legacy_param="claude_args"
     )
+    if claim_workspace and (server is None or session_id is None or resume_picker):
+        raise click.ClickException(
+            "Workspace claiming requires --server and --resume <session-id>."
+        )
     startup_profiler = startup_profiler or StartupProfiler.from_env(
         name="omnigent claude",
         env_var=_CLAUDE_STARTUP_PROFILE_ENV_VAR,
@@ -1674,6 +1681,7 @@ def run_claude_native(
                 session_id=session_id,
                 resume_picker=resume_picker,
                 claude_args=sanitized_args,
+                claim_workspace=claim_workspace,
                 auto_open_conversation=auto_open_conversation,
                 startup_profiler=startup_profiler,
             )
@@ -4526,6 +4534,7 @@ async def _prepare_claude_terminal_via_daemon(
     claude_args: tuple[str, ...],
     host_id: str,
     workspace: str,
+    claim_workspace: bool = False,
     startup_profiler: StartupProfiler | None = None,
     startup_progress: RunnerStartupProgress | None = None,
 ) -> PreparedClaudeTerminal:
@@ -4654,13 +4663,18 @@ async def _prepare_claude_terminal_via_daemon(
             progress_message="Starting runner...",
         )
         record_startup_event("runner_requested", session_id=session_id)
-        runner_id = await launch_or_reuse_daemon_runner(
-            client,
-            host_id=host_id,
-            session_id=session_id,
-            workspace=workspace,
-            fresh=fresh_session,
-        )
+        if claim_workspace:
+            runner_id = await require_online_prepared_runner(
+                client, session_id=session_id
+            )
+        else:
+            runner_id = await launch_or_reuse_daemon_runner(
+                client,
+                host_id=host_id,
+                session_id=session_id,
+                workspace=workspace,
+                fresh=fresh_session,
+            )
         record_startup_event("session_runner_bound")
         _mark_startup_step(
             startup_profiler,
@@ -4678,6 +4692,19 @@ async def _prepare_claude_terminal_via_daemon(
                 progress_message="Waiting for runner...",
             )
             await _wait_for_runner_online_with_startup_event(client, runner_id)
+            if claim_workspace:
+                await claim_daemon_runner_workspace(
+                    client,
+                    host_id=host_id,
+                    runner_id=runner_id,
+                    session_id=session_id,
+                    workspace=workspace,
+                )
+                _mark_startup_step(
+                    startup_profiler,
+                    "prepared runner workspace claimed",
+                    startup_progress=startup_progress,
+                )
             _mark_startup_step(
                 startup_profiler,
                 "daemon runner online",
@@ -4761,6 +4788,7 @@ def _run_with_remote_server(
     session_id: str | None,
     resume_picker: bool,
     claude_args: tuple[str, ...],
+    claim_workspace: bool = False,
     auto_open_conversation: bool = False,
     startup_profiler: StartupProfiler | None = None,
 ) -> None:
@@ -4836,7 +4864,7 @@ def _run_with_remote_server(
             return
         should_print_resume_hint = resolved_session_id is None
         with runner_startup_progress(initial_message="Preparing Claude...") as progress:
-            if resolved_session_id is not None:
+            if resolved_session_id is not None and not claim_workspace:
                 # Align cwd with the resumed session before we sample
                 # ``Path.cwd()`` for the runner workspace below.
                 _align_working_directory_with_session(
@@ -4884,6 +4912,7 @@ def _run_with_remote_server(
                         claude_args=claude_args,
                         host_id=host_id,
                         workspace=str(Path.cwd().resolve()),
+                        claim_workspace=claim_workspace,
                         startup_profiler=startup_profiler,
                         startup_progress=progress,
                     )

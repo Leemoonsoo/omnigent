@@ -18,11 +18,65 @@ import pytest
 from omnigent.cli_auth import OMNIGENT_SLICE_KEY_HEADER
 from omnigent.host import daemon_launch
 from omnigent.host.daemon_launch import (
+    claim_daemon_runner_workspace,
     open_daemon_client,
+    require_online_prepared_runner,
     runner_is_online,
     wait_for_host_online,
     wait_for_runner_online,
 )
+
+
+async def test_prepared_runner_claim_uses_existing_online_binding() -> None:
+    """The claim path must never launch a replacement runner."""
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/v1/sessions/conv_1":
+            return httpx.Response(200, json={"runner_id": "runner_1"})
+        if request.url.path == "/v1/runners/runner_1/status":
+            return httpx.Response(200, json={"online": True})
+        if request.url.path == "/v1/hosts/host_1/runners/runner_1/claim-workspace":
+            assert request.method == "POST"
+            assert request.content == b'{"session_id":"conv_1","workspace":"/work/new"}'
+            return httpx.Response(200, json={"workspace": "/work/new"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    async with httpx.AsyncClient(
+        base_url="https://example.test", transport=httpx.MockTransport(respond)
+    ) as client:
+        runner_id = await require_online_prepared_runner(client, session_id="conv_1")
+        await claim_daemon_runner_workspace(
+            client,
+            host_id="host_1",
+            runner_id=runner_id,
+            session_id="conv_1",
+            workspace="/work/new",
+        )
+
+    assert [request.method for request in requests] == ["GET", "GET", "POST"]
+
+
+async def test_prepared_runner_offline_fails_without_launching() -> None:
+    """An offline prepared binding must fail before a normal runner can start."""
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/v1/sessions/conv_1":
+            return httpx.Response(200, json={"runner_id": "runner_1"})
+        if request.url.path == "/v1/runners/runner_1/status":
+            return httpx.Response(200, json={"online": False})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    async with httpx.AsyncClient(
+        base_url="https://example.test", transport=httpx.MockTransport(respond)
+    ) as client:
+        with pytest.raises(click.ClickException, match="not online"):
+            await require_online_prepared_runner(client, session_id="conv_1")
+
+    assert [request.method for request in requests] == ["GET", "GET"]
 
 
 @pytest.fixture(autouse=True)
