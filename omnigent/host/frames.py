@@ -262,6 +262,7 @@ class HostLaunchRunnerFrame:
     session_id: str | None = None
     harness: str | None = None
     inference_config: dict[str, Any] | None = None
+    workspace_claimable: bool = False
 
 
 @dataclass
@@ -1279,6 +1280,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "session_id": frame.session_id,
                 "harness": frame.harness,
                 "inference_config": frame.inference_config,
+                "workspace_claimable": frame.workspace_claimable,
             }
         )
     if isinstance(frame, HostLaunchRunnerResultFrame):
@@ -2056,6 +2058,9 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
     inference_config = msg.get("inference_config")
     if inference_config is not None and not isinstance(inference_config, dict):
         raise ValueError("inference_config must be an object or null")
+    workspace_claimable = msg.get("workspace_claimable", False)
+    if not isinstance(workspace_claimable, bool):
+        raise ValueError("workspace_claimable must be a boolean")
     return HostLaunchRunnerFrame(
         request_id=_required_str(msg, "request_id"),
         binding_token=_required_str(msg, "binding_token"),
@@ -2063,6 +2068,7 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
         session_id=_optional_nullable_str(msg, "session_id"),
         harness=_optional_nullable_str(msg, "harness"),
         inference_config=inference_config,
+        workspace_claimable=workspace_claimable,
     )
 
 

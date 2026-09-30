@@ -1485,6 +1485,8 @@ def create_app(
     # CLI launcher and this runner process via env var.
     runner_auth_token = binding_token
 
+    from omnigent.runner.identity import RUNNER_WORKSPACE_CLAIMABLE_ENV_VAR
+
     app = create_runner_app(
         process_manager=pm,
         spec_resolver=spec_resolver,
@@ -1495,6 +1497,7 @@ def create_app(
         mcp_manager=mcp_manager,
         auth_token=runner_auth_token,
         auth_token_factory=auth_token_factory,
+        allow_workspace_claim=os.environ.get(RUNNER_WORKSPACE_CLAIMABLE_ENV_VAR) == "1",
     )
 
     async def _start_pm() -> None:

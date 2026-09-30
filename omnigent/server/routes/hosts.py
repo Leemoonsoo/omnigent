@@ -23,6 +23,7 @@ import secrets
 import weakref
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
@@ -56,6 +57,7 @@ from omnigent.onboarding.harness_install import (
     ui_installable_harnesses,
 )
 from omnigent.runner.identity import token_bound_runner_id
+from omnigent.runner.routing import RunnerRouter
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
@@ -519,6 +521,14 @@ class LaunchRunnerRequest(BaseModel):
     session_id: str
     workspace: str
     git: SessionGitOptions | None = None
+    workspace_claimable: bool = False
+
+
+class ClaimRunnerWorkspaceRequest(BaseModel):
+    """Choose the workspace for a connected, uninitialized prepared runner."""
+
+    session_id: str
+    workspace: str
 
 
 async def _resolve_agent_spec_cwd(
@@ -585,6 +595,7 @@ def create_hosts_router(
     agent_store: AgentStore | None = None,
     agent_cache: AgentCache | None = None,
     feature_flags: FeatureFlags | None = None,
+    runner_router: RunnerRouter | None = None,
 ) -> APIRouter:
     """Build the router for host REST endpoints.
 
@@ -611,6 +622,112 @@ def create_hosts_router(
     """
     flags = feature_flags or resolve_feature_flags()
     router = APIRouter()
+
+    @router.post("/hosts/{host_id}/runners/{runner_id}/claim-workspace")
+    async def claim_runner_workspace(
+        request: Request,
+        host_id: str,
+        runner_id: str,
+        body: ClaimRunnerWorkspaceRequest,
+    ) -> dict[str, str]:
+        """Validate and bind a prepared runner before its session initializes."""
+        if runner_router is None or agent_store is None or agent_cache is None:
+            raise HTTPException(status_code=501, detail="Workspace claiming is unavailable")
+        user_id = require_user(request, auth_provider)
+        target = await asyncio.to_thread(
+            resolve_host_launch,
+            user_id=user_id,
+            host_id=host_id,
+            session_id=body.session_id,
+            host_store=host_store,
+            host_registry=host_registry,
+            conversation_store=conversation_store,
+            permission_store=permission_store,
+        )
+        conv = target.conv
+        if conv.host_id != host_id or conv.runner_id != runner_id or conv.workspace is None:
+            raise HTTPException(status_code=409, detail="Prepared runner binding changed")
+        if conv.git_branch is not None:
+            raise HTTPException(status_code=409, detail="Worktree-bound runner cannot be claimed")
+
+        from omnigent.server.routes._workspace_validation import (
+            WorkspaceValidationError,
+            validate_workspace,
+        )
+
+        spec_cwd = await _resolve_agent_spec_cwd(conv, agent_store, agent_cache)
+        try:
+            workspace = await validate_workspace(
+                host_registry=host_registry,
+                host_id=host_id,
+                workspace=body.workspace,
+                spec_cwd=spec_cwd,
+                host_name_for_errors=target.host.name,
+            )
+        except WorkspaceValidationError as exc:
+            raise HTTPException(status_code=400, detail=exc.message) from exc
+
+        lock = _runner_launch_locks.setdefault(body.session_id, asyncio.Lock())
+        async with lock:
+            current = await asyncio.to_thread(
+                conversation_store.get_conversation, body.session_id
+            )
+            if (
+                current is None
+                or current.host_id != host_id
+                or current.runner_id != runner_id
+                or current.workspace is None
+            ):
+                raise HTTPException(status_code=409, detail="Prepared runner binding changed")
+            old_workspace = current.workspace
+            routed = runner_router.client_for_session_resources(
+                body.session_id, conversation=current
+            )
+            try:
+                response = await routed.client.post(
+                    "/v1/runner/claim-workspace",
+                    json={
+                        "session_id": body.session_id,
+                        "workspace": workspace,
+                        "expected_workspace": old_workspace,
+                    },
+                    timeout=10.0,
+                )
+            except httpx.HTTPError as exc:
+                # The runner may have accepted the claim before its response
+                # was lost. Leave the stored path unchanged so a retry of the
+                # same claim can reconcile the idempotent runner response.
+                raise HTTPException(
+                    status_code=504, detail="Runner claim outcome unknown"
+                ) from exc
+            try:
+                claimed_workspace = response.json().get("workspace")
+            except (ValueError, AttributeError):
+                claimed_workspace = None
+            if response.status_code != 200 or claimed_workspace != workspace:
+                raise HTTPException(
+                    status_code=409, detail="Runner rejected workspace claim"
+                )
+            updated = await asyncio.to_thread(
+                conversation_store.claim_runner_workspace,
+                body.session_id,
+                host_id=host_id,
+                runner_id=runner_id,
+                expected_workspace=old_workspace,
+                workspace=workspace,
+            )
+            if not updated:
+                current = await asyncio.to_thread(
+                    conversation_store.get_conversation, body.session_id
+                )
+                if (
+                    current is None
+                    or current.host_id != host_id
+                    or current.runner_id != runner_id
+                    or current.workspace != workspace
+                ):
+                    raise HTTPException(status_code=409, detail="Prepared runner binding changed")
+        return {"session_id": body.session_id, "runner_id": runner_id, "workspace": workspace}
 
     @router.get("/hosts")
     async def list_hosts(request: Request) -> dict[str, list[dict[str, Any]]]:
@@ -839,6 +956,11 @@ def create_hosts_router(
             )
 
         if body.git is not None:
+            if body.workspace_claimable:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Workspace claiming cannot be combined with a worktree launch",
+                )
             from omnigent.host.git_worktree import WorktreeError, validate_branch_name
 
             try:
@@ -1062,6 +1184,7 @@ def create_hosts_router(
                     if target.conv.inference_snapshot
                     else None
                 ),
+                workspace_claimable=body.workspace_claimable,
             )
         )
         try:

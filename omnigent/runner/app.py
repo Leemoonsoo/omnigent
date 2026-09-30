@@ -2918,6 +2918,7 @@ def create_runner_app(
     mcp_manager: RunnerMcpManager | None = None,
     auth_token: str | None = None,
     auth_token_factory: Callable[[], str | None] | None = None,
+    allow_workspace_claim: bool = False,
 ) -> FastAPI:
     """Build a fresh runner FastAPI app.
 
@@ -2953,10 +2954,13 @@ def create_runner_app(
     :param auth_token_factory: Refresh-capable server bearer factory owned by
         the runner process. Native terminal helpers reuse it instead of
         resolving host credentials again for every terminal launch.
+    :param allow_workspace_claim: Permit the primary session to choose its
+        workspace exactly once, before any session initialization.
     """
     import hmac
 
     app = FastAPI(title="omnigent-runner")
+    _workspace_claimed = not allow_workspace_claim
 
     from omnigent.runner.logging_context import RunnerLogContextMiddleware
 
@@ -3917,6 +3921,79 @@ def create_runner_app(
         _session_fs_registries[session_id] = registry
         return registry
 
+    @app.post("/v1/runner/claim-workspace")
+    async def claim_runner_workspace(request: Request) -> JSONResponse:
+        """Bind a prepared runner to its validated workspace before session init."""
+        nonlocal runner_workspace, filesystem_registry, _workspace_claimed
+
+        if not allow_workspace_claim:
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
+        body = await request.json()
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={"detail": "Expected an object"})
+        session_id = body.get("session_id")
+        workspace = body.get("workspace")
+        expected_workspace = body.get("expected_workspace")
+        if not isinstance(session_id, str) or not isinstance(workspace, str):
+            return JSONResponse(status_code=400, content={"detail": "Invalid claim"})
+        if expected_workspace is not None and not isinstance(expected_workspace, str):
+            return JSONResponse(status_code=400, content={"detail": "Invalid claim"})
+        if session_id != runner_primary_session_id():
+            return JSONResponse(status_code=403, content={"detail": "Wrong session"})
+        candidate = Path(workspace).expanduser()
+        if not candidate.is_absolute() or not candidate.is_dir():
+            return JSONResponse(status_code=400, content={"detail": "Workspace must exist"})
+        target = candidate.resolve()
+        if _workspace_claimed:
+            if runner_workspace == target:
+                return JSONResponse(content={"workspace": str(target)})
+            return JSONResponse(status_code=409, content={"detail": "Runner already claimed"})
+        if _session_start_cache or _session_init_tasks:
+            return JSONResponse(status_code=409, content={"detail": "Runner already initialized"})
+        old_workspace = runner_workspace.resolve() if runner_workspace is not None else None
+        if expected_workspace is not None and (
+            old_workspace is None or str(old_workspace) != expected_workspace
+        ):
+            return JSONResponse(status_code=409, content={"detail": "Workspace changed"})
+        if _session_fs_registries or _search_fs_registries:
+            return JSONResponse(
+                status_code=409, content={"detail": "Filesystem already initialized"}
+            )
+
+        replacement = create_filesystem_registry(watch_path=target)
+        replacement.start()
+        old_cwd = Path.cwd()
+        try:
+            if mcp_manager is not None:
+                mcp_manager.bind_stdio_cwd(target)
+            os.chdir(target)
+        except BaseException:
+            replacement.stop()
+            if mcp_manager is not None:
+                mcp_manager.bind_stdio_cwd(old_workspace or old_cwd)
+            raise
+
+        if filesystem_registry is not None:
+            filesystem_registry.stop()
+        runner_workspace = target
+        resource_registry._runner_workspace = target
+        filesystem_registry = replacement
+        app.state.filesystem_registry = replacement
+        from omnigent.runner.identity import RUNNER_WORKSPACE_ENV_VAR
+
+        os.environ[RUNNER_WORKSPACE_ENV_VAR] = str(target)
+        import sys
+
+        for old_path in {str(old_cwd), str(old_workspace) if old_workspace else ""}:
+            if old_path in sys.path:
+                sys.path.remove(old_path)
+        if str(target) not in sys.path:
+            sys.path.insert(0, str(target))
+        _session_workspace_cache.pop(session_id, None)
+        _session_snapshot_cache.pop(session_id, None)
+        _workspace_claimed = True
+        return JSONResponse(content={"workspace": str(target)})
+
     from omnigent.entities.environment_filesystem import (
         FilesystemEntry,
         ResourceError,
@@ -4099,6 +4176,11 @@ def create_runner_app(
         from omnigent.runner.session_init_protocol import RunnerInferenceConfigMismatch
 
         raw_id = body.get("session_id")
+        if not _workspace_claimed:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "workspace_unclaimed", "detail": "Claim workspace first"},
+            )
         set_current_session_id(raw_id if isinstance(raw_id, str) else None)
         _logger.info(
             "Runner session initialization started",

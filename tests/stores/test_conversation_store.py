@@ -3398,6 +3398,35 @@ def test_set_host_id_with_workspace_satisfies_constraint(
     assert updated.workspace == "/Users/corey/projects/myapp"
 
 
+def test_claim_runner_workspace_requires_unchanged_binding(
+    conversation_store: SqlAlchemyConversationStore,
+    db_uri: str,
+) -> None:
+    host_id = "8f48061706cb92d5e7cd7c4aadc56ef0"
+    runner_id = "11111111111111111111111111111111"
+    _register_host(db_uri, host_id)
+    conv = conversation_store.create_conversation(host_id=host_id, workspace="/staging")
+    assert conversation_store.set_runner_id(conv.id, runner_id)
+
+    def claim(**overrides: str) -> bool:
+        return conversation_store.claim_runner_workspace(
+            conv.id,
+            host_id=overrides.get("host_id", host_id),
+            runner_id=overrides.get("runner_id", runner_id),
+            expected_workspace=overrides.get("expected_workspace", "/staging"),
+            workspace="/project",
+        )
+    assert not claim(host_id="22222222222222222222222222222222")
+    assert not claim(runner_id="33333333333333333333333333333333")
+    assert not claim(expected_workspace="/other")
+    assert claim()
+    assert not claim()
+    updated = conversation_store.get_conversation(conv.id)
+    assert updated is not None
+    assert updated.workspace == "/project"
+    assert updated.updated_at == conv.updated_at
+
+
 @pytest.mark.parametrize(
     ("move_host", "workspace", "git_branch", "expected_branch"),
     [

@@ -1578,6 +1578,24 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def claim_runner_workspace(
+        self,
+        conversation_id: str,
+        *,
+        host_id: str,
+        runner_id: str,
+        expected_workspace: str,
+        workspace: str,
+    ) -> bool:
+        """Set a prepared runner's workspace if its binding has not changed.
+
+        Returns ``False`` when the host, runner, workspace, or worktree
+        binding no longer matches. This updates live metadata without changing
+        conversation activity ordering.
+        """
+        ...
+
+    @abstractmethod
     def set_external_session_id(
         self,
         conversation_id: str,

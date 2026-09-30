@@ -22,6 +22,8 @@ RUNNER_HOST_OWNS_GLOBAL_CLEANUP_ENV_VAR = "OMNIGENT_RUNNER_HOST_OWNS_GLOBAL_CLEA
 # imports working there and let callers skip adopt signaling.
 RUNNER_ADOPT_SIGNAL: signal.Signals | None = getattr(signal, "SIGUSR1", None)
 RUNNER_WORKSPACE_ENV_VAR = "OMNIGENT_RUNNER_WORKSPACE"
+# Only a prepared, uninitialized host runner may claim a different workspace.
+RUNNER_WORKSPACE_CLAIMABLE_ENV_VAR = "OMNIGENT_RUNNER_WORKSPACE_CLAIMABLE"
 RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR = "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN"
 # A host-launched runner uses this bearer for its initial server connection,
 # then falls back to its own refreshable auth when the bearer is rejected.

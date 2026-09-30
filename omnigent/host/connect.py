@@ -160,6 +160,7 @@ from omnigent.runner.identity import (
     RUNNER_PARENT_PID_ENV_VAR,
     RUNNER_SLICE_KEY_ENV_VAR,
     RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+    RUNNER_WORKSPACE_CLAIMABLE_ENV_VAR,
     RUNNER_WORKSPACE_ENV_VAR,
     token_bound_runner_id,
 )
@@ -1861,6 +1862,9 @@ class HostProcess:
             harness_tmp_parent=self._harness_tmp_parent,
             inference_config=frame.inference_config,
         )
+        env.pop(RUNNER_WORKSPACE_CLAIMABLE_ENV_VAR, None)
+        if frame.workspace_claimable:
+            env[RUNNER_WORKSPACE_CLAIMABLE_ENV_VAR] = "1"
         if frame.inference_config is not None:
             try:
                 inference_path = await asyncio.to_thread(

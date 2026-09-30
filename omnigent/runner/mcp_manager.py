@@ -271,6 +271,12 @@ class RunnerMcpManager:
         self._stdio_cwd = stdio_cwd
         self._server_client = server_client
 
+    def bind_stdio_cwd(self, cwd: Path) -> None:
+        """Set the project cwd before this runner has opened any MCP connection."""
+        if self._specs or self._servers:
+            raise RuntimeError("Cannot change MCP cwd after a session has initialized")
+        self._stdio_cwd = cwd
+
     def _build_elicitation_callback(
         self,
     ) -> Callable[[str, ElicitRequestParams], Awaitable[ElicitResult]]:

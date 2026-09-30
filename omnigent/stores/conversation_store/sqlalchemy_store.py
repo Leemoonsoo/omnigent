@@ -3932,6 +3932,36 @@ class SqlAlchemyConversationStore(ConversationStore):
             labels = _fetch_labels(ap_sess, conversation_id)
         return _to_conversation(ap_row, meta, labels)
 
+    def claim_runner_workspace(
+        self,
+        conversation_id: str,
+        *,
+        host_id: str,
+        runner_id: str,
+        expected_workspace: str,
+        workspace: str,
+    ) -> bool:
+        """Atomically bind a prepared runner to its claimed workspace."""
+        from sqlalchemy import update
+
+        def write(session: Session) -> bool:
+            stmt = (
+                update(SqlConversationMetadata)
+                .where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id == conversation_id,
+                    SqlConversationMetadata.host_id == host_id,
+                    SqlConversationMetadata.runner_id == runner_id,
+                    SqlConversationMetadata.workspace == expected_workspace,
+                    SqlConversationMetadata.git_branch.is_(None),
+                )
+                .values(workspace=workspace)
+            )
+            result = cast(_RowCountResult, session.execute(stmt))
+            return result.rowcount == 1
+
+        return run_write_transaction(self._session_immediate, "claim_runner_workspace", write)
+
     def set_external_session_id(
         self,
         conversation_id: str,

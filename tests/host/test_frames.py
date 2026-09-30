@@ -736,6 +736,19 @@ def test_launch_runner_frame_round_trip() -> None:
     assert decoded.session_id == "conv_abc123"
 
 
+def test_launch_runner_frame_workspace_claim_round_trip() -> None:
+    original = HostLaunchRunnerFrame(
+        request_id="req_claim",
+        binding_token="secret_token_xyz",
+        workspace="/staging",
+        session_id="conv_abc123",
+        workspace_claimable=True,
+    )
+    decoded = decode_host_frame(encode_host_frame(original))
+    assert isinstance(decoded, HostLaunchRunnerFrame)
+    assert decoded.workspace_claimable is True
+
+
 def test_launch_runner_preserves_the_full_saved_inference_profile() -> None:
     config = {
         "providers": {
@@ -1067,6 +1080,7 @@ def test_launch_runner_frame_legacy_payload_decodes_harness_none() -> None:
     assert isinstance(decoded, HostLaunchRunnerFrame)
     assert decoded.session_id is None
     assert decoded.harness is None
+    assert decoded.workspace_claimable is False
 
 
 def test_launch_runner_result_frame_error_code_round_trip() -> None:
