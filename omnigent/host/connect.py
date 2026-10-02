@@ -58,6 +58,7 @@ from omnigent.harness_aliases import canonicalize_harness, is_claude_sdk_harness
 from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailability
 from omnigent.host import HOST_FATAL_EXIT_CODE
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
+from omnigent.host.extension import HostExtension, load_host_extension
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_CAPABILITIES,
@@ -552,6 +553,7 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # cli._ensure_host_daemon), never to a (possibly hosted) runner.
         "OMNIGENT_CONFIG_HOME",
         "OMNIGENT_DATA_DIR",
+        "OMNIGENT_HARNESS_TMP_PARENT",
         # Auth provider selection. The env-unset default was flipped
         # to "accounts", so the whole CLI → daemon → local-server chain has
         # to agree on the mode. Without this, the daemon strips
@@ -1088,6 +1090,7 @@ class HostProcess:
         server_url: str,
         lifecycle_lock: DaemonLifecycleLock | None = None,
         interactive_shells: list[str] | None = None,
+        host_extension: HostExtension | None = None,
     ) -> None:
         """Initialize the host process.
 
@@ -1098,8 +1101,10 @@ class HostProcess:
             and self-terminates once the record is deleted or reassigned.
         :param interactive_shells: Optional shell inventory override for tests.
             By default the host discovers its installed shells once at startup.
+        :param host_extension: Optional host-local background service.
         """
         self._identity = identity
+        self._host_extension = host_extension
         self._server_url = server_url.rstrip("/")
         # One reader per workspace, so its registry keeps state between
         # requests (the changed-files snapshot search reuses for untracked
@@ -1267,6 +1272,27 @@ class HostProcess:
         self._lifecycle_task: asyncio.Task[None] | None = None
         self._lifecycle_lost = asyncio.Event()
 
+    async def _start_host_extension(self) -> None:
+        extension = self._host_extension
+        if extension is None:
+            return
+        try:
+            await extension.start()
+        except Exception:
+            _logger.exception("Optional host extension could not start")
+            await self._stop_host_extension()
+
+    async def _stop_host_extension(self) -> None:
+        extension = self._host_extension
+        if extension is None:
+            return
+        try:
+            await extension.stop()
+        except Exception:
+            _logger.exception("Optional host extension could not stop cleanly")
+        finally:
+            self._host_extension = None
+
     def _tracked_runner_pids(self) -> set[int]:
         """Return child PIDs whose exit status still belongs to a process handle.
 
@@ -1285,6 +1311,8 @@ class HostProcess:
         zygote_pid = self._zygote.unreaped_pid if self._zygote is not None else None
         if zygote_pid is not None:
             pids.add(zygote_pid)
+        if self._host_extension is not None:
+            pids.update(self._host_extension.owned_pids)
         return pids
 
     @staticmethod
@@ -1330,7 +1358,13 @@ class HostProcess:
             return 0
         if child_pids is None:
             child_pids = self._orphan_child_pids()
-        tracked = self._tracked_runner_pids()
+        try:
+            tracked = self._tracked_runner_pids()
+        except Exception:
+            # An extension that cannot report its children must not let the
+            # orphan reaper consume exit statuses that it still owns.
+            _logger.exception("Could not identify host-owned child processes")
+            return 0
         reaped = 0
         for pid in child_pids:
             if pid in tracked:
@@ -3898,6 +3932,7 @@ class HostProcess:
             )
         backoff = _RECONNECT_BASE_S
         try:
+            await self._start_host_extension()
             # Warm the pre-launch model listings once for the host lifetime so a
             # first picker or launch can use the shared store instead of waiting
             # on a harness probe. This is independent of any one server tunnel:
@@ -4125,6 +4160,7 @@ class HostProcess:
             # runners via Popen, so any of their still-orphaned tool
             # grandchildren are now reapable and no tracked pid can be stolen.
             self._reap_orphans_once()
+            await self._stop_host_extension()
             # Stop the runner zygote last: its forked children were just
             # terminated above, and closing its control socket lets it exit.
             if self._zygote is not None:
@@ -4935,6 +4971,7 @@ def run_host_process(
         server_url,
         lifecycle_lock=lifecycle_lock,
         interactive_shells=interactive_shells,
+        host_extension=load_host_extension(),
     )
     try:
         asyncio.run(host.run())
