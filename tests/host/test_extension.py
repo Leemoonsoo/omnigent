@@ -153,6 +153,63 @@ async def test_host_connects_after_extension_start_failure(
 
 
 @pytest.mark.asyncio
+async def test_host_connects_after_extension_cancelled_start(
+    monkeypatch: pytest.MonkeyPatch, isolated_host_run: None
+) -> None:
+    class CancelledStartExtension(ExampleExtension):
+        async def start(self) -> None:
+            self.start_calls += 1
+            self.started = True
+            raise asyncio.CancelledError
+
+    extension = CancelledStartExtension()
+    host = _host(extension)
+
+    await _run_until_connect(host, monkeypatch)
+
+    assert extension.start_calls == 1
+    assert extension.stop_calls == 1
+    assert host._host_extension is None
+
+
+@pytest.mark.asyncio
+async def test_cancelling_host_during_extension_start_still_stops_extension(
+    monkeypatch: pytest.MonkeyPatch, isolated_host_run: None
+) -> None:
+    monkeypatch.setattr("omnigent.host.connect._HOST_EXTENSION_START_TIMEOUT_S", 30.0)
+    start_entered = asyncio.Event()
+    connected = False
+
+    class WaitingStartExtension(ExampleExtension):
+        async def start(self) -> None:
+            self.start_calls += 1
+            start_entered.set()
+            await asyncio.Event().wait()
+
+    async def connect() -> None:
+        nonlocal connected
+        connected = True
+
+    extension = WaitingStartExtension()
+    host = _host(extension)
+    monkeypatch.setattr(host, "_connect_and_serve", connect)
+    run_task = asyncio.create_task(host.run())
+    try:
+        await asyncio.wait_for(start_entered.wait(), timeout=1.0)
+        run_task.cancel()
+        await asyncio.wait_for(run_task, timeout=1.0)
+    finally:
+        if not run_task.done():
+            run_task.cancel()
+            await asyncio.wait_for(run_task, timeout=1.0)
+
+    assert not connected
+    assert extension.start_calls == 1
+    assert extension.stop_calls == 1
+    assert host._host_extension is None
+
+
+@pytest.mark.asyncio
 async def test_host_connects_within_start_budget_when_failed_start_cleanup_hangs(
     monkeypatch: pytest.MonkeyPatch, isolated_host_run: None
 ) -> None:
@@ -247,6 +304,8 @@ async def test_timed_out_start_retains_child_ownership_until_callback_finishes(
         await asyncio.Event().wait()
 
     extension = SlowStartExtension()
+    owned_pid = 424242
+    extension.pids.add(owned_pid)
     host = _host(extension)
     monkeypatch.setattr(host, "_connect_and_serve", connect)
     run_task = asyncio.create_task(host.run())
@@ -256,11 +315,13 @@ async def test_timed_out_start_retains_child_ownership_until_callback_finishes(
         start_task = host._host_extension_start_task
         assert start_task is not None and not start_task.done()
         assert host._host_extension is extension
+        assert owned_pid in host._tracked_runner_pids()
 
         run_task.cancel()
         await asyncio.wait_for(run_task, timeout=1.0)
         assert extension.stop_calls == 1
         assert host._host_extension is extension
+        assert owned_pid in host._tracked_runner_pids()
     finally:
         release_start.set()
         if not run_task.done():
@@ -270,6 +331,7 @@ async def test_timed_out_start_retains_child_ownership_until_callback_finishes(
             await asyncio.wait_for(start_task, timeout=1.0)
         await asyncio.sleep(0)
     assert host._host_extension is None
+    assert owned_pid not in host._tracked_runner_pids()
 
 
 @pytest.mark.asyncio

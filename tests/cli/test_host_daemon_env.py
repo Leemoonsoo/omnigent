@@ -40,6 +40,7 @@ def test_host_extension_and_harness_temp_root_cross_daemon_boundary(
 ) -> None:
     monkeypatch.setenv("OMNIGENT_HOST_EXTENSION", "example")
     monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", "/tmp/example-harness")
+    monkeypatch.delenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, raising=False)
     monkeypatch.setattr("omnigent.onboarding.provider_config.load_config", dict)
     daemon_env = _build_host_daemon_env(server_url=server_url)
     assert daemon_env["OMNIGENT_HOST_EXTENSION"] == "example"

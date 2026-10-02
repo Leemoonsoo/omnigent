@@ -2,7 +2,9 @@
 
 An extension is selected by ``OMNIGENT_HOST_EXTENSION`` and registered in the
 ``omnigent.host_extension`` entry-point group. The host starts it once, keeps
-its child processes out of orphan cleanup, and stops it on daemon shutdown.
+its child processes out of orphan cleanup, and stops it after a failed start or
+on graceful in-process shutdown. SIGTERM, including that sent by
+``omnigent host stop``, terminates the process without invoking ``stop()``.
 Without a selected extension the host follows its normal lifecycle.
 
 Entry-point discovery, import, and construction run synchronously before the
@@ -44,7 +46,7 @@ class HostExtension(abc.ABC):
 
     @abc.abstractmethod
     async def stop(self) -> None:
-        """Stop accepting work and release idle children and resources."""
+        """Release resources after a failed start or graceful host shutdown."""
 
 
 def load_host_extension() -> HostExtension | None:

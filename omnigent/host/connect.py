@@ -1304,6 +1304,9 @@ class HostProcess:
         self._host_extension_start_task = None
         try:
             task.result()
+        except asyncio.CancelledError:
+            _logger.warning("Optional host extension cancelled its own start")
+            self._schedule_host_extension_cleanup()
         except Exception:
             _logger.exception("Optional host extension could not start")
             self._schedule_host_extension_cleanup()
