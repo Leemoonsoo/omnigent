@@ -53,6 +53,49 @@ def _host(extension: HostExtension) -> HostProcess:
     )
 
 
+@pytest.mark.parametrize("fail_prepare", [False, True])
+def test_runner_launch_preparation_precedes_spawn_and_cannot_block_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fail_prepare: bool
+) -> None:
+    calls: list[object] = []
+
+    class PreparingExtension(ExampleExtension):
+        def before_runner_spawn(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+            if fail_prepare:
+                raise RuntimeError("synthetic preparation failure")
+
+    host = _host(PreparingExtension())
+    result = (object(), tmp_path / "runner.log")
+
+    def spawn(_env: dict[str, str], _slug: str, _workspace: Path) -> object:
+        calls.append("spawn")
+        return result
+
+    monkeypatch.setattr(host, "_spawn_runner_proc", spawn)
+    assert (
+        host._spawn_runner_with_extension(
+            {},
+            "synthetic-",
+            tmp_path,
+            session_id="conv_synthetic",
+            harness="codex-native",
+            runner_id="runner_synthetic",
+        )
+        == result
+    )
+    assert calls == [
+        {
+            "session_id": "conv_synthetic",
+            "harness": "codex-native",
+            "workspace": tmp_path,
+            "runner_id": "runner_synthetic",
+            "server_url": "http://localhost:8000",
+        },
+        "spawn",
+    ]
+
+
 @pytest.fixture
 def isolated_host_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run the lifecycle with no real runner, maintenance, or server I/O."""

@@ -2033,7 +2033,15 @@ class HostProcess:
         # the spawn land and then tear that runner down.
         with self._host_subprocess_op():
             spawn = asyncio.ensure_future(
-                asyncio.to_thread(self._spawn_runner_proc, env, _session_slug, workspace)
+                asyncio.to_thread(
+                    self._spawn_runner_with_extension,
+                    env,
+                    _session_slug,
+                    workspace,
+                    session_id=frame.session_id,
+                    harness=frame.harness,
+                    runner_id=runner_id,
+                )
             )
             try:
                 proc, log_path = await asyncio.shield(spawn)
@@ -2154,6 +2162,31 @@ class HostProcess:
             self._zygote_disabled = True
             return None
         return zygote
+
+    def _spawn_runner_with_extension(
+        self,
+        env: dict[str, str],
+        session_slug: str,
+        workspace: Path,
+        *,
+        session_id: str | None,
+        harness: str | None,
+        runner_id: str,
+    ) -> tuple[subprocess.Popen[bytes] | ZygoteRunnerProc, Path]:
+        """Prepare optional host-local state without delaying the event loop."""
+        extension = self._host_extension
+        if extension is not None:
+            try:
+                extension.before_runner_spawn(
+                    session_id=session_id,
+                    harness=harness,
+                    workspace=workspace,
+                    runner_id=runner_id,
+                    server_url=self._server_url,
+                )
+            except Exception:
+                _logger.exception("Optional host extension could not prepare runner launch")
+        return self._spawn_runner_proc(env, session_slug, workspace)
 
     def _spawn_runner_proc(
         self,

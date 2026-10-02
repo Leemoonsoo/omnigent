@@ -18,6 +18,7 @@ import abc
 import importlib.metadata
 import logging
 import os
+from pathlib import Path
 
 HOST_EXTENSION_ENV_VAR = "OMNIGENT_HOST_EXTENSION"
 HOST_EXTENSION_ENTRY_POINT_GROUP = "omnigent.host_extension"
@@ -47,6 +48,23 @@ class HostExtension(abc.ABC):
     @abc.abstractmethod
     async def stop(self) -> None:
         """Release resources after a failed start or graceful host shutdown."""
+
+    def before_runner_spawn(
+        self,
+        *,
+        session_id: str | None,
+        harness: str | None,
+        workspace: Path,
+        runner_id: str,
+        server_url: str,
+    ) -> None:
+        """Optionally prepare a validated launch before its runner starts.
+
+        Called on the runner-spawn worker thread. Implementations must return
+        promptly and avoid network work. Exceptions are logged and ignored so
+        optional preparation cannot prevent a normal runner launch.
+        """
+        del session_id, harness, workspace, runner_id, server_url
 
 
 def load_host_extension() -> HostExtension | None:
