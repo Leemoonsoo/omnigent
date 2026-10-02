@@ -4,6 +4,10 @@ An extension is selected by ``OMNIGENT_HOST_EXTENSION`` and registered in the
 ``omnigent.host_extension`` entry-point group. The host starts it once, keeps
 its child processes out of orphan cleanup, and stops it on daemon shutdown.
 Without a selected extension the host follows its normal lifecycle.
+
+Entry-point discovery, import, and construction run synchronously before the
+host event loop starts. Extension imports and constructors must be lightweight;
+the startup budget applies to ``start()``, not package loading.
 """
 
 from __future__ import annotations

@@ -1306,7 +1306,14 @@ class HostProcess:
             task.result()
         except Exception:
             _logger.exception("Optional host extension could not start")
-            await self._stop_host_extension()
+            self._schedule_host_extension_cleanup()
+
+    def _schedule_host_extension_cleanup(self) -> None:
+        if self._host_extension is None or self._host_extension_cleanup_task is not None:
+            return
+        cleanup = asyncio.create_task(self._stop_host_extension(), name="host-extension-cleanup")
+        self._host_extension_cleanup_task = cleanup
+        cleanup.add_done_callback(self._finish_host_extension_cleanup)
 
     def _finish_host_extension_start(self, task: asyncio.Task[None]) -> None:
         """Clean up a start that finished after its caller stopped waiting."""
@@ -1322,11 +1329,7 @@ class HostProcess:
         if self._host_extension is None:
             return
         if not self._host_extension_stop_called:
-            cleanup = asyncio.create_task(
-                self._stop_host_extension(), name="host-extension-cleanup"
-            )
-            self._host_extension_cleanup_task = cleanup
-            cleanup.add_done_callback(self._finish_host_extension_cleanup)
+            self._schedule_host_extension_cleanup()
         elif self._host_extension_stop_task is None:
             self._host_extension = None
 

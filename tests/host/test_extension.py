@@ -139,18 +139,6 @@ def test_selected_host_extension_rejects_invalid_entry_point(
 
 
 @pytest.mark.asyncio
-async def test_failed_extension_start_is_cleaned_up_without_blocking_host() -> None:
-    extension = ExampleExtension(fail_start=True)
-    host = _host(extension)
-
-    await host._start_host_extension()
-
-    assert extension.started
-    assert extension.stopped
-    assert host._host_extension is None
-
-
-@pytest.mark.asyncio
 async def test_host_connects_after_extension_start_failure(
     monkeypatch: pytest.MonkeyPatch, isolated_host_run: None
 ) -> None:
@@ -161,6 +149,43 @@ async def test_host_connects_after_extension_start_failure(
 
     assert extension.start_calls == 1
     assert extension.stop_calls == 1
+    assert host._host_extension is None
+
+
+@pytest.mark.asyncio
+async def test_host_connects_within_start_budget_when_failed_start_cleanup_hangs(
+    monkeypatch: pytest.MonkeyPatch, isolated_host_run: None
+) -> None:
+    release_stop = asyncio.Event()
+    stop_started = asyncio.Event()
+    connected = asyncio.Event()
+
+    class SlowCleanupExtension(ExampleExtension):
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            stop_started.set()
+            await release_stop.wait()
+            self.stopped = True
+
+    async def connect() -> None:
+        connected.set()
+        await asyncio.Event().wait()
+
+    extension = SlowCleanupExtension(fail_start=True)
+    host = _host(extension)
+    monkeypatch.setattr(host, "_connect_and_serve", connect)
+    run_task = asyncio.create_task(host.run())
+    try:
+        await asyncio.wait_for(connected.wait(), timeout=1.0)
+        await asyncio.wait_for(stop_started.wait(), timeout=1.0)
+        assert not extension.stopped
+        assert extension.stop_calls == 1
+        assert host._host_extension is extension
+    finally:
+        release_stop.set()
+        run_task.cancel()
+        await asyncio.wait_for(run_task, timeout=1.0)
+    assert extension.stopped
     assert host._host_extension is None
 
 
