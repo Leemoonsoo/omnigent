@@ -3977,7 +3977,8 @@ class HostProcess:
 
         Connects to the server, sends hello, and enters the
         receive loop. Reconnects with exponential backoff on
-        disconnect. Ctrl-C / SIGTERM exit cleanly.
+        disconnect. Ctrl-C and task cancellation enter the graceful cleanup
+        path; SIGTERM terminates the process without running that path.
 
         :returns: None. Runs until the process is terminated.
         :raises HostConnectError: On a permanent failure — auth /
