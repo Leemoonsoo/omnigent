@@ -8,13 +8,16 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from omnigent.host.connect import HostProcess, run_host_process
 from omnigent.host.extension import HostExtension, load_host_extension
+from omnigent.host.frames import HostLaunchRunnerFrame
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
+from omnigent.runner.identity import token_bound_runner_id
 
 
 class ExampleExtension(HostExtension):
@@ -53,8 +56,9 @@ def _host(extension: HostExtension) -> HostProcess:
     )
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fail_prepare", [False, True])
-def test_runner_launch_preparation_precedes_spawn_and_cannot_block_it(
+async def test_runner_launch_preparation_precedes_spawn_and_cannot_block_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fail_prepare: bool
 ) -> None:
     calls: list[object] = []
@@ -66,30 +70,34 @@ def test_runner_launch_preparation_precedes_spawn_and_cannot_block_it(
                 raise RuntimeError("synthetic preparation failure")
 
     host = _host(PreparingExtension())
-    result = (object(), tmp_path / "runner.log")
+    proc = SimpleNamespace(pid=1234, poll=lambda: None)
+    frame = HostLaunchRunnerFrame(
+        request_id="request_synthetic",
+        binding_token="binding_synthetic",
+        workspace=str(tmp_path),
+        session_id="conv_synthetic",
+        harness="codex-native",
+    )
 
     def spawn(_env: dict[str, str], _slug: str, _workspace: Path) -> object:
         calls.append("spawn")
-        return result
+        return proc, tmp_path / "runner.log"
 
+    monkeypatch.setattr("omnigent.host.connect.harness_is_configured", lambda _harness: True)
+    monkeypatch.setattr(host, "_current_auth_token", lambda **_kwargs: None)
     monkeypatch.setattr(host, "_spawn_runner_proc", spawn)
-    assert (
-        host._spawn_runner_with_extension(
-            {},
-            "synthetic-",
-            tmp_path,
-            session_id="conv_synthetic",
-            harness="codex-native",
-            runner_id="runner_synthetic",
-        )
-        == result
-    )
+    monkeypatch.setattr(host, "_watch_runner", AsyncMock())
+    monkeypatch.setattr(host, "_watch_runner_connect", AsyncMock())
+
+    result = await host._handle_launch(frame)
+    assert result.status == "launched"
+    assert result.runner_id == token_bound_runner_id(frame.binding_token)
     assert calls == [
         {
             "session_id": "conv_synthetic",
             "harness": "codex-native",
             "workspace": tmp_path,
-            "runner_id": "runner_synthetic",
+            "runner_id": result.runner_id,
             "server_url": "http://localhost:8000",
         },
         "spawn",

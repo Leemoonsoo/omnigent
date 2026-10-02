@@ -25,6 +25,12 @@ synchronously before the host event loop; keep imports and constructors light.
 `owned_pids` property. Return the PIDs of direct children whose exit status
 the extension will collect. The host excludes those PIDs from its orphan reaper.
 
+The optional synchronous `before_runner_spawn()` callback receives the
+server-provided session ID and canonical harness (if present), the validated
+workspace, token-bound runner ID, and server URL.
+It runs on the runner-spawn worker thread immediately before the runner starts.
+Keep it short and local; exceptions are logged and the runner still starts.
+
 The host allows one second for `start()` before connecting and five seconds for
 `stop()` during graceful in-process shutdown. It logs and cancels callbacks
 that exceed those budgets. Callbacks must keep the event loop responsive and
