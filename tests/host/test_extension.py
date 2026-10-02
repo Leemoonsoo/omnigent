@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -11,26 +13,34 @@ import pytest
 from omnigent.host.connect import HostProcess
 from omnigent.host.extension import HostExtension, load_host_extension
 from omnigent.host.identity import HostIdentity
+from omnigent.host.maintenance import HostMaintenanceJanitor
 
 
 class ExampleExtension(HostExtension):
-    def __init__(self, *, fail_start: bool = False) -> None:
+    def __init__(self, *, fail_start: bool = False, fail_stop: bool = False) -> None:
         self.pids: set[int] = set()
         self.fail_start = fail_start
+        self.fail_stop = fail_stop
         self.started = False
         self.stopped = False
+        self.start_calls = 0
+        self.stop_calls = 0
 
     @property
     def owned_pids(self) -> set[int]:
         return set(self.pids)
 
     async def start(self) -> None:
+        self.start_calls += 1
         self.started = True
         if self.fail_start:
             raise RuntimeError("synthetic startup failure")
 
     async def stop(self) -> None:
+        self.stop_calls += 1
         self.stopped = True
+        if self.fail_stop:
+            raise RuntimeError("synthetic shutdown failure")
 
 
 def _host(extension: HostExtension) -> HostProcess:
@@ -40,6 +50,37 @@ def _host(extension: HostExtension) -> HostProcess:
         interactive_shells=["bash"],
         host_extension=extension,
     )
+
+
+@pytest.fixture
+def isolated_host_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the lifecycle with no real runner, maintenance, or server I/O."""
+    monkeypatch.setenv("OMNIGENT_RUNNER_ZYGOTE", "0")
+
+    class NoOpJanitor:
+        def start(self) -> None:
+            pass
+
+        async def shutdown(self) -> None:
+            pass
+
+    monkeypatch.setattr(HostMaintenanceJanitor, "for_host", lambda **_kwargs: NoOpJanitor())
+    monkeypatch.setattr(HostProcess, "_ensure_model_options_prewarm", lambda _self: None)
+    monkeypatch.setattr(HostProcess, "_start_capability_discovery", lambda _self: None)
+    monkeypatch.setattr(HostProcess, "_reap_orphans_once", lambda _self, _pids=None: 0)
+
+
+async def _run_until_connect(host: HostProcess, monkeypatch: pytest.MonkeyPatch) -> None:
+    connected = False
+
+    async def connect() -> None:
+        nonlocal connected
+        connected = True
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(host, "_connect_and_serve", connect)
+    await host.run()
+    assert connected
 
 
 def test_host_extension_requires_explicit_selection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,6 +101,43 @@ def test_selected_installed_host_extension_loads(monkeypatch: pytest.MonkeyPatch
     assert isinstance(load_host_extension(), ExampleExtension)
 
 
+@pytest.mark.parametrize("count", [0, 2])
+def test_selected_host_extension_requires_one_match(
+    monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    monkeypatch.setenv("OMNIGENT_HOST_EXTENSION", "example")
+    entry = SimpleNamespace(name="example", load=lambda: ExampleExtension)
+    monkeypatch.setattr(
+        "omnigent.host.extension.importlib.metadata.entry_points",
+        lambda **_kwargs: [entry] * count,
+    )
+    assert load_host_extension() is None
+
+
+@pytest.mark.parametrize("failure", ["load", "construct", "type"])
+def test_selected_host_extension_rejects_invalid_entry_point(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setenv("OMNIGENT_HOST_EXTENSION", "example")
+
+    def load() -> object:
+        if failure == "load":
+            raise RuntimeError("synthetic load failure")
+        if failure == "construct":
+
+            def fail_construct() -> None:
+                raise RuntimeError("synthetic construction failure")
+
+            return fail_construct
+        return lambda: object()
+
+    monkeypatch.setattr(
+        "omnigent.host.extension.importlib.metadata.entry_points",
+        lambda **_kwargs: [SimpleNamespace(name="example", load=load)],
+    )
+    assert load_host_extension() is None
+
+
 @pytest.mark.asyncio
 async def test_failed_extension_start_is_cleaned_up_without_blocking_host() -> None:
     extension = ExampleExtension(fail_start=True)
@@ -72,10 +150,164 @@ async def test_failed_extension_start_is_cleaned_up_without_blocking_host() -> N
     assert host._host_extension is None
 
 
+@pytest.mark.asyncio
+async def test_host_connects_after_extension_start_failure(
+    monkeypatch: pytest.MonkeyPatch, isolated_host_run: None
+) -> None:
+    extension = ExampleExtension(fail_start=True)
+    host = _host(extension)
+
+    await _run_until_connect(host, monkeypatch)
+
+    assert extension.start_calls == 1
+    assert extension.stop_calls == 1
+    assert host._host_extension is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_stop", [False, True])
+async def test_host_shutdown_stops_extension_once(
+    monkeypatch: pytest.MonkeyPatch, isolated_host_run: None, fail_stop: bool
+) -> None:
+    extension = ExampleExtension(fail_stop=fail_stop)
+    host = _host(extension)
+
+    await _run_until_connect(host, monkeypatch)
+
+    assert extension.start_calls == 1
+    assert extension.stop_calls == 1
+    assert host._host_extension is None
+
+
+@pytest.mark.asyncio
+async def test_slow_extension_start_does_not_block_host_connection(
+    monkeypatch: pytest.MonkeyPatch, isolated_host_run: None
+) -> None:
+    monkeypatch.setattr("omnigent.host.connect._HOST_EXTENSION_START_TIMEOUT_S", 0.01)
+    started = asyncio.Event()
+
+    class SlowStartExtension(ExampleExtension):
+        async def start(self) -> None:
+            self.start_calls += 1
+            started.set()
+            await asyncio.Event().wait()
+
+    extension = SlowStartExtension()
+    host = _host(extension)
+
+    await asyncio.wait_for(_run_until_connect(host, monkeypatch), timeout=1.0)
+
+    assert started.is_set()
+    assert extension.stop_calls == 1
+    assert host._host_extension is None
+
+
+@pytest.mark.asyncio
+async def test_timed_out_start_retains_child_ownership_until_callback_finishes(
+    monkeypatch: pytest.MonkeyPatch, isolated_host_run: None
+) -> None:
+    monkeypatch.setattr("omnigent.host.connect._HOST_EXTENSION_START_TIMEOUT_S", 0.01)
+    release_start = asyncio.Event()
+    connected = asyncio.Event()
+
+    class SlowStartExtension(ExampleExtension):
+        async def start(self) -> None:
+            self.start_calls += 1
+            while not release_start.is_set():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await release_start.wait()
+
+    async def connect() -> None:
+        connected.set()
+        await asyncio.Event().wait()
+
+    extension = SlowStartExtension()
+    host = _host(extension)
+    monkeypatch.setattr(host, "_connect_and_serve", connect)
+    run_task = asyncio.create_task(host.run())
+    start_task = None
+    try:
+        await asyncio.wait_for(connected.wait(), timeout=1.0)
+        start_task = host._host_extension_start_task
+        assert start_task is not None and not start_task.done()
+        assert host._host_extension is extension
+
+        run_task.cancel()
+        await asyncio.wait_for(run_task, timeout=1.0)
+        assert extension.stop_calls == 1
+        assert host._host_extension is extension
+    finally:
+        release_start.set()
+        if not run_task.done():
+            run_task.cancel()
+            await asyncio.wait_for(run_task, timeout=1.0)
+        if start_task is not None:
+            await asyncio.wait_for(start_task, timeout=1.0)
+        await asyncio.sleep(0)
+    assert host._host_extension is None
+
+
+@pytest.mark.asyncio
+async def test_stop_timeout_releases_host_lock_even_if_cancellation_is_suppressed(
+    monkeypatch: pytest.MonkeyPatch, isolated_host_run: None
+) -> None:
+    monkeypatch.setattr("omnigent.host.connect._HOST_EXTENSION_STOP_TIMEOUT_S", 0.01)
+    release_stop = asyncio.Event()
+
+    class SlowStopExtension(ExampleExtension):
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release_stop.wait()
+
+    class RecordingLock:
+        target = "extension-test"
+
+        def __init__(self) -> None:
+            self.released = False
+
+        def acquire(self) -> bool:
+            return True
+
+        def still_owner(self) -> bool:
+            return True
+
+        def release(self) -> None:
+            self.released = True
+
+    extension = SlowStopExtension()
+    host = _host(extension)
+    lock = RecordingLock()
+    host._lifecycle_lock = lock  # type: ignore[assignment]
+    try:
+        await asyncio.wait_for(_run_until_connect(host, monkeypatch), timeout=1.0)
+        assert lock.released
+        assert extension.stop_calls == 1
+        assert host._host_extension is extension
+    finally:
+        release_stop.set()
+        stop_task = host._host_extension_stop_task
+        if stop_task is not None:
+            await asyncio.wait_for(stop_task, timeout=1.0)
+        await asyncio.sleep(0)
+    assert host._host_extension is None
+
+
 @pytest.mark.posix_only
-def test_extension_child_retains_its_exit_status(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("ownership_raises", [False, True])
+def test_extension_child_retains_its_exit_status(
+    monkeypatch: pytest.MonkeyPatch, ownership_raises: bool
+) -> None:
     monkeypatch.setenv("OMNIGENT_RUNNER_ZYGOTE", "0")
-    extension = ExampleExtension()
+
+    class BrokenOwnershipExtension(ExampleExtension):
+        @property
+        def owned_pids(self) -> set[int]:
+            raise RuntimeError("synthetic ownership failure")
+
+    extension = BrokenOwnershipExtension() if ownership_raises else ExampleExtension()
     host = _host(extension)
     process = subprocess.Popen(
         [sys.executable, "-c", "import sys; sys.exit(42)"],
@@ -87,7 +319,8 @@ def test_extension_child_retains_its_exit_status(monkeypatch: pytest.MonkeyPatch
         assert process.stdout is not None
         assert process.stdout.read() == b""
         extension.pids.add(process.pid)
-        assert process.pid in host._tracked_runner_pids()
+        if not ownership_raises:
+            assert process.pid in host._tracked_runner_pids()
         assert host._reap_orphans_once([process.pid]) == 0
         assert process.wait(timeout=5) == 42
     finally:

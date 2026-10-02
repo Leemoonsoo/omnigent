@@ -474,6 +474,10 @@ _SILENT_CONNECT_ESCALATE_ATTEMPTS = 10
 
 # Capability discovery is advisory and must not delay the host channel forever.
 _HOST_CAPABILITY_INIT_TIMEOUT_S = 15.0
+# An optional in-process extension must not hold up the host channel or keep a
+# replacement daemon waiting for the lifecycle lock during shutdown.
+_HOST_EXTENSION_START_TIMEOUT_S = 1.0
+_HOST_EXTENSION_STOP_TIMEOUT_S = 5.0
 
 # Host-environment variables a spawned runner is allowed to inherit.
 # Deliberately an allowlist (not ``{**os.environ}``): the host runs as the
@@ -1105,6 +1109,11 @@ class HostProcess:
         """
         self._identity = identity
         self._host_extension = host_extension
+        self._host_extension_start_task: asyncio.Task[None] | None = None
+        self._host_extension_stop_task: asyncio.Task[None] | None = None
+        self._host_extension_cleanup_task: asyncio.Task[None] | None = None
+        self._host_extension_stop_called = False
+        self._host_extension_stop_timed_out = False
         self._server_url = server_url.rstrip("/")
         # One reader per workspace, so its registry keeps state between
         # requests (the changed-files snapshot search reuses for untracked
@@ -1276,22 +1285,102 @@ class HostProcess:
         extension = self._host_extension
         if extension is None:
             return
+        task = asyncio.create_task(extension.start(), name="host-extension-start")
+        self._host_extension_start_task = task
         try:
-            await extension.start()
+            done, _ = await asyncio.wait({task}, timeout=_HOST_EXTENSION_START_TIMEOUT_S)
+        except asyncio.CancelledError:
+            task.add_done_callback(self._finish_host_extension_start)
+            task.cancel()
+            raise
+        if not done:
+            _logger.warning(
+                "Optional host extension start exceeded %.1fs; continuing host connection",
+                _HOST_EXTENSION_START_TIMEOUT_S,
+            )
+            task.add_done_callback(self._finish_host_extension_start)
+            task.cancel()
+            return
+        self._host_extension_start_task = None
+        try:
+            task.result()
         except Exception:
             _logger.exception("Optional host extension could not start")
             await self._stop_host_extension()
+
+    def _finish_host_extension_start(self, task: asyncio.Task[None]) -> None:
+        """Clean up a start that finished after its caller stopped waiting."""
+        if self._host_extension_start_task is not task:
+            return
+        self._host_extension_start_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _logger.exception("Optional host extension failed after start timeout")
+        if self._host_extension is None:
+            return
+        if not self._host_extension_stop_called:
+            cleanup = asyncio.create_task(
+                self._stop_host_extension(), name="host-extension-cleanup"
+            )
+            self._host_extension_cleanup_task = cleanup
+            cleanup.add_done_callback(self._finish_host_extension_cleanup)
+        elif self._host_extension_stop_task is None:
+            self._host_extension = None
+
+    def _finish_host_extension_cleanup(self, task: asyncio.Task[None]) -> None:
+        if self._host_extension_cleanup_task is task:
+            self._host_extension_cleanup_task = None
+        if not task.cancelled():
+            try:
+                task.result()
+            except Exception:
+                _logger.exception("Optional host extension cleanup failed")
+
+    def _finish_host_extension_stop(self, task: asyncio.Task[None]) -> None:
+        if self._host_extension_stop_task is not task:
+            return
+        self._host_extension_stop_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _logger.exception("Optional host extension could not stop cleanly")
+        finally:
+            # A timed-out start may still be running. Keep its PID ownership
+            # until that task actually settles, even after stop() completes.
+            if self._host_extension_start_task is None:
+                self._host_extension = None
 
     async def _stop_host_extension(self) -> None:
         extension = self._host_extension
         if extension is None:
             return
-        try:
-            await extension.stop()
-        except Exception:
-            _logger.exception("Optional host extension could not stop cleanly")
-        finally:
-            self._host_extension = None
+        start_task = self._host_extension_start_task
+        if start_task is not None and not start_task.done():
+            start_task.cancel()
+        if not self._host_extension_stop_called:
+            self._host_extension_stop_called = True
+            task = asyncio.create_task(extension.stop(), name="host-extension-stop")
+            self._host_extension_stop_task = task
+            task.add_done_callback(self._finish_host_extension_stop)
+        else:
+            task = self._host_extension_stop_task
+            if task is None or self._host_extension_stop_timed_out:
+                return
+        done, _ = await asyncio.wait({task}, timeout=_HOST_EXTENSION_STOP_TIMEOUT_S)
+        if not done:
+            self._host_extension_stop_timed_out = True
+            _logger.warning(
+                "Optional host extension stop exceeded %.1fs; continuing host shutdown",
+                _HOST_EXTENSION_STOP_TIMEOUT_S,
+            )
+            task.cancel()
+        else:
+            self._finish_host_extension_stop(task)
 
     def _tracked_runner_pids(self) -> set[int]:
         """Return child PIDs whose exit status still belongs to a process handle.

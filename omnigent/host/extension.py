@@ -20,7 +20,14 @@ _logger = logging.getLogger(__name__)
 
 
 class HostExtension(abc.ABC):
-    """Lifecycle and child ownership contract for host-local services."""
+    """Lifecycle and child ownership contract for host-local services.
+
+    ``start`` has a one-second host-connection budget; ``stop`` has a
+    five-second shutdown budget. Both callbacks must yield to the event loop
+    and honor cancellation. On timeout, the host cancels the callback and
+    continues; an in-process callback that blocks the event loop cannot be
+    interrupted by an asyncio deadline.
+    """
 
     @property
     @abc.abstractmethod
