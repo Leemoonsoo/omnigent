@@ -6,11 +6,12 @@ import asyncio
 import contextlib
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from omnigent.host.connect import HostProcess
+from omnigent.host.connect import HostProcess, run_host_process
 from omnigent.host.extension import HostExtension, load_host_extension
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
@@ -99,6 +100,45 @@ def test_selected_installed_host_extension_loads(monkeypatch: pytest.MonkeyPatch
         lambda **_kwargs: [SimpleNamespace(name="example", load=lambda: ExampleExtension)],
     )
     assert isinstance(load_host_extension(), ExampleExtension)
+
+
+def test_run_host_process_loads_selected_extension(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The selected entry point reaches host construction without launching a host."""
+    extension = ExampleExtension()
+    monkeypatch.setenv("OMNIGENT_HOST_EXTENSION", "example")
+    monkeypatch.setenv("OMNIGENT_RUNNER_ZYGOTE", "0")
+    monkeypatch.setattr(
+        "omnigent.host.extension.importlib.metadata.entry_points",
+        lambda **_kwargs: [SimpleNamespace(name="example", load=lambda: lambda: extension)],
+    )
+    monkeypatch.setattr(
+        "omnigent.host.connect.configure_process_logging",
+        lambda *_args, **_kwargs: tmp_path / "host.log",
+    )
+    monkeypatch.setattr("omnigent.runtime.telemetry.init", lambda *_args: None)
+    monkeypatch.setattr(
+        "omnigent.host.connect.load_or_create_host_identity",
+        lambda _path: HostIdentity(host_id="host_extension_test", name="extension-test"),
+    )
+    monkeypatch.setattr("omnigent.host.connect._runner_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr("omnigent.cli_diagnostics.current_cli_log_path", lambda: None)
+    for name in ("configure_host_git", "configure_host_gh", "start_host_gh_refresh"):
+        monkeypatch.setattr(f"omnigent.git_credential_github.{name}", lambda *_args: None)
+    monkeypatch.setattr(
+        "omnigent.host.databricks_credential.configure_host_databricks", lambda *_args: None
+    )
+    monkeypatch.setattr("omnigent.host.connect._generate_ucode_configs", lambda: None)
+    observed: list[HostExtension | None] = []
+
+    async def record_run(host: HostProcess) -> None:
+        observed.append(host._host_extension)
+
+    monkeypatch.setattr(HostProcess, "run", record_run)
+    run_host_process("http://localhost:8000", config_path=tmp_path / "config.yaml")
+
+    assert observed == [extension]
 
 
 @pytest.mark.parametrize("count", [0, 2])
