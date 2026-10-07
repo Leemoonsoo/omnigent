@@ -64,7 +64,14 @@ def test_missing_session_agent_classified_as_lifecycle_condition() -> None:
     assert payload["error_id"] == match.group(1)
 
 
-def test_other_causes_keep_generic_startup_failure_code() -> None:
+@pytest.mark.parametrize(
+    "cause",
+    [
+        RuntimeError("tmux server exited before the pane was ready"),
+        FileNotFoundError("missing executable"),
+    ],
+)
+def test_other_causes_keep_generic_startup_failure_code(cause: Exception) -> None:
     """A non-lifecycle cause keeps the generic startup-defect code.
 
     The reclassification is scoped to the missing-agent lifecycle condition;
@@ -72,7 +79,7 @@ def test_other_causes_keep_generic_startup_failure_code() -> None:
     ``native_terminal_start_failed`` terminal-startup defect.
     """
     payload = _native_terminal_start_error_payload(
-        RuntimeError("tmux server exited before the pane was ready"),
+        cause,
         "Claude",
         session_id="conv_1",
     )
