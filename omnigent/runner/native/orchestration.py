@@ -100,6 +100,10 @@ _logger = logging.getLogger("omnigent.runner.app")
 _OMNIGENT_PACKAGE_DIR = Path(__file__).resolve().parent.parent.parent
 
 _NATIVE_TERMINAL_START_FAILED_CODE = "native_terminal_start_failed"
+_NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES = {
+    ErrorCode.SESSION_AGENT_MISSING,
+    ErrorCode.WORKSPACE_MISSING,
+}
 
 _REPL_TERMINAL_NAME = "tui"
 _REPL_TERMINAL_SESSION_KEY = "main"
@@ -7608,8 +7612,7 @@ def _native_terminal_start_error_payload(
     error_id = f"err_{uuid.uuid4().hex}"
     lifecycle_code = (
         exc.code
-        if isinstance(exc, OmnigentError)
-        and exc.code in {ErrorCode.SESSION_AGENT_MISSING, ErrorCode.WORKSPACE_MISSING}
+        if isinstance(exc, OmnigentError) and exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES
         else None
     )
     extra = debug_event(
@@ -7752,10 +7755,7 @@ def _native_terminal_start_error_response(
         with an ``error`` object carrying the real failure message.
     """
     status_code = 500
-    if isinstance(exc, OmnigentError) and exc.code in {
-        ErrorCode.SESSION_AGENT_MISSING,
-        ErrorCode.WORKSPACE_MISSING,
-    }:
+    if isinstance(exc, OmnigentError) and exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES:
         status_code = exc.http_status
     return JSONResponse(
         status_code=status_code,
@@ -9893,8 +9893,11 @@ async def _ensure_native_terminal(
                 ),
             )
         except Exception as exc:
-            if isinstance(exc, OmnigentError) and exc.code == ErrorCode.SESSION_AGENT_MISSING:
-                # Expected lifecycle event (agent deleted/rebound), not an
+            if (
+                isinstance(exc, OmnigentError)
+                and exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES
+            ):
+                # Expected lifecycle event (session resource removed), not an
                 # ensure defect: log without a stack so it stays out of the
                 # terminal-startup error signal.
                 _logger.warning(
