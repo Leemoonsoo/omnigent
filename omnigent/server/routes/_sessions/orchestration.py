@@ -798,6 +798,7 @@ async def _stop_host_runner_intentionally(
                 statuses.setdefault(related_id, None)
         statuses.setdefault(session_id, None)
         marked: set[str] = set()
+        stop_targets: set[str] = set()
         completed_stop_relays: dict[str, tuple[_RelayHandle, int]] = {}
         for related_id, persisted_status in statuses.items():
             handle = _runner_relay_tasks.get(related_id)
@@ -807,6 +808,7 @@ async def _stop_host_runner_intentionally(
             # Completed work and earlier task failures keep their existing outcome.
             if related_id != session_id and live_status not in (*_MID_TURN_STATUSES, None):
                 continue
+            stop_targets.add(related_id)
             if _intentional_stop_sessions.get(related_id) != runner_id:
                 marked.add(related_id)
             # Each Stop needs a fresh disconnect window, including repeated requests.
@@ -837,6 +839,30 @@ async def _stop_host_runner_intentionally(
                             handle.intentional_stop_turn_ended = True
                         else:
                             _intentional_stop_sessions.pop(related_id, None)
+        if acknowledged:
+            # Native forwarders can publish activity after the relay closes.
+            # The host acknowledgement confirms those publishers have exited.
+            for related_id in stop_targets:
+                if (
+                    _session_status_cache.get(related_id, statuses[related_id])
+                    not in _MID_TURN_STATUSES
+                ):
+                    continue
+                handle = _runner_relay_tasks.get(related_id)
+                if handle is not None and handle.runner_id != runner_id:
+                    continue
+                settled = await asyncio.wrap_future(
+                    session_live_state.submit(
+                        "settle_intentional_stop",
+                        conversation_store.settle_intentionally_stopped_session,
+                        related_id,
+                        runner_id,
+                    )
+                )
+                handle = _runner_relay_tasks.get(related_id)
+                if settled and (handle is None or handle.runner_id == runner_id):
+                    session_live_state.forget_live_status(related_id)
+                    _publish_status(related_id, "idle", persist_live_status=False)
         return acknowledged
 
 
@@ -5999,7 +6025,12 @@ def _unavailable_routing_card(reason: str) -> tuple[str, dict[str, Any]]:
     return _UNAVAILABLE_ROUTED_MODEL, {"rationale": reason, "applied": False}
 
 
-def _native_pane_harness(conv: Conversation) -> str | None:
+def _native_pane_harness(
+    conv: Conversation,
+    *,
+    agent_store: AgentStore | None = None,
+    agent_cache: AgentCache | None = None,
+) -> str | None:
     """The native harness a pane actually runs, past the ``"auto"`` sentinel.
 
     A forced-auto child keeps ``harness_override="auto"`` until its first
@@ -6009,10 +6040,12 @@ def _native_pane_harness(conv: Conversation) -> str | None:
     names the real harness.
 
     :param conv: Conversation row for the native session.
+    :param agent_store: Optional agent store for resolving the bound spec.
+    :param agent_cache: Optional cache for loading the bound spec.
     :returns: The canonical native harness, e.g. ``"claude-native"``, or
         ``None`` when it cannot be resolved.
     """
-    harness = _resolve_harness(conv)
+    harness = _resolve_harness(conv, agent_store=agent_store, agent_cache=agent_cache)
     if harness is not None and harness != "auto":
         return harness
     native = _native_coding_agent_for_session(conv)
@@ -8066,7 +8099,12 @@ async def _relay_runner_stream_once(
                                 "returned",
                                 conversation_store,
                                 turn_id=pending_subagent_return_id,
-                                status=pending_subagent_return_status,
+                                status=(
+                                    "failed"
+                                    if status == "failed"
+                                    else pending_subagent_return_status
+                                ),
+                                from_runner=True,
                             )
                             pending_subagent_return_id = None
                         if status:
@@ -9458,7 +9496,7 @@ def _installed_native_harnesses(host: Host | None) -> list[str]:
 
 
 def _ungatewayed_native_harnesses(host: Host | None, harnesses: Sequence[str]) -> list[str]:
-    """Which of *harnesses* this host does not back with the workspace AI gateway.
+    """Which of *harnesses* this host does not back with the workspace Unity Gateway.
 
     The external router's picks are gateway catalog ids, so a CLI pointed at
     Bedrock, a personal subscription, or any other provider cannot run one even
@@ -9605,7 +9643,7 @@ def _harness_labels(harnesses: Sequence[str]) -> str:
 def _ungatewayed_auto_routing_error(ungatewayed: Sequence[str]) -> str:
     """Message for a top-level Smart Routing create no router can serve.
 
-    Both arms are on the menu, so one arm off the gateway takes the AI Gateway's
+    Both arms are on the menu, so one arm off the gateway takes the Unity Gateway's
     router off the table for the whole pick. That is only fatal when the server
     has no built-in router either — otherwise the built-in one answers.
 
@@ -9619,14 +9657,14 @@ def _ungatewayed_auto_routing_error(ungatewayed: Sequence[str]) -> str:
         f"{verb} not AI-Gateway-backed, so the workspace router's picks would not be "
         "reachable, and this server has no built-in routing model to fall back on. Pick a "
         "harness directly, configure a server `llm:` block, or point the harness at the "
-        f"workspace AI Gateway (`{cli_invocation()} configure harnesses`)."
+        f"workspace Unity Gateway (`{cli_invocation()} configure harnesses`)."
     )
 
 
 def _ungatewayed_model_routing_error(harness: str) -> str:
     """Message for a routing-on create no router can serve.
 
-    Only reached when the harness is off the AI Gateway AND the server has no
+    Only reached when the harness is off the Unity Gateway AND the server has no
     built-in routing model — either one alone still routes.
 
     :param harness: The session's native harness, e.g. ``"codex-native"``.
@@ -9637,7 +9675,7 @@ def _ungatewayed_model_routing_error(harness: str) -> str:
         f"{_harness_labels([harness])} is not AI-Gateway-backed, so the workspace router's "
         "picks would not be reachable from the pane, and this server has no built-in routing "
         'model to fall back on. Create the session without cost_control_mode_override="on", '
-        "configure a server `llm:` block, or point the harness at the workspace AI Gateway "
+        "configure a server `llm:` block, or point the harness at the workspace Unity Gateway "
         f"(`{cli_invocation()} configure harnesses`)."
     )
 
@@ -9651,7 +9689,7 @@ async def _reject_ungatewayed_model_routing(
 ) -> None:
     """Reject a routing-on create no router can serve.
 
-    A pane off the AI Gateway cannot run the workspace router's picks, but the
+    A pane off the Unity Gateway cannot run the workspace router's picks, but the
     built-in judge names models from the pane's own catalog, so it can. This
     only refuses when neither source is available — otherwise the create
     proceeds and the built-in judge answers.
@@ -12099,6 +12137,7 @@ async def _get_session_snapshot(
     conversation: Conversation | None = None,
     liveness_lookup: Callable[[list[str]], dict[str, SessionLiveness]] | None = None,
     include_items: bool = True,
+    include_live_status: bool = True,
     runner_exit_reports: RunnerExitReports | None = None,
     refresh_state: bool = False,
     host_store: HostStore | None = None,
@@ -12139,6 +12178,11 @@ async def _get_session_snapshot(
         and return ``items=[]``. Callers that hydrate the transcript
         through ``GET /sessions/{id}/items`` (the web chat surface)
         pass ``False`` to avoid a redundant history read and serialization.
+    :param include_live_status: When ``False``, skip the live-status probe
+        of the session's bound runner on a status-cache miss and report
+        ``status`` from the cached or persisted value. Runner-owned reads
+        pass ``False`` — the probe targets the very runner waiting on this
+        response.
     :param include_usage: When ``False``, skip subtree usage aggregation and
         return unknown usage with ``usage_included=False``. Launch metadata
         does not need usage; display clients can fetch it separately.
@@ -12223,7 +12267,11 @@ async def _get_session_snapshot(
         # ``_session_status_from_cache`` already collapses the fine-grained
         # relay values (``"waiting"`` → ``"running"``), so the raw cache value
         # is only needed here when it is actually missing (None).
-        if _session_status_cache.get(session_id) is None and runner_client is not None:
+        if (
+            include_live_status
+            and _session_status_cache.get(session_id) is None
+            and runner_client is not None
+        ):
             if (
                 await _probe_runner_live_status(runner_client, session_id, conv.runner_id)
                 is not None
