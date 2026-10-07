@@ -53,7 +53,7 @@ def test_implicit_workspace_uses_process_cwd(
     assert orchestration._claude_session_workspace(None) == tmp_path
 
 
-def test_workspace_keeps_symlink_path_for_resume(tmp_path: Path) -> None:
+def test_workspace_resolver_preserves_symlink_spelling(tmp_path: Path) -> None:
     workspace = tmp_path / "project"
     workspace.mkdir()
     linked_workspace = tmp_path / "project-link"
