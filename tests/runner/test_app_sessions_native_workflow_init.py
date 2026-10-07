@@ -783,6 +783,8 @@ async def test_ensure_native_terminal_missing_workspace_returns_410_without_stac
     ]
     assert failure_records == []
     assert all(record.exc_info is None for record in caplog.records)
+    assert "resource unavailable" in caplog.text
+    assert "agent unavailable" not in caplog.text
 
 
 @pytest.mark.asyncio

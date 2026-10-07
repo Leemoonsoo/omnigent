@@ -9901,7 +9901,7 @@ async def _ensure_native_terminal(
                 # ensure defect: log without a stack so it stays out of the
                 # terminal-startup error signal.
                 _logger.warning(
-                    "%s terminal ensure skipped; session %s agent unavailable: %s",
+                    "%s terminal ensure skipped; session %s resource unavailable: %s",
                     agent.display_name,
                     ctx.session_id,
                     exc,
