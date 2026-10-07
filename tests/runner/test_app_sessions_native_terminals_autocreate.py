@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from omnigent.entities.session_resources import SessionResourceView
+from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harnesses.antigravity_native.bridge import (
     ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY,
     AntigravityNativeBridgeState,
@@ -1042,6 +1043,47 @@ async def test_auto_create_claude_terminal_passes_session_effort(
     assert str(bridge_dir_for_bridge_id(session_id)) not in messages[0]
 
     await fake_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auto_create_claude_terminal_rejects_missing_recorded_workspace_before_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing recorded workspace stops startup before bridge or terminal setup."""
+    missing_workspace = tmp_path / "removed-workspace"
+    session_id = "f89fd41f6eefee45b2117ac0fcbc73fa"
+    session_init = RunnerSessionInitEnvelope.model_validate(
+        {
+            "protocol_version": 2,
+            "server_version": "0.6.0.dev0",
+            "session_id": session_id,
+            "agent_id": "agent",
+            "snapshot": {
+                "created_at": 10,
+                "updated_at": 11,
+                "workspace": str(missing_workspace),
+                "labels": {},
+            },
+        }
+    )
+
+    def unexpected_bridge_setup(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise AssertionError("bridge setup must not run for a missing workspace")
+
+    monkeypatch.setattr(claude_native_bridge, "prepare_bridge_dir", unexpected_bridge_setup)
+
+    with pytest.raises(OmnigentError) as failure:
+        await _auto_create_claude_terminal(
+            session_id,
+            object(),  # type: ignore[arg-type]
+            lambda _sid, _evt: None,
+            server_client=NullServerClient(),  # type: ignore[arg-type]
+            session_init=session_init,
+        )
+
+    assert failure.value.code == ErrorCode.WORKSPACE_MISSING
 
 
 @pytest.mark.asyncio

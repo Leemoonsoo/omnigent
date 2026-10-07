@@ -91,6 +91,10 @@ def test_other_causes_keep_generic_startup_failure_code() -> None:
             OmnigentError("agent gone", code=ErrorCode.SESSION_AGENT_MISSING),
             "user",
         ),
+        (
+            OmnigentError("workspace gone", code=ErrorCode.WORKSPACE_MISSING),
+            "user",
+        ),
     ],
 )
 def test_start_failure_log_row_is_blocking_with_derived_category(
