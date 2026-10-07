@@ -962,6 +962,20 @@ async def test_auto_create_claude_terminal_passes_session_effort(
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
 
+    workspace = tmp_path / "workspace"
+    (workspace / ".omnigent").mkdir(parents=True)
+    (workspace / ".omnigent" / "config.yaml").write_text(
+        "harness:\n  claude-native:\n    command: workspace-claude\n"
+    )
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config-home"))
+    monkeypatch.delenv("OMNIGENT_CLAUDE_PATH", raising=False)
+
+    def missing_cwd() -> Path:
+        raise FileNotFoundError("process cwd was removed")
+
+    monkeypatch.setattr(Path, "cwd", missing_cwd)
+
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.forwarder.supervise_forwarder",
         _no_op_forwarder,
@@ -994,7 +1008,7 @@ async def test_auto_create_claude_terminal_passes_session_effort(
                 "snapshot": {
                     "created_at": 10,
                     "updated_at": 11,
-                    "workspace": str(tmp_path),
+                    "workspace": str(workspace),
                     "reasoning_effort": "high",
                     "labels": {},
                 },
@@ -1014,6 +1028,8 @@ async def test_auto_create_claude_terminal_passes_session_effort(
         )
 
     args = captured["spec"].args
+    assert captured["spec"].os_env.cwd == str(workspace)
+    assert captured["spec"].command == "workspace-claude"
     assert "--effort" in args
     effort_idx = args.index("--effort")
     assert args[effort_idx + 1] == "high"

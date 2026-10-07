@@ -996,18 +996,7 @@ def create_os_environment(
     if spec.type != "caller_process":
         raise NotImplementedError(f"os_env type '{spec.type}' is not implemented")
 
-    try:
-        cwd = Path(spec.cwd or os.getcwd()).resolve(strict=False)
-    except OSError:
-        # Recover a deleted process cwd from the configured runner workspace.
-        workspace = os.environ.get("OMNIGENT_RUNNER_WORKSPACE")
-        if not workspace:
-            raise
-        cwd = (Path(workspace) / (spec.cwd or "")).resolve(strict=False)
-        if not cwd.is_dir():
-            raise FileNotFoundError(
-                "Recovery working directory is missing or is not a directory."
-            ) from None
+    cwd = Path(spec.cwd or os.getcwd()).resolve(strict=False)
     fork_dir: Path | None = None
     if spec.fork:
         fork_dir = Path(tempfile.mkdtemp(prefix="omnigent-fork-"))
