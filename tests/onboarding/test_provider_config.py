@@ -12,6 +12,7 @@ from omnigent.onboarding.provider_config import (
     GEMINI_FAMILY,
     OPENAI_FAMILY,
     PI_SURFACE,
+    FamilyConfig,
     default_provider_for_harness,
     harness_family,
     load_providers,
@@ -162,7 +163,7 @@ _DATABRICKS_CODEX_CONFIG_TOML = """
 model_provider = "Databricks"
 
 [model_providers.Databricks]
-name = "Databricks AI Gateway"
+name = "Databricks Unity Gateway"
 base_url = "https://1965859176160743.ai-gateway.cloud.databricks.com/codex/v1"
 wire_api = "responses"
 
@@ -186,7 +187,7 @@ def test_default_provider_for_pi_selects_cli_config_databricks_gateway(
     """For the unmapped ``pi`` harness, a cli-config Databricks gateway IS selected.
 
     A cli-config entry pins a provider table in ~/.codex/config.toml. PR #1251
-    made a Databricks AI Gateway cli-config pi-consumable (Pi speaks its
+    made a Databricks Unity Gateway cli-config pi-consumable (Pi speaks its
     Anthropic surface natively), and pi resolution now routes it (pi-native
     translates it; the gateway-harness pi path translates it too). So when the
     pinned ``[model_providers.X]`` resolves to a real Databricks gateway, the
@@ -512,11 +513,11 @@ def test_key_with_gemini_block_still_serves_gemini() -> None:
 
 
 def test_subscription_cannot_claim_pi_scope() -> None:
-    """Naming ``"pi"`` in a subscription's default scope fails loud.
+    """A claude/codex subscription cannot claim the pi scope.
 
     Both at parse time (a hand-edited config) and via set_default_provider
-    (the menu path) — a subscription can never drive pi, so persisting the
-    scope would wedge pi on an unusable credential.
+    (the menu path) — a claude/codex subscription can never drive pi, so
+    persisting the scope would wedge pi on an unusable credential.
     """
     raw = {"kind": "subscription", "cli": "claude", "default": ["pi"]}
     with pytest.raises(OmnigentError):
@@ -524,6 +525,33 @@ def test_subscription_cannot_claim_pi_scope() -> None:
     block = {"claude-subscription": {"kind": "subscription", "cli": "claude"}}
     with pytest.raises(OmnigentError):
         set_default_provider(block, "claude-subscription", PI_SURFACE)
+
+
+def test_pi_subscription_claims_pi_scope() -> None:
+    """A pi subscription (cli: pi) can default the pi surface.
+
+    ``kind="subscription", cli="pi"`` signals "use Pi's own native auth". It
+    may claim the pi scope, be set as the pi-surface default via
+    ``set_default_provider``, and be returned by ``default_provider_for_harness``.
+    """
+    raw = {"kind": "subscription", "cli": "pi", "default": "pi"}
+    providers = load_providers({"providers": {"pi-subscription": raw}})
+    entry = providers["pi-subscription"]
+    assert entry.kind == "subscription"
+    assert entry.cli == "pi"
+    assert PI_SURFACE in entry.default_families
+    # A pi subscription serves no model family directly.
+    assert ANTHROPIC_FAMILY not in entry.default_families
+    assert OPENAI_FAMILY not in entry.default_families
+    # default_provider_for_harness picks it up as the explicit pi default.
+    config = {"providers": {"pi-subscription": raw}}
+    assert default_provider_for_harness(config, "pi").name == "pi-subscription"
+    # set_default_provider accepts the pi scope (this was the bug:
+    # provider_families returned {} so the scope check rejected it).
+    block: dict[str, object] = {"pi-subscription": {"kind": "subscription", "cli": "pi"}}
+    result = set_default_provider(block, "pi-subscription", PI_SURFACE)
+    reparsed = load_providers({"providers": result})
+    assert PI_SURFACE in reparsed["pi-subscription"].default_families
 
 
 def test_set_default_provider_pi_scope_round_trips_and_moves() -> None:
@@ -585,19 +613,21 @@ def test_set_default_provider_pi_scope_round_trips_and_moves() -> None:
             },
             True,
         ),
-        # A CLI login is unusable outside its own CLI — never pi-capable.
+        # A claude/codex CLI login is unusable outside its own CLI — never pi-capable.
         ({"kind": "subscription", "cli": "claude"}, False),
+        # A pi subscription explicitly opts into Pi's own native auth — pi-capable.
+        ({"kind": "subscription", "cli": "pi"}, True),
     ],
 )
 def test_provider_families_pi_capability(raw: dict[str, object], expect_pi: bool) -> None:
     """``provider_families`` reports the pi scope only for pi-capable providers.
 
     pi-capable = an inline key/gateway/local declaring an anthropic or openai
-    family, or a databricks profile. A gemini-only key (Gemini surface only)
-    and a subscription (CLI-bound) are NOT pi-capable. This drives both the Pi
-    page's credential list (which rows appear) and set-default validation — a
-    regression in either direction lets the menu offer a credential pi can't
-    use, or hides one it can.
+    family, a databricks profile, or a pi subscription. A gemini-only key
+    (Gemini surface only) and a claude/codex subscription (CLI-bound) are NOT
+    pi-capable. This drives both the Pi page's credential list (which rows
+    appear) and set-default validation — a regression in either direction lets
+    the menu offer a credential pi can't use, or hides one it can.
     """
     entry = load_providers({"providers": {"p": raw}})["p"]
     assert (PI_SURFACE in provider_families(entry)) is expect_pi
@@ -657,7 +687,7 @@ def test_parse_cli_config_entry() -> None:
                     "kind": "cli-config",
                     "cli": "codex",
                     "model_provider": "Databricks",
-                    "display_name": "Databricks AI Gateway",
+                    "display_name": "Databricks Unity Gateway",
                     "default": True,
                 }
             }
@@ -666,9 +696,9 @@ def test_parse_cli_config_entry() -> None:
     assert entry.kind == "cli-config"
     assert entry.cli == "codex"
     assert entry.model_provider == "Databricks"
-    assert entry.display_name == "Databricks AI Gateway"
+    assert entry.display_name == "Databricks Unity Gateway"
     # A codex cli-config serves the openai surface AND is structurally
-    # pi-capable: a Databricks AI Gateway is reusable by Pi (its Anthropic
+    # pi-capable: a Databricks Unity Gateway is reusable by Pi (its Anthropic
     # surface), so it can claim the pi scope. (``default: true`` deliberately
     # never expands to pi — only an explicit ``pi`` does — so default_families
     # stays openai-only here.)
@@ -916,7 +946,7 @@ def test_load_providers_skips_unrecognized_cli_config_cli_without_raising() -> N
             "claude-databricks": {
                 "kind": "cli-config",
                 "cli": "claude",
-                "display_name": "Databricks AI Gateway",
+                "display_name": "Databricks Unity Gateway",
                 "default": True,
             },
             "openai": {
@@ -986,3 +1016,38 @@ def test_claude_sdk_resolution_survives_stray_cli_config_claude_entry() -> None:
     }
     entry = default_provider_for_harness(config, "claude-sdk")  # must NOT raise
     assert entry is not None and entry.name == "vendor-anthropic"
+
+
+def test_resolve_model_tier_follows_alias_chain() -> None:
+    """A ``models:`` value that names another tier resolves to its id.
+
+    Deployments alias tier names to ids (``deepseek-pro: deepseek-v4-pro``)
+    and reference the alias from other keys (``default: deepseek-pro``), so
+    both accessors must agree on which string is the concrete id.
+    """
+    family = FamilyConfig(
+        base_url="http://bifrost.example.com/v1",
+        models={
+            "default": "deepseek-pro",
+            "deepseek-pro": "deepseek-v4-pro",
+            "glm": "GLM-5.3",
+        },
+    )
+    # ``default_model`` stays the raw accessor; resolution is explicit.
+    assert family.default_model == "deepseek-pro"
+    assert family.resolve_model_tier(family.default_model or "") == "deepseek-v4-pro"
+    # An entry naming no other tier passes through untouched.
+    assert family.resolve_model_tier("GLM-5.3") == "GLM-5.3"
+
+
+def test_resolve_model_tier_is_bounded_on_cyclic_aliases() -> None:
+    """A cyclic alias map terminates instead of looping."""
+    family = FamilyConfig(base_url="http://bifrost.example.com/v1", models={"a": "b", "b": "a"})
+    assert family.resolve_model_tier("a") == "a"
+    assert family.resolve_model_tier("b") == "b"
+
+
+def test_resolve_model_tier_without_models_map_is_passthrough() -> None:
+    """No ``models:`` map → nothing to resolve."""
+    family = FamilyConfig(base_url="http://bifrost.example.com/v1")
+    assert family.resolve_model_tier("gpt-5") == "gpt-5"
