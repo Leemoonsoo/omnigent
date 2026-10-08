@@ -732,6 +732,55 @@ def test_post_evaluate_with_retry_reparks_a_held_ask_poll_the_gateway_severed(
     assert sleeps == [initial, initial], "a severed held poll re-POSTs inside the re-park grace"
 
 
+def test_post_evaluate_with_retry_slow_429_spends_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A 429 after a held poll is a rate limit, not a gateway sever."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(native_policy_hook.time, "monotonic", lambda: clock["t"])
+    sleeps: list[float] = []
+    monkeypatch.setattr(native_policy_hook.time, "sleep", sleeps.append)
+    held = native_policy_hook._EVALUATE_POLICY_HELD_POLL_FLOOR_S + 290.0
+    bodies: list[dict[str, object]] = []
+    ok = httpx.Response(
+        200,
+        text='{"result":"POLICY_ACTION_ALLOW"}',
+        request=httpx.Request("POST", "https://ap/x"),
+    )
+
+    class _Client:
+        def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
+            del headers, timeout
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            bodies.append(json)
+            if len(bodies) > 2:
+                return ok
+            clock["t"] += held
+            return httpx.Response(429, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", _Client)
+
+    resp, error = post_evaluate_with_retry(
+        "https://ap/x", {}, {"event": {}}, 86400.0, "evaluate-policy hook"
+    )
+
+    assert resp is None
+    assert error is not None
+    assert "retry budget exhausted" in error
+    assert "server returned 429" in error
+    assert len(bodies) == 1
+    assert sleeps == []
+    assert "re-parking" not in capsys.readouterr().err
+
+
 def test_post_evaluate_with_retry_fast_5xx_still_exhausts_the_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

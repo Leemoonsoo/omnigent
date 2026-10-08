@@ -10,8 +10,8 @@ from collections.abc import Awaitable, Callable
 import click
 import httpx
 
-from omnigent._http_retry import bounded_retry_after_seconds
 from omnigent.host.daemon_launch import error_text
+from omnigent.util.http_retry import bounded_retry_after_seconds
 
 DAEMON_HOST_ONLINE_TIMEOUT_S = 30.0
 DAEMON_RUNNER_ONLINE_TIMEOUT_S = 60.0

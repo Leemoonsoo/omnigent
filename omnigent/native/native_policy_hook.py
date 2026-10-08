@@ -31,7 +31,7 @@ from typing import NotRequired, TypedDict
 
 import httpx
 
-from omnigent._http_retry import bounded_retry_after_seconds
+from omnigent.util.http_retry import bounded_retry_after_seconds
 
 # How long to keep retrying transient 429 / 5xx / connect errors on the
 # policy evaluate POST before failing closed. Keeps the pre-execution
