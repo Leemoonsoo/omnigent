@@ -82,18 +82,20 @@ async def test_bind_session_runner_surfaces_429_after_retries(
 ) -> None:
     """The final rate-limit response remains user-facing after the retry budget."""
     attempts = 0
+    sleeps: list[float] = []
 
     async def _handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
         return httpx.Response(
             429,
+            headers={"Retry-After": "30"},
             json={"error_code": "RESOURCE_EXHAUSTED"},
             request=request,
         )
 
-    async def _fake_sleep(_delay: float) -> None:
-        return None
+    async def _fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
 
     monkeypatch.setattr(native_terminal, "_sleep", _fake_sleep)
     async with httpx.AsyncClient(
@@ -104,6 +106,7 @@ async def test_bind_session_runner_surfaces_429_after_retries(
             await native_terminal.bind_session_runner(client, "conv_abc", "runner_abc")
 
     assert attempts == 5
+    assert sleeps == [10.0] * 4
 
 
 @pytest.mark.asyncio

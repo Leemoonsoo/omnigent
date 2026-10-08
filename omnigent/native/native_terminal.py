@@ -30,21 +30,25 @@ async def request_with_429_retry(
     session creation bodies replayable. ``Retry-After`` takes precedence over
     the bounded exponential fallback schedule.
 
+    Retries are bounded by attempt count, not a wall-clock deadline: with
+    every hint capped, the sleeps total at most
+    ``len(_HTTP_429_RETRY_DELAYS_S) * _HTTP_429_MAX_RETRY_AFTER_S`` (40s).
+
     :param send: Callable that creates and sends one request attempt.
     :returns: The first non-429 response, or the final 429 response.
     """
-    for attempt in range(len(_HTTP_429_RETRY_DELAYS_S) + 1):
+    for fallback_delay_s in _HTTP_429_RETRY_DELAYS_S:
         response = await send()
-        if response.status_code != 429 or attempt == len(_HTTP_429_RETRY_DELAYS_S):
+        if response.status_code != 429:
             return response
         await _sleep(
             bounded_retry_after_seconds(
                 response,
-                fallback=_HTTP_429_RETRY_DELAYS_S[attempt],
+                fallback=fallback_delay_s,
                 max_delay=_HTTP_429_MAX_RETRY_AFTER_S,
             )
         )
-    raise AssertionError("unreachable")
+    return await send()
 
 
 def normalize_extra_args(
