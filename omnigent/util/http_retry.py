@@ -15,7 +15,11 @@ def bounded_retry_after_seconds(
     fallback: float,
     max_delay: float,
 ) -> float:
-    """Return a bounded ``Retry-After`` delay, or the fallback."""
+    """Return a bounded ``Retry-After`` delay, or the fallback.
+
+    A zero or past hint uses the fallback, so repeated hints cannot cause
+    back-to-back retries.
+    """
     value = response.headers.get("retry-after")
     if value is None:
         return fallback
@@ -29,6 +33,6 @@ def bounded_retry_after_seconds(
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=UTC)
         delay = (retry_at - datetime.now(UTC)).total_seconds()
-    if not math.isfinite(delay) or delay < 0:
+    if not math.isfinite(delay) or delay <= 0:
         return fallback
     return min(delay, max_delay)
