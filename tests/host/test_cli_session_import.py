@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 from omnigent.cli import _import_item_payload, cli
 from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY
+from omnigent.stores.conversation_store import FORK_CARRY_HISTORY_LABEL_KEY
 
 _BASE = "http://localhost:6767"
 
@@ -21,6 +22,11 @@ _BASE = "http://localhost:6767"
 def _patch_server(base_url: str = _BASE) -> Any:
     """Patch the CLI so it uses *base_url* without spawning a real server."""
     return patch("omnigent.cli._resolve_attach_server", return_value=base_url)
+
+
+def _import_labels(source: str) -> dict[str, str]:
+    """Labels an import of *source* carries: offline routing plus history rebuild."""
+    return {IMPORT_SOURCE_LABEL_KEY: source, FORK_CARRY_HISTORY_LABEL_KEY: "1"}
 
 
 def _write_export(path: Path, *, meta: dict[str, Any], items: list[dict[str, Any]]) -> None:
@@ -206,8 +212,8 @@ def test_session_import_falls_back_to_native_agent(tmp_path: Path) -> None:
     assert "conv_new" in result.output
     # First tried the exported id, then fell back to the native agent id.
     assert seen_agent_ids == ["ag_missing", fallback_id]
-    # The retry keeps the import-source label.
-    assert seen_labels == [{IMPORT_SOURCE_LABEL_KEY: "claude"}] * 2
+    # The retry keeps the import labels.
+    assert seen_labels == [_import_labels("claude")] * 2
 
 
 _USER_ITEM = {
@@ -228,7 +234,7 @@ _USER_ITEM = {
 def test_session_import_labels_native_transcript_as_import(
     tmp_path: Path, harness: str, source: str
 ) -> None:
-    """A native-harness export is created with the import-source label."""
+    """A native-harness export is created with the import and carry-history labels."""
     src = tmp_path / "s.jsonl"
     _write_export(
         src,
@@ -244,7 +250,7 @@ def test_session_import_labels_native_transcript_as_import(
 
     assert result.exit_code == 0, result.output
     body = json.loads(route.calls.last.request.content)
-    assert body["labels"] == {IMPORT_SOURCE_LABEL_KEY: source}
+    assert body["labels"] == _import_labels(source)
 
 
 @pytest.mark.parametrize("harness", ["claude-sdk", "cursor-native"])
