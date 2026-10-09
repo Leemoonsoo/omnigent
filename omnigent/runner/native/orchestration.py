@@ -21,7 +21,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, MutableMapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
@@ -9002,14 +9002,14 @@ async def _auto_create_claude_terminal(
     except BaseException:
         # No forwarder owns the routers yet, so release the ones this launch started.
         # A ``None`` handle would shut down whichever router is registered now.
-        for shutdown_router, router in (
-            (_shutdown_session_router_async, _subagent_router),
-            (_shutdown_session_turn_router_async, _claude_turn_router),
-        ):
-            if router is None:
-                continue
+        cleanups: list[Coroutine[Any, Any, None]] = []
+        if _subagent_router is not None:
+            cleanups.append(_shutdown_session_router_async(session_id, _subagent_router))
+        if _claude_turn_router is not None:
+            cleanups.append(_shutdown_session_turn_router_async(session_id, _claude_turn_router))
+        for cleanup in cleanups:
             try:
-                await shutdown_router(session_id, router)
+                await cleanup
             except Exception:  # noqa: BLE001 - keep the seeding failure as the error.
                 _logger.warning(
                     "Router cleanup failed after Claude trust seeding failed: session=%s",
