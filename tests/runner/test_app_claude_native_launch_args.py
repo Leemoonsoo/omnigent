@@ -12,6 +12,8 @@ passed. See designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
 
 from __future__ import annotations
 
+import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -873,6 +875,31 @@ def test_claude_terminal_launch_cwd_applies_env_chdir(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can enter any directory")
+def test_claude_terminal_launch_cwd_rejects_an_unsearchable_env_chdir_target(
+    tmp_path: Path,
+) -> None:
+    """``env -C`` cannot enter a directory without search permission, so seeding stops."""
+    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o600)
+    spec = TerminalEnvSpec(
+        command="env",
+        args=["-C", "locked", "claude"],
+        os_env=OSEnvSpec(type="caller_process", cwd=str(tmp_path)),
+    )
+    try:
+        with pytest.raises(OmnigentError) as excinfo:
+            orchestration._claude_terminal_launch_cwd(spec, None)
+    finally:
+        locked.chmod(0o700)
+    assert excinfo.value.code == ErrorCode.WORKSPACE_MISSING
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -1131,15 +1158,28 @@ async def test_auto_create_claude_terminal_cleans_routers_when_trust_seeding_fai
     registry.launch_required_terminal.assert_not_called()
 
 
-async def test_auto_create_claude_terminal_cleanup_keeps_seeding_error_and_both_shutdowns(
+@pytest.mark.parametrize(
+    "shutdown_error,propagated",
+    [
+        (RuntimeError("subagent shutdown failed"), ValueError),
+        (asyncio.CancelledError(), asyncio.CancelledError),
+    ],
+    ids=["failed", "cancelled"],
+)
+async def test_auto_create_claude_terminal_seed_cleanup_attempts_both_shutdowns(
     bridge_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
+    shutdown_error: BaseException,
+    propagated: type[BaseException],
 ) -> None:
     """
-    A failing router shutdown neither hides the seeding error nor skips the other.
+    A failed or cancelled router shutdown does not skip the other one.
 
-    Both started routers are shut down even when the first shutdown raises,
-    and the trust-seeding failure is what propagates.
+    A shutdown failure is logged and the trust-seeding error propagates. A
+    cancellation propagates after both shutdowns have run.
+
+    :param shutdown_error: What the first shutdown raises.
+    :param propagated: The exception type the launch must raise.
     """
     from unittest.mock import Mock
 
@@ -1152,7 +1192,7 @@ async def test_auto_create_claude_terminal_cleanup_keeps_seeding_error_and_both_
 
     async def failing_subagent_shutdown(_session_id: str, _router: object) -> None:
         shutdowns.append("subagent")
-        raise RuntimeError("subagent shutdown failed")
+        raise shutdown_error
 
     async def record_turn_shutdown(_session_id: str, _router: object) -> None:
         shutdowns.append("turn")
@@ -1175,7 +1215,7 @@ async def test_auto_create_claude_terminal_cleanup_keeps_seeding_error_and_both_
     )
     registry = Mock(spec=SessionResourceRegistry)
 
-    with pytest.raises(ValueError, match="config is not a JSON object"):
+    with pytest.raises(propagated):
         await _auto_create_claude_terminal_for_test(
             monkeypatch, session_id="conv_cleanup_failure", workspace=bridge_dir, registry=registry
         )

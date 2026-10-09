@@ -168,6 +168,8 @@ def test_env_wrapper_environment_matches_real_env(args):
         ["--chdir=link", "/bin/pwd"],
         ["-iC", "sub", "/bin/pwd"],
         ["-S", "-C sub /bin/pwd"],
+        # env applies only the last -C, relative to the starting directory.
+        ["-C", "link", "-C", "sub", "/bin/pwd"],
     ],
 )
 def test_env_wrapper_chdir_matches_real_env(tmp_path, args):

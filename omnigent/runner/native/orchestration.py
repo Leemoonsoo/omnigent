@@ -7500,8 +7500,8 @@ def _claude_terminal_launch_cwd(spec: TerminalEnvSpec, parent_os_env: OSEnvSpec 
         ``None``.
     :returns: The resolved Claude cwd, e.g. ``Path("/home/user/repo")``.
     :raises OmnigentError: If an ``env --chdir`` target is not an existing
-        directory; the real ``env`` would refuse to launch, and seeding must not
-        create it.
+        directory the runner can enter; the real ``env`` would refuse to
+        launch, and seeding must not create it.
     """
     effective = build_terminal_os_env_spec(spec, parent_os_env_spec=parent_os_env)
     cwd = Path(effective.cwd or os.getcwd()).resolve()
@@ -7511,10 +7511,10 @@ def _claude_terminal_launch_cwd(spec: TerminalEnvSpec, parent_os_env: OSEnvSpec 
     if chdir is None:
         return cwd
     target = (cwd / chdir).resolve()
-    # ``env`` refuses an empty or missing target, so the launch would fail.
-    if not chdir or not target.is_dir():
+    # ``env`` refuses an empty, missing, or unsearchable target, so the launch would fail.
+    if not chdir or not target.is_dir() or not os.access(target, os.X_OK):
         raise OmnigentError(
-            "The Claude terminal's env --chdir directory does not exist.",
+            "The Claude terminal's env --chdir directory does not exist or cannot be entered.",
             code=ErrorCode.WORKSPACE_MISSING,
         )
     return target
@@ -9000,7 +9000,7 @@ async def _auto_create_claude_terminal(
             _claude_terminal_launch_cwd(env_spec, agent_os_env),
             env=_claude_terminal_launch_env(env_spec),
         )
-    except BaseException:
+    except BaseException as seed_error:
         # No forwarder owns the routers yet, so release the ones this launch started.
         # A ``None`` handle would shut down whichever router is registered now.
         cleanups: list[Coroutine[Any, Any, None]] = []
@@ -9008,9 +9008,13 @@ async def _auto_create_claude_terminal(
             cleanups.append(_shutdown_session_router_async(session_id, _subagent_router))
         if _claude_turn_router is not None:
             cleanups.append(_shutdown_session_turn_router_async(session_id, _claude_turn_router))
+        cancelled: asyncio.CancelledError | None = None
         for cleanup in cleanups:
             try:
                 await cleanup
+            except asyncio.CancelledError as exc:
+                # Release the other router before honoring the cancellation.
+                cancelled = exc
             except Exception:  # noqa: BLE001 - keep the seeding failure as the error.
                 _logger.warning(
                     "Router cleanup failed after Claude trust seeding failed: session=%s",
@@ -9018,6 +9022,8 @@ async def _auto_create_claude_terminal(
                     exc_info=True,
                     extra={"session_id": session_id},
                 )
+        if cancelled is not None:
+            raise cancelled from seed_error
         raise
     _logger.info(
         "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "
