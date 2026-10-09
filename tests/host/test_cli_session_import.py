@@ -242,13 +242,16 @@ def test_session_import_labels_native_transcript_as_import(
     assert body["labels"] == {IMPORT_SOURCE_LABEL_KEY: source}
 
 
+@pytest.mark.parametrize("harness", ["claude-sdk", "cursor-native"])
 @respx.mock
-def test_session_import_leaves_non_native_session_unlabeled(tmp_path: Path) -> None:
-    """A non-native export has no import source, so no label is sent."""
+def test_session_import_leaves_session_without_import_source_unlabeled(
+    tmp_path: Path, harness: str
+) -> None:
+    """A non-native export, or a native one with no import source, sends no label."""
     src = tmp_path / "s.jsonl"
     _write_export(
         src,
-        meta={"id": "conv_old", "agent_id": "ag_abc", "harness": "claude-sdk"},
+        meta={"id": "conv_old", "agent_id": "ag_abc", "harness": harness},
         items=[_USER_ITEM],
     )
     route = respx.post(f"{_BASE}/v1/sessions").mock(
