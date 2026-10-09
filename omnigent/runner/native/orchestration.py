@@ -7505,6 +7505,11 @@ def _claude_terminal_launch_env(spec: TerminalEnvSpec) -> dict[str, str]:
     for key in spec.env_unset:
         env.pop(key, None)
     wrapper = env_wrapper_environment(spec.command or "", list(spec.args))
+    if wrapper is None and Path(spec.command or "").name == "env":
+        _logger.info(
+            "Claude terminal env wrapper form is not modeled; trust seeding uses the "
+            "pre-wrapper environment"
+        )
     if wrapper is not None:
         if not wrapper.inherit:
             env = {}

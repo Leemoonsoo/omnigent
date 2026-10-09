@@ -1793,7 +1793,7 @@ def claude_global_config_path(
     env = os.environ if env is None else env
     base = cwd if cwd is not None else Path.cwd()
     # Claude joins these paths verbatim: no ``~`` expansion, relative to its cwd.
-    home = base / env["HOME"] if env.get("HOME") else Path.home()
+    home = base / env["HOME"] if env.get("HOME") else _account_home_dir()
     config_dir = env.get("CLAUDE_CONFIG_DIR")
     config_root = base / config_dir if config_dir else None
     if config_dir is None:
@@ -1807,6 +1807,24 @@ def claude_global_config_path(
         return legacy_path
     suffix = "-custom-oauth" if env.get("CLAUDE_CODE_CUSTOM_OAUTH_URL") else ""
     return (config_root or home) / f".claude{suffix}.json"
+
+
+def _account_home_dir() -> Path:
+    """
+    Return the account's home directory, as Claude's runtime does without ``HOME``.
+
+    Claude Code's runtime ignores an unset or empty ``HOME`` and reads the
+    password database, so the runner's own ``HOME`` is not a substitute.
+
+    :returns: The passwd home directory, e.g. ``Path("/home/user")``, or
+        :meth:`Path.home` where no password database exists.
+    """
+    try:
+        import pwd  # noqa: FlagLocalImports - POSIX-only module
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError):
+        return Path.home()
 
 
 def ensure_claude_workspace_trusted(workspace: Path, env: Mapping[str, str] | None = None) -> None:

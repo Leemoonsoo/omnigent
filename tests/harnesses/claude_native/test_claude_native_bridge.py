@@ -8371,6 +8371,11 @@ def test_claude_global_config_path_uses_launch_env_and_cwd(
     assert claude_global_config_path(workspace, {"HOME": "relhome"}) == (
         workspace / "relhome" / ".claude.json"
     )
+    # Without a usable HOME, Claude uses the account home, not the runner's.
+    account_home = tmp_path / "account-home"
+    monkeypatch.setattr(claude_native_bridge, "_account_home_dir", lambda: account_home)
+    assert claude_global_config_path(workspace, {}) == account_home / ".claude.json"
+    assert claude_global_config_path(workspace, {"HOME": ""}) == account_home / ".claude.json"
     tilde_env = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": "~/cfg"}
     assert (
         claude_global_config_path(workspace, tilde_env) == workspace / "~" / "cfg" / ".claude.json"

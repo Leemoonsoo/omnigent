@@ -100,6 +100,35 @@ def test_env_resolution_matches_real_env(config, tmp_path, prefix, found):
 @pytest.mark.parametrize(
     "args",
     [
+        ["A=1", "/usr/bin/env"],
+        ["-i", "A=1", "/usr/bin/env"],
+        ["-", "A=1", "/usr/bin/env"],
+        ["-u", "KEEP", "A=1", "/usr/bin/env"],
+        ["-iuKEEP", "A=1", "/usr/bin/env"],
+        ["-S", "A=1 /usr/bin/env"],
+        ["-S", "- A='x y' /usr/bin/env"],
+        ["--split-string=-u KEEP A=1 /usr/bin/env"],
+        ["-iS", "A=1 /usr/bin/env"],
+    ],
+)
+def test_env_wrapper_environment_matches_real_env(args):
+    """The modeled wrapper environment equals what the real ``env`` passes on."""
+    base = {"PATH": "/usr/bin:/bin", "KEEP": "kept", "A": "old"}
+    wrapper = startup.env_wrapper_environment("/usr/bin/env", args)
+    assert wrapper is not None
+    expected = dict(base) if wrapper.inherit else {}
+    for name in wrapper.unset:
+        expected.pop(name, None)
+    expected.update(wrapper.variables)
+    process = subprocess.run(
+        ["/usr/bin/env", *args], env=base, capture_output=True, text=True, check=True
+    )
+    assert dict(line.split("=", 1) for line in process.stdout.splitlines()) == expected
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
         ["-S", "tool --api-key SECRET"],
         ["TOKEN=SECRET"],
         ["-u"],

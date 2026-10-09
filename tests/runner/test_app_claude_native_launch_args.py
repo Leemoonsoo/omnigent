@@ -668,11 +668,6 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
     from omnigent.harnesses.claude_native import diagnostics
     from omnigent.runner.native import orchestration
     from omnigent.runner.resource_registry import SessionResourceRegistry
-    from omnigent.runner.session_init_protocol import (
-        SESSION_INIT_PROTOCOL_VERSION,
-        RunnerSessionInitEnvelope,
-        RunnerSessionInitSnapshot,
-    )
 
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
@@ -691,13 +686,7 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
     original_error = httpx.ConnectError("original launch transport failure")
     registry = Mock(spec=SessionResourceRegistry)
     registry.launch_required_terminal.side_effect = original_error
-    session_init = RunnerSessionInitEnvelope(
-        protocol_version=SESSION_INIT_PROTOCOL_VERSION,
-        server_version="test",
-        session_id=session_id,
-        agent_id="agent",
-        snapshot=RunnerSessionInitSnapshot(created_at=0, updated_at=0, workspace=str(bridge_dir)),
-    )
+    session_init = _claude_auto_create_session_init(session_id, bridge_dir)
     loop = asyncio.get_running_loop()
     closing = asyncio.Event()
     closed = asyncio.Event()
