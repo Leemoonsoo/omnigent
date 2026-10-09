@@ -1775,27 +1775,20 @@ def claude_global_config_path(
     cwd: Path | None = None, env: Mapping[str, str] | None = None
 ) -> Path:
     """
-    Return the global config file Claude Code actually loads.
+    Return Claude's global config path for its launch env and working directory.
 
-    Mirrors Claude Code's resolution. A legacy ``.config.json`` in the
-    config dir (``$CLAUDE_CONFIG_DIR``, else ``~/.claude``) wins whenever it
-    exists; otherwise it is ``.claude.json`` under ``$CLAUDE_CONFIG_DIR``,
-    else the home directory, named ``.claude-custom-oauth.json`` when
-    ``CLAUDE_CODE_CUSTOM_OAUTH_URL`` is set. Claude ignores keys written to
-    any other candidate. A relative ``CLAUDE_CONFIG_DIR`` is relative to
-    Claude's working directory. An explicitly empty one is not the same as
-    unset: Claude then looks for the legacy file in its working directory
-    but still falls back to the home directory.
+    Claude prefers an existing legacy ``.config.json`` in its config dir
+    (``$CLAUDE_CONFIG_DIR``, else ``~/.claude``), then ``.claude.json`` (or
+    ``.claude-custom-oauth.json`` with ``CLAUDE_CODE_CUSTOM_OAUTH_URL``) under
+    ``$CLAUDE_CONFIG_DIR``, else ``$HOME``. A relative ``CLAUDE_CONFIG_DIR`` is
+    relative to its working directory; an empty one moves only the legacy
+    lookup there.
 
-    :param cwd: Directory Claude Code is launched in, e.g.
-        ``Path("/home/user/repo")``. ``None`` uses the current working
-        directory.
-    :param env: Environment Claude Code is launched with, e.g.
-        ``{"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}``.
+    :param cwd: Claude's working directory, e.g. ``Path("/home/user/repo")``.
+        ``None`` uses this process's working directory.
+    :param env: Claude's launch environment, e.g. ``{"HOME": "/home/user"}``.
         ``None`` uses this process's environment.
-    :returns: The config file path, e.g. ``Path("/home/user/.claude.json")``
-        or ``Path("/home/user/.claude/.config.json")`` on a host whose
-        Claude Code install predates ``~/.claude.json``.
+    :returns: The config file path, e.g. ``Path("/home/user/.claude.json")``.
     """
     env = os.environ if env is None else env
     base = cwd if cwd is not None else Path.cwd()

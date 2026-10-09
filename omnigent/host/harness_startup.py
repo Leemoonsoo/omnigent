@@ -101,10 +101,19 @@ def env_wrapper_environment(command: str, args: list[str]) -> HarnessEnvironment
     :param command: Configured harness command, e.g. ``"env"`` or ``"claude"``.
     :param args: Arguments passed to *command*, e.g.
         ``["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
-    :returns: The wrapper's ``-i``/``-u``/assignment changes, or ``None`` when
-        *command* is not a parseable ``env`` wrapper.
+    :returns: The wrapper's ``-i``/``-``/``-u``/assignment changes, or ``None``
+        when *command* is not a parseable ``env`` wrapper (e.g. ``env -S``).
     """
-    unwrapped = _unwrap_env(command, args, os.defpath)
+    normalized = list(args)
+    index = 0
+    while index < len(normalized) and normalized[index].startswith("-"):
+        if normalized[index] == "-":
+            normalized[index] = "-i"  # env's legacy spelling of --ignore-environment
+            break
+        if normalized[index] == "--":
+            break
+        index += 2 if normalized[index] in ("-u", "--unset") else 1
+    unwrapped = _unwrap_env(command, normalized, os.defpath)
     return unwrapped[3] if unwrapped is not None else None
 
 

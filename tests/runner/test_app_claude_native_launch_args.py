@@ -775,6 +775,18 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
         ),
         ("env", ["-u", "CLAUDE_CONFIG_DIR", "claude"], {}, [], "/home/runner", None),
         ("env", ["-i", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
+        # ``env -`` is the legacy spelling of ``-i``.
+        ("env", ["-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
+        ("env", ["-u", "X", "-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
+        # Unparsed wrapper forms such as ``-S`` keep the pre-wrapper env.
+        (
+            "env",
+            ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude"],
+            {},
+            [],
+            "/home/runner",
+            "/runner/claude",
+        ),
     ],
 )
 def test_claude_terminal_launch_env_matches_pane_environment(
@@ -807,3 +819,81 @@ def test_claude_terminal_launch_env_matches_pane_environment(
 
     assert env.get("HOME") == expected_home
     assert env.get("CLAUDE_CONFIG_DIR") == expected_config_dir
+
+
+async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
+    bridge_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Terminal auto-create hands the pane's launch env to trust seeding.
+
+    A launch-only ``CLAUDE_CONFIG_DIR`` (here from an ``env`` wrapper) must
+    reach the seeder, and seeding must happen before the terminal launches.
+    """
+    from unittest.mock import AsyncMock, Mock
+
+    import httpx
+
+    from omnigent.harnesses.claude_native import diagnostics
+    from omnigent.runner.native import orchestration
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.runner.session_init_protocol import (
+        SESSION_INIT_PROTOCOL_VERSION,
+        RunnerSessionInitEnvelope,
+        RunnerSessionInitSnapshot,
+    )
+
+    seeded: list[tuple[Path, dict[str, str] | None]] = []
+    registry = Mock(spec=SessionResourceRegistry)
+
+    def record_seed(workspace: Path, env: dict[str, str] | None = None) -> None:
+        registry.launch_required_terminal.assert_not_called()
+        seeded.append((workspace, env))
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted", record_seed
+    )
+    monkeypatch.setattr(
+        "omnigent.harness_startup_config.resolve_harness_command", lambda *_a, **_k: "env"
+    )
+    monkeypatch.setattr(
+        "omnigent.harness_startup_config.resolve_harness_args",
+        lambda _harness, cli_args, cfg=None: [
+            "CLAUDE_CONFIG_DIR=/launch/claude",
+            "claude",
+            *cli_args,
+        ],
+    )
+    monkeypatch.setattr("omnigent.inference_config.load_runtime_inference_config", dict)
+    monkeypatch.setattr("omnigent.config.load_effective_config", dict)
+    monkeypatch.setattr(orchestration, "resolve_cli_binary", lambda _: None)
+    monkeypatch.setattr(diagnostics, "ClaudeDebugLogFollower", lambda _: Mock())
+    registry.launch_required_terminal.side_effect = RuntimeError("stop after seeding")
+    session_id = "conv_seed_launch_env"
+    session_init = RunnerSessionInitEnvelope(
+        protocol_version=SESSION_INIT_PROTOCOL_VERSION,
+        server_version="test",
+        session_id=session_id,
+        agent_id="agent",
+        snapshot=RunnerSessionInitSnapshot(created_at=0, updated_at=0, workspace=str(bridge_dir)),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after seeding"):
+        await orchestration._auto_create_claude_terminal(
+            session_id,
+            registry,
+            Mock(),
+            server_client=AsyncMock(spec=httpx.AsyncClient),
+            session_init=session_init,
+            auth_token_factory=lambda: None,
+            resolve_launch_config=AsyncMock(return_value=None),
+        )
+
+    assert len(seeded) == 1
+    workspace, env = seeded[0]
+    assert workspace == Path(bridge_dir).absolute()
+    assert env is not None
+    assert env["CLAUDE_CONFIG_DIR"] == "/launch/claude"
+    registry.launch_required_terminal.assert_awaited_once()
