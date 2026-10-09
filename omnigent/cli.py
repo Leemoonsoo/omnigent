@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from importlib import import_module, resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypeAlias, cast, get_args
 
 import click
 import psutil
@@ -7135,6 +7135,9 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
     item authorship is re-attributed to the importing user (original
     ``created_by`` is not carried over).
 
+    A native-harness session is labeled as an import, so the web UI offers to
+    resume it on a chosen host.
+
     \b
     Examples:
       omnigent session import -i my_session.jsonl
@@ -7146,6 +7149,7 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
     from omnigent.chat import _remote_headers
     from omnigent.db.utils import builtin_agent_id
     from omnigent.native.native_coding_agents import native_coding_agent_for_harness
+    from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY, ImportSource
 
     src_path = Path(input_path)
     if not src_path.is_file():
@@ -7196,6 +7200,11 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
     native_agent = native_coding_agent_for_harness(harness)
     if native_agent is not None:
         fallback_agent_id = builtin_agent_id(native_agent.agent_name)
+    # Without this label the server reports the unbound copy as reachable, so
+    # the web UI never offers a host to resume it on.
+    labels: dict[str, str] = {}
+    if native_agent is not None and native_agent.key in get_args(ImportSource):
+        labels[IMPORT_SOURCE_LABEL_KEY] = native_agent.key
 
     cfg = _load_effective_config()
     base_url = _resolve_attach_server(server, cfg.get("server"))
@@ -7220,6 +7229,8 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
         }
         if resolved_title:
             body["title"] = resolved_title
+        if labels:
+            body["labels"] = labels
         for key in (
             "workspace",
             "harness_override",

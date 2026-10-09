@@ -8,10 +8,12 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
+import pytest
 import respx
 from click.testing import CliRunner
 
 from omnigent.cli import _import_item_payload, cli
+from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY
 
 _BASE = "http://localhost:6767"
 
@@ -201,6 +203,68 @@ def test_session_import_falls_back_to_native_agent(tmp_path: Path) -> None:
     assert "conv_new" in result.output
     # First tried the exported id, then fell back to the native agent id.
     assert seen_agent_ids == ["ag_missing", fallback_id]
+
+
+_USER_ITEM = {
+    "id": "msg_1",
+    "type": "message",
+    "status": "completed",
+    "response_id": "resp_1",
+    "role": "user",
+    "content": [{"type": "input_text", "text": "hi"}],
+}
+
+
+@pytest.mark.parametrize(
+    ("harness", "source"),
+    [("codex-native", "codex"), ("claude-native", "claude"), ("native-pi", "pi")],
+)
+@respx.mock
+def test_session_import_labels_native_transcript_as_import(
+    tmp_path: Path, harness: str, source: str
+) -> None:
+    """A native-harness export is created with the import-source label.
+
+    The server reports an unbound session as offline only when this label is
+    present; without it the web UI shows "no host binding" and never offers a
+    host to resume on.
+    """
+    src = tmp_path / "s.jsonl"
+    _write_export(
+        src,
+        meta={"id": "conv_old", "agent_id": "ag_abc", "harness": harness},
+        items=[_USER_ITEM],
+    )
+    route = respx.post(f"{_BASE}/v1/sessions").mock(
+        return_value=httpx.Response(200, json={"id": "conv_new"})
+    )
+
+    with _patch_server():
+        result = CliRunner().invoke(cli, ["session", "import", "-i", str(src)])
+
+    assert result.exit_code == 0, result.output
+    body = json.loads(route.calls.last.request.content)
+    assert body["labels"] == {IMPORT_SOURCE_LABEL_KEY: source}
+
+
+@respx.mock
+def test_session_import_leaves_non_native_session_unlabeled(tmp_path: Path) -> None:
+    """A non-native export has no import source, so no label is sent."""
+    src = tmp_path / "s.jsonl"
+    _write_export(
+        src,
+        meta={"id": "conv_old", "agent_id": "ag_abc", "harness": "claude-sdk"},
+        items=[_USER_ITEM],
+    )
+    route = respx.post(f"{_BASE}/v1/sessions").mock(
+        return_value=httpx.Response(200, json={"id": "conv_new"})
+    )
+
+    with _patch_server():
+        result = CliRunner().invoke(cli, ["session", "import", "-i", str(src)])
+
+    assert result.exit_code == 0, result.output
+    assert "labels" not in json.loads(route.calls.last.request.content)
 
 
 def test_session_import_missing_meta_errors(tmp_path: Path) -> None:
