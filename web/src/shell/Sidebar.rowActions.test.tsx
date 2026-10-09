@@ -12,7 +12,7 @@ import { SidebarDataProvider } from "@/hooks/useSidebarData";
 
 import { useSyncExternalStore } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -670,6 +670,43 @@ describe("double-click to rename", () => {
 
     expect(screen.queryByTestId("rename-conversation-input")).toBeNull();
     expect(mocks.rename.mutate).not.toHaveBeenCalled();
+  });
+});
+
+describe("rename under the iOS soft keyboard", () => {
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).omnigentNative;
+    vi.unstubAllGlobals();
+  });
+
+  it("re-centers the focused rename field once the keyboard shrinks the list", () => {
+    // The field focuses (raising the keyboard) while still visible; the
+    // drawer's keyboard-inset padding then shrinks the list underneath it.
+    (window as unknown as Record<string, unknown>).omnigentNative = { kind: "ios" };
+    vi.stubGlobal("innerHeight", 844);
+    const viewport = {
+      offsetTop: 0,
+      height: 844,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    vi.stubGlobal("visualViewport", viewport);
+    renderSidebar();
+    fireEvent.dblClick(screen.getByRole("link", { name: /My Session/ }));
+    const input = screen.getByTestId("rename-conversation-input");
+    expect(input).toHaveFocus();
+    const scrollIntoView = vi.fn();
+    input.scrollIntoView = scrollIntoView;
+
+    act(() => {
+      viewport.height = 508;
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    expect(screen.getByRole("complementary", { name: "Conversations" })).toHaveStyle({
+      paddingBottom: "336px",
+    });
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
   });
 });
 

@@ -108,7 +108,9 @@ _FAKE_VISUAL_VIEWPORT = """
 """
 
 
-def _seed_filler_sessions(base_url: str, count: int) -> list[str]:
+def _seed_filler_sessions(
+    base_url: str, count: int, title_prefix: str = "Filler session"
+) -> list[str]:
     """Create ``count`` titled sessions so the sidebar list overflows."""
     ids: list[str] = []
     bundle = _build_hello_world_bundle()
@@ -118,7 +120,7 @@ def _seed_filler_sessions(base_url: str, count: int) -> list[str]:
         sid = resp.json()["session_id"]
         httpx.patch(
             f"{base_url}/v1/sessions/{sid}",
-            json={"title": f"Filler session {i:02d}"},
+            json={"title": f"{title_prefix} {i:02d}"},
             timeout=10.0,
         ).raise_for_status()
         ids.append(sid)
