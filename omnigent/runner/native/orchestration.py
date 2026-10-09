@@ -64,6 +64,7 @@ from omnigent.errors import (
     OmnigentError,
 )
 from omnigent.harness_plugins import native_provider_for_key
+from omnigent.host.harness_startup import env_wrapper_environment
 from omnigent.models.model_override import validate_model_override
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
@@ -7499,8 +7500,6 @@ def _claude_terminal_launch_env(spec: TerminalEnvSpec) -> dict[str, str]:
     :returns: The effective environment, e.g.
         ``{"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}``.
     """
-    from omnigent.host.harness_startup import env_wrapper_environment
-
     env = dict(os.environ) if spec.inherit_env else {}
     env.update(spec.env)
     for key in spec.env_unset:
