@@ -716,7 +716,8 @@ def _codex_thread_row(home: Path, session_id: str) -> dict[str, object] | None:
     dbs = sorted(home.glob("state_*.sqlite"), key=_codex_state_db_version, reverse=True)
     for db in dbs:
         try:
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            # as_uri() percent-encodes path characters such as ? and # that a raw URI misparses.
+            con = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
             try:
                 con.row_factory = sqlite3.Row
                 row = con.execute("SELECT * FROM threads WHERE id = ?", (session_id,)).fetchone()

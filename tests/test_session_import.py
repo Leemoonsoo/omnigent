@@ -26,6 +26,7 @@ from omnigent.session_import.local import (
     load_qwen_session,
 )
 from omnigent.session_import.models import LocalSessionImport, SessionImportNotFoundError
+from tests._helpers.codex_rollout import CodexRollout
 
 
 def test_import_adapters_use_stable_forwarder_parser_contracts(tmp_path: Path) -> None:
@@ -1352,46 +1353,26 @@ def _write_codex_turns(
     **meta: object,
 ) -> int:
     """Write paginated Codex turns from ``start_ordinal``; return the next ordinal."""
-    records: list[dict] = [
-        {"type": "session_meta", "payload": {"id": session_id, "cwd": "/repo", **meta}}
-    ]
+    rollout = CodexRollout(session_id, start_ordinal=start_ordinal, **{"cwd": "/repo", **meta})
     for index, (question, answer) in enumerate(turns, start=1):
-        records.append({"type": "turn_context", "payload": {"turn_id": f"turn_{index}"}})
-        records.append(
-            {
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": question}],
-                },
-            }
-        )
-        records.append(
-            {
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": answer}],
-                },
-            }
-        )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(
-            f"{json.dumps(dict(record, ordinal=start_ordinal + i))}\n"
-            for i, record in enumerate(records)
-        ),
-        encoding="utf-8",
-    )
-    return start_ordinal + len(records)
+        rollout.turn(index, question, answer)
+    rollout.write(path)
+    return rollout.next_ordinal
 
 
-def test_load_codex_session_reads_rollout_named_by_threads_rollout_path(tmp_path: Path) -> None:
-    """The state DB's rollout_path wins over an older rollout whose filename matches the id."""
+@pytest.mark.parametrize(
+    "home_name", ["codex", "codex?query", "codex#fragment", "codex%3F", "co dex"]
+)
+def test_load_codex_session_reads_rollout_named_by_threads_rollout_path(
+    tmp_path: Path, home_name: str
+) -> None:
+    """The state DB's rollout_path wins over an older rollout whose filename matches the id.
+
+    URI metacharacters in the Codex home path must not break the read-only state DB open.
+    """
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    home = tmp_path / home_name
+    sessions = home / "sessions" / "2026" / "10" / "02"
     _write_codex_turns(
         sessions / f"rollout-2026-10-02T09-00-00-{session_id}.jsonl",
         session_id,
@@ -1404,16 +1385,18 @@ def test_load_codex_session_reads_rollout_named_by_threads_rollout_path(tmp_path
         [("question 1", "answer 1"), ("question 2", "answer 2"), ("question 3", "final answer")],
     )
     _write_codex_threads_db(
-        tmp_path,
+        home,
         session_id,
         title="question 1",
         first_user_message="question 1",
         rollout_path=current,
     )
 
-    imported = load_codex_session(session_id, codex_home=tmp_path)
+    imported = load_codex_session(session_id, codex_home=home)
 
     assert _codex_item_texts(imported)[-1] == "final answer"
+    # A misparsed URI would open (and create) a database at the truncated path.
+    assert sorted(path.name for path in tmp_path.iterdir()) == [home_name]
 
 
 def test_load_codex_session_follows_history_base_of_forked_thread(tmp_path: Path) -> None:

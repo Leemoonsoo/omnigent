@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import signal
 import sqlite3
 import subprocess
@@ -14,6 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests._helpers.codex_rollout import CodexRollout, codex_message
 from tests.e2e.test_host_e2e import _spawn_host_daemon, _wait_for_host_online
 
 pytestmark = pytest.mark.timeout(300)
@@ -24,41 +24,9 @@ _PARENT_TURNS = 10
 _BIG_MESSAGE_COUNT = 425
 
 
-def _message(role: str, text: str) -> dict[str, object]:
-    content_type = "input_text" if role == "user" else "output_text"
-    return {"type": "message", "role": role, "content": [{"type": content_type, "text": text}]}
-
-
-class _Rollout:
-    """One paginated Codex rollout; a rollout with ``history_base`` numbers on from its cutoff."""
-
-    def __init__(self, thread_id: str, **meta: object) -> None:
-        base = meta.get("history_base")
-        self.next_ordinal = base["end_ordinal_exclusive"] if isinstance(base, dict) else 0
-        self.records: list[dict[str, object]] = []
-        self.append(
-            "session_meta",
-            {
-                "id": thread_id,
-                "cwd": _CWD,
-                "source": "vscode",
-                "history_mode": "paginated",
-                **meta,
-            },
-        )
-
-    def append(self, kind: str, payload: dict[str, object]) -> None:
-        self.records.append({"ordinal": self.next_ordinal, "type": kind, "payload": payload})
-        self.next_ordinal += 1
-
-    def turn(self, index: int, user_text: str, assistant_text: str) -> None:
-        self.append("turn_context", {"turn_id": f"turn_{index}", "cwd": _CWD})
-        self.append("response_item", _message("user", user_text))
-        self.append("response_item", _message("assistant", assistant_text))
-
-    def write(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("".join(f"{json.dumps(r)}\n" for r in self.records), encoding="utf-8")
+def _rollout(thread_id: str, **meta: object) -> CodexRollout:
+    """A Codex Desktop rollout for ``thread_id``."""
+    return CodexRollout(thread_id, cwd=_CWD, source="vscode", history_mode="paginated", **meta)
 
 
 @dataclass(frozen=True)
@@ -82,14 +50,14 @@ def _seed_codex_home(home: Path) -> _Seeded:
     # A thread reverted to its second turn: the thread store names the new
     # rollout, whose history_base points back into the original one.
     reverted = str(uuid.uuid4())
-    original = _Rollout(reverted)
+    original = _rollout(reverted)
     for index in (1, 2, 3):
         original.turn(
             index, f"reverted thread question {index}", f"reverted thread answer {index}"
         )
     original.write(sessions / name(reverted, "09-00-00"))
     revert_point = 1 + 3 * 2
-    current = _Rollout(
+    current = _rollout(
         reverted,
         history_base={"thread_id": reverted, "end_ordinal_exclusive": revert_point},
     )
@@ -100,14 +68,14 @@ def _seed_codex_home(home: Path) -> _Seeded:
 
     # A fork that has not taken a turn yet holds only metadata.
     parent = str(uuid.uuid4())
-    parent_rollout = _Rollout(parent)
+    parent_rollout = _rollout(parent)
     for index in range(1, _PARENT_TURNS + 1):
         parent_rollout.turn(index, f"fork parent question {index}", f"fork parent answer {index}")
     parent_path = sessions / name(parent, "10-00-00")
     parent_rollout.write(parent_path)
     rows.append((parent, "fork parent question 1", str(parent_path), 0))
     fork = str(uuid.uuid4())
-    fork_rollout = _Rollout(
+    fork_rollout = _rollout(
         fork,
         history_base={"thread_id": parent, "end_ordinal_exclusive": parent_rollout.next_ordinal},
     )
@@ -118,20 +86,20 @@ def _seed_codex_home(home: Path) -> _Seeded:
 
     # Above the 2 MiB threshold, with compactions after messages 100, 200 and 310.
     compacted = str(uuid.uuid4())
-    big = _Rollout(compacted)
+    big = _rollout(compacted)
     padding = " lorem" * 1900
     for number in range(1, _BIG_MESSAGE_COUNT + 1):
         text = f"compacted thread message {number}{padding}"
         if number % 2 == 1:
-            big.append("turn_context", {"turn_id": f"turn_{(number + 1) // 2}", "cwd": _CWD})
-            big.append("response_item", _message("user", text))
+            big.append("turn_context", {"turn_id": f"turn_{(number + 1) // 2}"})
+            big.append("response_item", codex_message("user", text))
         else:
-            big.append("response_item", _message("assistant", text))
+            big.append("response_item", codex_message("assistant", text))
         if number in (100, 200, 310):
             summary = f"Summary of the first {number} messages."
             big.append(
                 "compacted",
-                {"message": summary, "replacement_history": [_message("user", summary)]},
+                {"message": summary, "replacement_history": [codex_message("user", summary)]},
             )
     big_path = sessions / name(compacted, "11-00-00")
     big.write(big_path)
@@ -139,7 +107,7 @@ def _seed_codex_home(home: Path) -> _Seeded:
 
     # `codex archive` moves the rollout under archived_sessions/ and sets threads.archived.
     archived = str(uuid.uuid4())
-    archived_rollout = _Rollout(archived)
+    archived_rollout = _rollout(archived)
     archived_rollout.turn(1, "archived thread question", "archived thread answer")
     archived_path = codex / "archived_sessions" / name(archived, "12-00-00")
     archived_rollout.write(archived_path)
@@ -279,7 +247,7 @@ def test_import_keeps_every_message_of_a_compacted_thread(
     summaries = [f"Summary of the first {number} messages." for number in (100, 200, 310)]
     assert [item["summary"] for item in compactions] == summaries
     assert [item["compacted_messages"] for item in compactions] == [
-        [_message("user", summary)] for summary in summaries
+        [codex_message("user", summary)] for summary in summaries
     ]
 
 
