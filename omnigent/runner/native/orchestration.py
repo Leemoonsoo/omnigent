@@ -8949,9 +8949,12 @@ async def _auto_create_claude_terminal(
     try:
         ensure_claude_workspace_trusted(Path(workspace), env=_claude_terminal_launch_env(env_spec))
     except BaseException:
-        # No forwarder owns the routers yet, so release them before failing.
-        await _shutdown_session_router_async(session_id, _subagent_router)
-        await _shutdown_session_turn_router_async(session_id, _claude_turn_router)
+        # No forwarder owns the routers yet, so release the ones this launch started.
+        # A ``None`` handle would shut down whichever router is registered now.
+        if _subagent_router is not None:
+            await _shutdown_session_router_async(session_id, _subagent_router)
+        if _claude_turn_router is not None:
+            await _shutdown_session_turn_router_async(session_id, _claude_turn_router)
         raise
     _logger.info(
         "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "

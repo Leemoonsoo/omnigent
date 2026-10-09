@@ -1007,24 +1007,35 @@ async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
     registry.launch_required_terminal.assert_awaited_once()
 
 
+@pytest.mark.parametrize(
+    "subagent_started,turn_started",
+    [(True, True), (True, False), (False, True), (False, False)],
+)
 async def test_auto_create_claude_terminal_cleans_routers_when_trust_seeding_fails(
     bridge_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
+    subagent_started: bool,
+    turn_started: bool,
 ) -> None:
     """
-    A trust-seeding failure releases the session's routers before it propagates.
+    A trust-seeding failure releases only the routers this launch started.
 
     Seeding runs after the subagent and turn routers start but before the
     forwarder that normally shuts them down exists, so a malformed config must
-    not leave them running.
+    not leave them running. A router this launch did not start is not shut
+    down, because a ``None`` handle would close whichever router a replacement
+    session registered.
+
+    :param subagent_started: Whether this launch started a subagent router.
+    :param turn_started: Whether this launch started a turn router.
     """
     from unittest.mock import Mock
 
     from omnigent.runner.native import orchestration
     from omnigent.runner.resource_registry import SessionResourceRegistry
 
-    subagent_router = object()
-    turn_router = object()
+    subagent_router = object() if subagent_started else None
+    turn_router = object() if turn_started else None
     shutdowns: list[tuple[str, object]] = []
 
     async def record_subagent_shutdown(_session_id: str, router: object) -> None:
@@ -1039,7 +1050,7 @@ async def test_auto_create_claude_terminal_cleans_routers_when_trust_seeding_fai
     monkeypatch.setattr(
         orchestration,
         "_start_subagent_router_for_native_session",
-        lambda *_a, **_k: (bridge_dir, subagent_router),
+        lambda *_a, **_k: (bridge_dir if subagent_started else None, subagent_router),
     )
     monkeypatch.setattr(
         orchestration, "_start_turn_router_for_native_session", lambda *_a, **_k: turn_router
@@ -1059,5 +1070,10 @@ async def test_auto_create_claude_terminal_cleans_routers_when_trust_seeding_fai
             registry=registry,
         )
 
-    assert shutdowns == [("subagent", subagent_router), ("turn", turn_router)]
+    expected = []
+    if subagent_started:
+        expected.append(("subagent", subagent_router))
+    if turn_started:
+        expected.append(("turn", turn_router))
+    assert shutdowns == expected
     registry.launch_required_terminal.assert_not_called()
