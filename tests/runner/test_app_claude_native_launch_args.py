@@ -831,28 +831,102 @@ def test_claude_terminal_launch_env_matches_pane_environment(
 
 
 def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
 
-    The shared parser does not model ``--chdir`` or unbalanced ``-S`` quoting,
-    so their assignments are not applied even though the real launch would
-    apply them. Seeding then uses the runner and spec environment.
+    The shared parser does not model ``--chdir``, unbalanced ``-S`` quoting, or
+    ``-S`` variable expansion, escapes, and comments, so their assignments are
+    not applied even though the real launch would apply them. Seeding then uses
+    the runner and spec environment instead of a misread path.
     """
+    from omnigent.harnesses.claude_native.bridge import ensure_claude_workspace_trusted
     from omnigent.inner.datamodel import TerminalEnvSpec
     from omnigent.runner.native import orchestration
 
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
+    runner_config = tmp_path / "runner-claude"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runner_config))
+    monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
     for args in (
         ["--chdir", "/srv", "CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
         ["-S", "CLAUDE_CONFIG_DIR='/wrap/claude claude"],
+        ["-S", "CLAUDE_CONFIG_DIR=${HOME}/claude claude"],
+        ["-S", "CLAUDE_CONFIG_DIR=wrap\\_claude claude"],
+        ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude #comment"],
     ):
-        spec = TerminalEnvSpec(command="env", args=args)
-        assert (
-            orchestration._claude_terminal_launch_env(spec)["CLAUDE_CONFIG_DIR"]
-            == "/runner/claude"
-        )
+        env = orchestration._claude_terminal_launch_env(TerminalEnvSpec(command="env", args=args))
+        assert env["CLAUDE_CONFIG_DIR"] == str(runner_config)
+
+        ensure_claude_workspace_trusted(workspace, env=env)
+
+        assert (runner_config / ".claude.json").is_file()
+        assert not (workspace / "${HOME}").exists()
+
+
+def _claude_auto_create_session_init(session_id: str, workspace: Path):
+    """
+    Build the session-init envelope ``_auto_create_claude_terminal`` consumes.
+
+    :param session_id: Session id, e.g. ``"conv_seed_launch_env"``.
+    :param workspace: Session workspace, e.g. the ``bridge_dir`` fixture.
+    :returns: A :class:`RunnerSessionInitEnvelope` rooted at *workspace*.
+    """
+    from omnigent.runner.session_init_protocol import (
+        SESSION_INIT_PROTOCOL_VERSION,
+        RunnerSessionInitEnvelope,
+        RunnerSessionInitSnapshot,
+    )
+
+    return RunnerSessionInitEnvelope(
+        protocol_version=SESSION_INIT_PROTOCOL_VERSION,
+        server_version="test",
+        session_id=session_id,
+        agent_id="agent",
+        snapshot=RunnerSessionInitSnapshot(created_at=0, updated_at=0, workspace=str(workspace)),
+    )
+
+
+async def _auto_create_claude_terminal_for_test(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    session_id: str,
+    workspace: Path,
+    registry: object,
+) -> None:
+    """
+    Run ``_auto_create_claude_terminal`` with host config and diagnostics stubbed.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :param session_id: Session id, e.g. ``"conv_seed_launch_env"``.
+    :param workspace: Session workspace, e.g. the ``bridge_dir`` fixture.
+    :param registry: Session resource registry double.
+    :returns: None. Raises whatever the auto-create path raises.
+    """
+    from unittest.mock import AsyncMock, Mock
+
+    import httpx
+
+    from omnigent.harnesses.claude_native import diagnostics
+    from omnigent.runner.native import orchestration
+
+    monkeypatch.setattr("omnigent.inference_config.load_runtime_inference_config", dict)
+    monkeypatch.setattr("omnigent.config.load_effective_config", dict)
+    monkeypatch.setattr(orchestration, "resolve_cli_binary", lambda _: None)
+    monkeypatch.setattr(diagnostics, "ClaudeDebugLogFollower", lambda _: Mock())
+    await orchestration._auto_create_claude_terminal(
+        session_id,
+        registry,
+        Mock(),
+        server_client=AsyncMock(spec=httpx.AsyncClient),
+        session_init=_claude_auto_create_session_init(session_id, workspace),
+        auth_token_factory=lambda: None,
+        resolve_launch_config=AsyncMock(return_value=None),
+    )
 
 
 async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
@@ -865,21 +939,13 @@ async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
     A launch-only ``CLAUDE_CONFIG_DIR`` (here from an ``env`` wrapper) must
     reach the seeder, and seeding must happen before the terminal launches.
     """
-    from unittest.mock import AsyncMock, Mock
+    from unittest.mock import Mock
 
-    import httpx
-
-    from omnigent.harnesses.claude_native import diagnostics
-    from omnigent.runner.native import orchestration
     from omnigent.runner.resource_registry import SessionResourceRegistry
-    from omnigent.runner.session_init_protocol import (
-        SESSION_INIT_PROTOCOL_VERSION,
-        RunnerSessionInitEnvelope,
-        RunnerSessionInitSnapshot,
-    )
 
     seeded: list[tuple[Path, dict[str, str] | None]] = []
     registry = Mock(spec=SessionResourceRegistry)
+    registry.launch_required_terminal.side_effect = RuntimeError("stop after seeding")
 
     def record_seed(workspace: Path, env: dict[str, str] | None = None) -> None:
         registry.launch_required_terminal.assert_not_called()
@@ -900,29 +966,10 @@ async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
             *cli_args,
         ],
     )
-    monkeypatch.setattr("omnigent.inference_config.load_runtime_inference_config", dict)
-    monkeypatch.setattr("omnigent.config.load_effective_config", dict)
-    monkeypatch.setattr(orchestration, "resolve_cli_binary", lambda _: None)
-    monkeypatch.setattr(diagnostics, "ClaudeDebugLogFollower", lambda _: Mock())
-    registry.launch_required_terminal.side_effect = RuntimeError("stop after seeding")
-    session_id = "conv_seed_launch_env"
-    session_init = RunnerSessionInitEnvelope(
-        protocol_version=SESSION_INIT_PROTOCOL_VERSION,
-        server_version="test",
-        session_id=session_id,
-        agent_id="agent",
-        snapshot=RunnerSessionInitSnapshot(created_at=0, updated_at=0, workspace=str(bridge_dir)),
-    )
 
     with pytest.raises(RuntimeError, match="stop after seeding"):
-        await orchestration._auto_create_claude_terminal(
-            session_id,
-            registry,
-            Mock(),
-            server_client=AsyncMock(spec=httpx.AsyncClient),
-            session_init=session_init,
-            auth_token_factory=lambda: None,
-            resolve_launch_config=AsyncMock(return_value=None),
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch, session_id="conv_seed_launch_env", workspace=bridge_dir, registry=registry
         )
 
     assert len(seeded) == 1
@@ -944,17 +991,10 @@ async def test_auto_create_claude_terminal_cleans_routers_when_trust_seeding_fai
     forwarder that normally shuts them down exists, so a malformed config must
     not leave them running.
     """
-    from unittest.mock import AsyncMock, Mock
-
-    import httpx
+    from unittest.mock import Mock
 
     from omnigent.runner.native import orchestration
     from omnigent.runner.resource_registry import SessionResourceRegistry
-    from omnigent.runner.session_init_protocol import (
-        SESSION_INIT_PROTOCOL_VERSION,
-        RunnerSessionInitEnvelope,
-        RunnerSessionInitSnapshot,
-    )
 
     subagent_router = object()
     turn_router = object()
@@ -982,28 +1022,14 @@ async def test_auto_create_claude_terminal_cleans_routers_when_trust_seeding_fai
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted", failing_seed
     )
-    monkeypatch.setattr("omnigent.inference_config.load_runtime_inference_config", dict)
-    monkeypatch.setattr("omnigent.config.load_effective_config", dict)
-    monkeypatch.setattr(orchestration, "resolve_cli_binary", lambda _: None)
     registry = Mock(spec=SessionResourceRegistry)
-    session_id = "conv_seed_failure_routers"
-    session_init = RunnerSessionInitEnvelope(
-        protocol_version=SESSION_INIT_PROTOCOL_VERSION,
-        server_version="test",
-        session_id=session_id,
-        agent_id="agent",
-        snapshot=RunnerSessionInitSnapshot(created_at=0, updated_at=0, workspace=str(bridge_dir)),
-    )
 
     with pytest.raises(ValueError, match="config is not a JSON object"):
-        await orchestration._auto_create_claude_terminal(
-            session_id,
-            registry,
-            Mock(),
-            server_client=AsyncMock(spec=httpx.AsyncClient),
-            session_init=session_init,
-            auth_token_factory=lambda: None,
-            resolve_launch_config=AsyncMock(return_value=None),
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch,
+            session_id="conv_seed_failure_routers",
+            workspace=bridge_dir,
+            registry=registry,
         )
 
     assert shutdowns == [("subagent", subagent_router), ("turn", turn_router)]

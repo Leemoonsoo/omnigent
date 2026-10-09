@@ -118,12 +118,13 @@ def _normalize_env_wrapper_args(args: list[str]) -> list[str]:
     """
     Rewrite env's legacy ``-`` and ``-S`` split strings into the modeled form.
 
-    Split strings use POSIX shell quoting, which covers GNU ``env -S`` except
-    its ``${VAR}`` expansion and ``\\_`` escapes.
+    Split strings use POSIX shell quoting, which matches GNU ``env -S`` when
+    the string has no ``${VAR}`` expansion, backslash escape, or ``#`` comment.
 
     :param args: ``env`` arguments, e.g. ``["-S", "A=1 claude"]``.
     :returns: Equivalent arguments, e.g. ``["A=1", "claude"]``.
-    :raises ValueError: If a split string has unbalanced quotes.
+    :raises ValueError: If a split string has unbalanced quotes or uses
+        syntax that POSIX quoting would read differently from ``env``.
     """
     normalized: list[str] = []
     index = 0
@@ -132,12 +133,12 @@ def _normalize_env_wrapper_args(args: list[str]) -> list[str]:
         if arg == "-":
             normalized.append("-i")  # env's legacy spelling of --ignore-environment
         elif arg in ("-S", "--split-string") and index + 1 < len(args):
-            normalized.extend(shlex.split(args[index + 1]))
+            normalized.extend(_split_env_string(args[index + 1]))
             index += 1
         elif arg.startswith("--split-string="):
-            normalized.extend(shlex.split(arg.partition("=")[2]))
+            normalized.extend(_split_env_string(arg.partition("=")[2]))
         elif arg.startswith("-S") and len(arg) > 2:
-            normalized.extend(shlex.split(arg[2:]))
+            normalized.extend(_split_env_string(arg[2:]))
         elif arg in ("-u", "--unset") and index + 1 < len(args):
             normalized.extend(args[index : index + 2])
             index += 1
@@ -148,6 +149,20 @@ def _normalize_env_wrapper_args(args: list[str]) -> list[str]:
             break
         index += 1
     return normalized
+
+
+def _split_env_string(value: str) -> list[str]:
+    """
+    Split an ``env -S`` string, rejecting syntax POSIX quoting would misread.
+
+    :param value: Split string, e.g. ``"CLAUDE_CONFIG_DIR=/srv/claude claude"``.
+    :returns: The arguments, e.g. ``["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
+    :raises ValueError: If *value* uses ``$`` expansion, a backslash escape, a
+        ``#`` comment, or unbalanced quotes.
+    """
+    if "$" in value or "\\" in value or any(word.startswith("#") for word in value.split()):
+        raise ValueError(f"unsupported env -S syntax: {value!r}")
+    return shlex.split(value)
 
 
 def _unwrap_env(
