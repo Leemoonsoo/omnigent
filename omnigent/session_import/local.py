@@ -236,12 +236,7 @@ def _codex_rollout_meta(path: Path) -> dict[str, object] | None:
 
 
 def _codex_thread_id_from_rollout(path: Path, meta: dict[str, object] | None) -> str | None:
-    """Return the thread a rollout belongs to, preferring ``session_meta.id``.
-
-    Rollouts are named ``rollout-<ts>-<uuid>.jsonl``, but the file a thread
-    currently writes to can carry a different uuid than the thread itself, so
-    the id recorded inside the file wins over the filename suffix.
-    """
+    """Thread id of a rollout; ``session_meta.id`` wins because the filename uuid can be stale."""
     recorded = meta.get("id") if meta else None
     if isinstance(recorded, str) and _is_codex_thread_id(recorded):
         return recorded
@@ -700,12 +695,7 @@ def _codex_state_db_version(path: Path) -> int:
 
 
 def _codex_thread_row(home: Path, session_id: str) -> dict[str, object] | None:
-    """Return the thread's row from the newest ``state_<n>.sqlite`` that has it.
-
-    Codex's thread store records, per thread, the rollout file it currently
-    writes to (``rollout_path``), whether it is archived, and its title. The
-    columns vary across Codex versions, so callers read them with ``.get``.
-    """
+    """Thread row from the newest ``state_<n>.sqlite``; its columns vary by Codex version."""
     dbs = sorted(home.glob("state_*.sqlite"), key=_codex_state_db_version, reverse=True)
     for db in dbs:
         try:
@@ -757,12 +747,7 @@ def _codex_recorded_rollout(home: Path, thread_row: dict[str, object] | None) ->
 def _codex_rollout_path(
     home: Path, session_id: str, thread_row: dict[str, object] | None
 ) -> Path | None:
-    """Locate a thread's rollout: the thread store's ``rollout_path``, else by filename.
-
-    Codex can leave an older ``rollout-*-<id>.jsonl`` behind while the thread
-    writes to a file named after another uuid, so a filename match may be stale;
-    ``rollout_path`` is the file Codex itself resumes.
-    """
+    """Locate a thread's rollout: the thread store's ``rollout_path``, else the filename match."""
     return (
         _codex_recorded_rollout(home, thread_row)
         or _find_codex_rollout(home, session_id)
@@ -802,13 +787,7 @@ def _codex_record_ordinal(record: dict[str, object], position: int) -> int:
 def _codex_inherited_records(
     home: Path, meta: dict[str, object], *, seen: set[str]
 ) -> Iterator[dict[str, object]]:
-    """Yield the records a forked thread inherits from its base thread, oldest first.
-
-    A fork's ``session_meta.history_base`` names the thread it branched from and
-    the ordinal its own records continue at; the base's earlier records are not
-    copied into the fork's rollout. Ordinals run across the whole lineage, so a
-    base that is itself a fork contributes its own inherited records first.
-    """
+    """Yield the base-thread records a fork inherits before its ``history_base`` ordinal."""
     base = meta.get("history_base")
     if not isinstance(base, dict):
         return
@@ -844,13 +823,7 @@ _CODEX_COMPACTION_FALLBACK_SUMMARY = "[Codex compaction — context was compacte
 
 
 def _codex_compaction_item(payload: dict[str, object]) -> NewConversationItem | None:
-    """Convert a Codex ``compacted`` record into a compaction item.
-
-    Its ``replacement_history`` rides along as ``compacted_messages`` — what a
-    live codex-native session persists — so a cold resume rebuilds the same
-    post-compaction context while every earlier turn stays visible. A record
-    with no usable baseline is skipped.
-    """
+    """Carry a ``compacted`` record as a compaction item, as a live codex-native session does."""
     history = payload.get("replacement_history")
     if not isinstance(history, list):
         return None
@@ -913,14 +886,7 @@ def load_codex_session(
     *,
     codex_home: Path | None = None,
 ) -> LocalSessionImport:
-    """Load one Codex thread from its local rollout JSONL.
-
-    Reads the rollout Codex's thread store names for the thread (falling back to
-    the filename match), prepends the base thread's records a fork inherits via
-    ``session_meta.history_base``, and imports the whole transcript with each
-    ``compacted`` record carried as a compaction item (see
-    docs/session-compaction.md).
-    """
+    """Load one Codex thread: thread-store rollout, inherited fork history, compaction items."""
     configured_home = os.environ.get("CODEX_HOME")
     home = codex_home or (Path(configured_home).expanduser() if configured_home else None)
     home = home or Path.home() / ".codex"

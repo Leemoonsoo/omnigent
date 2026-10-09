@@ -1032,12 +1032,7 @@ async def test_local_import_archives_sessions_the_harness_had_archived(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A host-read session flagged ``archived`` lands archived, with its archive time stamped.
-
-    Codex keeps archived threads importable (``archived_sessions/`` plus
-    ``threads.archived``); importing one must not resurrect it as an active
-    session in the sidebar. A session without the flag (older hosts) stays active.
-    """
+    """A host session flagged ``archived`` lands archived; one without the flag stays active."""
     from fastapi import FastAPI
 
     from omnigent.server.routes import imports as imports_module

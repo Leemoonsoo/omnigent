@@ -1208,12 +1208,7 @@ def test_load_codex_session_skips_compaction_boundary_without_baseline(tmp_path:
 
 
 def test_imported_codex_compaction_rebuilds_the_resume_rollout_baseline(tmp_path: Path) -> None:
-    """A cold resume rebuilt from the imported items starts at the compaction baseline.
-
-    The import keeps every turn visible, so the compaction item is what lets the
-    codex-native resume path drop the pre-compaction records Codex no longer
-    holds, exactly as it does for a live session's compaction item.
-    """
+    """A cold resume rebuilt from the imported items restarts at the compaction baseline."""
     from omnigent.harnesses.codex_native.main import _codex_rollout_records_from_session_items
 
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
@@ -1343,12 +1338,7 @@ def _write_codex_turns(
     start_ordinal: int = 0,
     **meta: object,
 ) -> int:
-    """Write a paginated Codex rollout of user/assistant turns; returns the next ordinal.
-
-    A fork's records continue its base thread's ordinals, so ``start_ordinal``
-    is the base's ``end_ordinal_exclusive`` and the return value is what a
-    further fork would record as its own ``history_base.end_ordinal_exclusive``.
-    """
+    """Write paginated Codex turns from ``start_ordinal``; return the next ordinal."""
     records: list[dict] = [
         {"type": "session_meta", "payload": {"id": session_id, "cwd": "/repo", **meta}}
     ]

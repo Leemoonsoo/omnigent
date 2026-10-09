@@ -1,14 +1,4 @@
-"""E2E: Settings › Import must keep the whole history of imported Codex threads.
-
-Drives the real Settings › Import UI against a live host daemon whose
-``$HOME/.codex`` mirrors Codex 0.154's paginated thread store: ``state_5.sqlite``
-``threads`` rows (``rollout_path``, ``archived``, ``history_mode``) plus rollout
-JSONL files under ``sessions/`` and ``archived_sessions/``. The seeded threads
-cover a thread whose ``threads.rollout_path`` names a file the filename glob does
-not match, a fork whose history lives in its parent via
-``session_meta.history_base``, a multi-compaction transcript above 2 MiB, a thread
-archived in Codex, and a batch size above 100.
-"""
+"""E2E: Settings › Import keeps the whole history of Codex threads read by a real host daemon."""
 
 from __future__ import annotations
 
@@ -100,8 +90,7 @@ CREATE TABLE threads (
     project_id TEXT,
     originator TEXT,
     daybreak_enabled BOOLEAN
-)
-"""
+)"""
 
 
 def _message(role: str, text: str) -> dict[str, object]:
