@@ -384,7 +384,7 @@ def test_encode_import_local_session_frames_slices_oversized_session(
 ) -> None:
     """An oversized session is sliced into ordered chunk frames that reassemble."""
     monkeypatch.setattr("omnigent.host.frames.IMPORT_SESSION_CHUNK_CHARS", 64)
-    session = _session_with_payload("x" * 500)
+    session = dataclasses.replace(_session_with_payload("x" * 500), archived=True)
 
     frames = [
         decode_host_frame(text)
@@ -404,6 +404,7 @@ def test_encode_import_local_session_frames_slices_oversized_session(
     reassembled = [assembler.add(f) for f in frames]
     assert reassembled[:-1] == [None] * (len(frames) - 1)
     assert reassembled[-1] == session
+    assert reassembled[-1].archived is True
 
 
 def _session_json(session: HostImportedLocalSession) -> str:
@@ -2424,24 +2425,6 @@ def test_mcp_tools_allow_list_and_correlated_malformed_result():
     frame = decode_host_frame(json.dumps(payload))
     assert isinstance(frame, HostMcpToolsResultFrame)
     assert (frame.request_id, frame.status, frame.tools) == ("m", "failed", [])
-
-
-def test_import_local_session_archived_flag_survives_chunked_reassembly(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An archived session sliced into chunk frames reassembles with ``archived`` still set."""
-    monkeypatch.setattr("omnigent.host.frames.IMPORT_SESSION_CHUNK_CHARS", 64)
-    session = dataclasses.replace(_session_with_payload("x" * 500), archived=True)
-
-    frames = [
-        decode_host_frame(text)
-        for text in encode_import_local_session_frames("req_big", 1, session, allow_chunks=True)
-    ]
-    assembler = ImportLocalSessionChunkAssembler()
-    reassembled = [assembler.add(frame) for frame in frames][-1]
-
-    assert len(frames) > 1
-    assert reassembled is not None and reassembled.archived is True
 
 
 def test_import_local_session_archived_flag_round_trips_and_defaults() -> None:

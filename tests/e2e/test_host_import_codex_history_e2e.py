@@ -208,9 +208,9 @@ def _import(http_client: httpx.Client, host: _ImportHost, thread_id: str) -> str
     return result["sessions"][0]["session_id"]
 
 
-def _message_texts(http_client: httpx.Client, session_id: str) -> list[str]:
-    """Text of every visible message item, oldest first."""
-    texts: list[str] = []
+def _items(http_client: httpx.Client, session_id: str) -> list[dict[str, object]]:
+    """Every persisted item of a session, oldest first."""
+    items: list[dict[str, object]] = []
     after: str | None = None
     while True:
         params: dict[str, object] = {"limit": 1000, "order": "asc"}
@@ -219,16 +219,21 @@ def _message_texts(http_client: httpx.Client, session_id: str) -> list[str]:
         response = http_client.get(f"/v1/sessions/{session_id}/items", params=params, timeout=30)
         response.raise_for_status()
         body = response.json()
-        for item in body["data"]:
-            if item.get("type") == "message" and not item.get("is_meta"):
-                texts.extend(
-                    block["text"]
-                    for block in item.get("content") or []
-                    if isinstance(block, dict) and isinstance(block.get("text"), str)
-                )
+        items.extend(body["data"])
         if not body.get("has_more") or not body["data"]:
-            return texts
+            return items
         after = body["data"][-1]["id"]
+
+
+def _message_texts(items: list[dict[str, object]]) -> list[str]:
+    """Text of every visible message item."""
+    return [
+        block["text"]
+        for item in items
+        if item.get("type") == "message" and not item.get("is_meta")
+        for block in item.get("content") or []
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    ]
 
 
 def test_import_keeps_history_from_before_a_revert(
@@ -237,7 +242,7 @@ def test_import_keeps_history_from_before_a_revert(
     """The thread store's current rollout plus the original rollout up to the revert point."""
     session_id = _import(http_client, import_host, import_host.seeded.reverted)
 
-    assert _message_texts(http_client, session_id) == [
+    assert _message_texts(_items(http_client, session_id)) == [
         "reverted thread question 1",
         "reverted thread answer 1",
         "reverted thread question 2",
@@ -253,7 +258,7 @@ def test_import_follows_history_base_for_metadata_only_fork(
     """A fork that holds only metadata imports the history it inherits."""
     session_id = _import(http_client, import_host, import_host.seeded.metadata_only_fork)
 
-    texts = _message_texts(http_client, session_id)
+    texts = _message_texts(_items(http_client, session_id))
     assert texts[0] == "fork parent question 1"
     assert texts[-1] == f"fork parent answer {_PARENT_TURNS}"
     assert len(texts) == 2 * _PARENT_TURNS
@@ -265,9 +270,17 @@ def test_import_keeps_every_message_of_a_compacted_thread(
     """A transcript above 2 MiB with several compactions imports every visible message."""
     session_id = _import(http_client, import_host, import_host.seeded.compacted)
 
-    texts = _message_texts(http_client, session_id)
+    items = _items(http_client, session_id)
+    texts = _message_texts(items)
     assert len(texts) == _BIG_MESSAGE_COUNT, f"imported {len(texts)} of {_BIG_MESSAGE_COUNT}"
     assert texts[0].startswith("compacted thread message 1 ")
+    # Each compaction keeps its baseline, which a cold resume rebuilds from.
+    compactions = [item for item in items if item.get("type") == "compaction"]
+    summaries = [f"Summary of the first {number} messages." for number in (100, 200, 310)]
+    assert [item["summary"] for item in compactions] == summaries
+    assert [item["compacted_messages"] for item in compactions] == [
+        [_message("user", summary)] for summary in summaries
+    ]
 
 
 def test_import_keeps_a_codex_archived_thread_archived(

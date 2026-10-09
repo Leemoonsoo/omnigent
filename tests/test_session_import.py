@@ -1307,10 +1307,22 @@ def _write_codex_threads_db(
     first_user_message: str,
     rollout_path: Path | None = None,
     archived: bool = False,
+    legacy_schema: bool = False,
 ) -> None:
-    """Write a codex ``state_5.sqlite`` holding one thread's row."""
+    """Write a codex ``state_5.sqlite`` holding one thread's row.
+
+    ``legacy_schema`` writes an older ``threads`` table without ``rollout_path``/``archived``.
+    """
     con = sqlite3.connect(tmp_path / "state_5.sqlite")
     try:
+        if legacy_schema:
+            con.execute("CREATE TABLE threads (id TEXT, title TEXT, first_user_message TEXT)")
+            con.execute(
+                "INSERT INTO threads (id, title, first_user_message) VALUES (?, ?, ?)",
+                (session_id, title, first_user_message),
+            )
+            con.commit()
+            return
         con.execute(
             "CREATE TABLE threads "
             "(id TEXT, title TEXT, first_user_message TEXT, rollout_path TEXT, archived INTEGER)"
@@ -1813,18 +1825,29 @@ def test_load_codex_session_reports_archived_state_from_thread_store(tmp_path: P
         assert imported.archived is archived
 
 
-def test_load_codex_session_uses_custom_thread_title(tmp_path: Path) -> None:
-    """A renamed Codex thread (title != first message) carries its custom name."""
+@pytest.mark.parametrize("legacy_schema", [False, True], ids=["current", "legacy-schema"])
+def test_load_codex_session_uses_custom_thread_title(tmp_path: Path, legacy_schema: bool) -> None:
+    """A renamed Codex thread (title != first message) carries its custom name.
+
+    An older thread store without ``rollout_path``/``archived`` still supplies the title;
+    the rollout then comes from the filename and the thread is not archived.
+    """
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     _write_codex_rollout(tmp_path, session_id, first_message="inspect TODO.md")
     _write_codex_threads_db(
-        tmp_path, session_id, title="my renamed thread", first_user_message="inspect TODO.md"
+        tmp_path,
+        session_id,
+        title="my renamed thread",
+        first_user_message="inspect TODO.md",
+        legacy_schema=legacy_schema,
     )
 
     imported = load_codex_session(session_id, codex_home=tmp_path)
 
     assert imported.native_title == "my renamed thread"
     assert imported.title == "my renamed thread"
+    assert _codex_item_texts(imported) == ["inspect TODO.md"]
+    assert imported.archived is False
 
 
 def test_load_codex_session_ignores_auto_thread_title(tmp_path: Path) -> None:
