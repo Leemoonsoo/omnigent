@@ -128,6 +128,7 @@ from omnigent.server._elicitation_registry import (
     _PreResolvedHarnessElicitation,
 )
 from omnigent.server.auth import (
+    LEVEL_EDIT,
     LEVEL_READ,
     local_single_user_enabled,
 )
@@ -155,6 +156,7 @@ from omnigent.server.managed_hosts import (
     parse_repo_workspace,
     read_managed_repo_workspaces,
 )
+from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -387,6 +389,8 @@ from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.conversation_store import (
     PINNED_LABEL_KEY,
     RUNNER_LIVENESS_TTL_S,
+    SIDE_CHAT_LABEL_KEY,
+    SIDE_CHAT_SOURCE_LABEL_KEY,
     ConversationNotFoundError,
     NameAlreadyExistsError,
     pinned_label_key,
@@ -4664,6 +4668,107 @@ async def ensure_runner_connected(
             conv = await _reread()
 
     return runner_client, conv
+
+
+def _side_chat_source_id(conv: Conversation) -> str | None:
+    """Return the source session whose runner a side chat shares, if any."""
+    if conv.kind != "default" or conv.host_id is not None:
+        return None
+    labels = conv.labels or {}
+    source_id = labels.get(SIDE_CHAT_SOURCE_LABEL_KEY)
+    if labels.get(SIDE_CHAT_LABEL_KEY) != "1" or not source_id or source_id == conv.id:
+        return None
+    return source_id
+
+
+async def _recover_side_chat_runner_via_source(
+    side_chat: Conversation,
+    *,
+    app_state: Any,
+    conversation_store: ConversationStore,
+    runner_router: RunnerRouter | None,
+    user_id: str | None,
+    permission_store: PermissionStore | None,
+    raise_host_refusal: bool = False,
+) -> tuple[httpx.AsyncClient | None, Conversation]:
+    """
+    Rebind a side chat whose shared runner is gone to its source's live runner.
+
+    A side chat has no host of its own and runs on its source session's runner.
+    When that runner exits (for example, on idle timeout) or is replaced, the
+    side chat's binding goes stale. This brings the source's runner back with
+    :func:`ensure_runner_connected`, relaunching it on the source's host when
+    needed, then binds the side chat to it. The caller must initialize the side
+    chat on the returned runner.
+
+    Recovery requires edit access to the source: the caller could relaunch the
+    same runner by messaging the source directly.
+
+    :param side_chat: Side-chat row whose runner client could not be resolved.
+    :param app_state: ``request.app.state`` — supplies registries and stores.
+    :param conversation_store: Store holding both rows.
+    :param runner_router: The ``RunnerRouter``, or ``None`` for in-process.
+    :param user_id: Authenticated caller, e.g. ``"alice@example.com"``.
+    :param permission_store: Permission store, or ``None`` when auth is off.
+    :param raise_host_refusal: Passed to :func:`ensure_runner_connected`.
+    :returns: ``(runner_client, side_chat)`` with the re-read row, or
+        ``(None, side_chat)`` when the source's runner can't be recovered.
+    :raises OmnigentError: ``WRONG_REPLICA`` when the source's host is live on
+        another replica, so the client re-addresses the request.
+    """
+    source_id = _side_chat_source_id(side_chat)
+    if source_id is None:
+        return None, side_chat
+    source = await asyncio.to_thread(conversation_store.get_conversation, source_id)
+    if source is None:
+        return None, side_chat
+    if permission_store is not None and not await asyncio.to_thread(
+        check_session_access,
+        user_id,
+        source_id,
+        LEVEL_EDIT,
+        permission_store,
+        conversation_store,
+        source,
+    ):
+        return None, side_chat
+    if (
+        runner_router is not None
+        and source.host_id is not None
+        and await asyncio.to_thread(runner_router.host_is_on_another_replica, source.host_id)
+    ):
+        raise OmnigentError(
+            "side chat runner is connected to another server replica",
+            code=ErrorCode.WRONG_REPLICA,
+        )
+    source_client, source = await ensure_runner_connected(
+        session_id=source_id,
+        conv=source,
+        app_state=app_state,
+        conversation_store=conversation_store,
+        runner_router=runner_router,
+        raise_host_refusal=raise_host_refusal,
+    )
+    if source_client is None or source.runner_id is None:
+        return None, side_chat
+    if source.runner_id != side_chat.runner_id:
+        try:
+            await asyncio.to_thread(
+                conversation_store.replace_runner_id, side_chat.id, source.runner_id
+            )
+        except ConversationNotFoundError:
+            return None, side_chat
+        _logger.info(
+            "Side chat %s rebound to source %s runner %s",
+            side_chat.id,
+            source_id,
+            source.runner_id,
+            extra={"session_id": side_chat.id},
+        )
+    refreshed = await asyncio.to_thread(conversation_store.get_conversation, side_chat.id)
+    if refreshed is None:
+        return None, side_chat
+    return await _get_runner_client(side_chat.id, runner_router, conversation=refreshed), refreshed
 
 
 def _recorded_repo_workspaces(
