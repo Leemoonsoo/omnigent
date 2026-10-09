@@ -8340,6 +8340,58 @@ def test_claude_global_config_path_matches_claude_resolution(
     assert claude_global_config_path(workspace) == tmp_path / expected
 
 
+def test_claude_global_config_path_uses_launch_env_and_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Selectors come from Claude's launch env, and a relative dir from its cwd.
+
+    The runner's own ``HOME`` and ``CLAUDE_CONFIG_DIR`` must not decide the
+    file when the terminal is launched with different values.
+    """
+    _redirect_home(monkeypatch, tmp_path / "runner-home")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "runner-config"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    launch_env = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": "relcfg"}
+
+    assert (
+        claude_global_config_path(workspace, launch_env) == workspace / "relcfg" / ".claude.json"
+    )
+    (workspace / "relcfg").mkdir()
+    (workspace / "relcfg" / ".config.json").write_text("{}")
+    assert (
+        claude_global_config_path(workspace, launch_env) == workspace / "relcfg" / ".config.json"
+    )
+    home_only = {"HOME": str(tmp_path / "home")}
+    assert claude_global_config_path(workspace, home_only) == tmp_path / "home" / ".claude.json"
+
+
+def test_ensure_trusted_seeds_the_launch_env_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The seed lands in the file chosen by the terminal's launch env.
+
+    A launch-time ``CLAUDE_CONFIG_DIR`` moves Claude's global config, so the
+    runner-default ``~/.claude.json`` must stay untouched.
+    """
+    runner_config = _redirect_home(monkeypatch, tmp_path / "home")
+    selected = tmp_path / "selected"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    ensure_claude_workspace_trusted(
+        workspace, env={"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(selected)}
+    )
+
+    data = json.loads((selected / ".claude.json").read_text())
+    assert data["projects"][str(workspace.resolve())]["hasTrustDialogAccepted"] is True
+    assert not runner_config.exists()
+
+
 def test_display_cost_approval_popup_builds_detached_tmux_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1771,7 +1771,9 @@ def prune_orphaned_bridge_dirs() -> int:
     return native_bridge_common.prune_orphaned_dirs(_BRIDGE_ROOT)
 
 
-def claude_global_config_path(cwd: Path | None = None) -> Path:
+def claude_global_config_path(
+    cwd: Path | None = None, env: Mapping[str, str] | None = None
+) -> Path:
     """
     Return the global config file Claude Code actually loads.
 
@@ -1780,34 +1782,40 @@ def claude_global_config_path(cwd: Path | None = None) -> Path:
     exists; otherwise it is ``.claude.json`` under ``$CLAUDE_CONFIG_DIR``,
     else the home directory, named ``.claude-custom-oauth.json`` when
     ``CLAUDE_CODE_CUSTOM_OAUTH_URL`` is set. Claude ignores keys written to
-    any other candidate. An explicitly empty ``CLAUDE_CONFIG_DIR`` is not
-    the same as unset: Claude then looks for the legacy file relative to
-    its working directory but still falls back to the home directory.
+    any other candidate. A relative ``CLAUDE_CONFIG_DIR`` is relative to
+    Claude's working directory. An explicitly empty one is not the same as
+    unset: Claude then looks for the legacy file in its working directory
+    but still falls back to the home directory.
 
     :param cwd: Directory Claude Code is launched in, e.g.
-        ``Path("/home/user/repo")``; only consulted when
-        ``CLAUDE_CONFIG_DIR`` is set but empty. ``None`` uses the current
-        working directory.
+        ``Path("/home/user/repo")``. ``None`` uses the current working
+        directory.
+    :param env: Environment Claude Code is launched with, e.g.
+        ``{"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}``.
+        ``None`` uses this process's environment.
     :returns: The config file path, e.g. ``Path("/home/user/.claude.json")``
         or ``Path("/home/user/.claude/.config.json")`` on a host whose
         Claude Code install predates ``~/.claude.json``.
     """
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    config_root = Path(config_dir).expanduser() if config_dir else None
+    env = os.environ if env is None else env
+    base = cwd if cwd is not None else Path.cwd()
+    home = Path(env["HOME"]) if env.get("HOME") else Path.home()
+    config_dir = env.get("CLAUDE_CONFIG_DIR")
+    config_root = base / Path(config_dir).expanduser() if config_dir else None
     if config_dir is None:
-        legacy_root = Path.home() / ".claude"
+        legacy_root = home / ".claude"
     elif config_root is None:
-        legacy_root = cwd if cwd is not None else Path.cwd()
+        legacy_root = base
     else:
         legacy_root = config_root
     legacy_path = legacy_root / ".config.json"
     if legacy_path.exists():
         return legacy_path
-    suffix = "-custom-oauth" if os.environ.get("CLAUDE_CODE_CUSTOM_OAUTH_URL") else ""
-    return (config_root or Path.home()) / f".claude{suffix}.json"
+    suffix = "-custom-oauth" if env.get("CLAUDE_CODE_CUSTOM_OAUTH_URL") else ""
+    return (config_root or home) / f".claude{suffix}.json"
 
 
-def ensure_claude_workspace_trusted(workspace: Path) -> None:
+def ensure_claude_workspace_trusted(workspace: Path, env: Mapping[str, str] | None = None) -> None:
     """
     Pre-accept Claude Code's first-run trust + onboarding prompts.
 
@@ -1844,6 +1852,9 @@ def ensure_claude_workspace_trusted(workspace: Path) -> None:
     :param workspace: The runner workspace Claude will launch in, e.g.
         ``Path("/home/user/repo-worktrees/feature-x")``. Resolved to an
         absolute path to match Claude's ``projects`` key convention.
+    :param env: Environment the Claude terminal is launched with, used to
+        find the config file Claude will load. ``None`` uses this process's
+        environment.
     :returns: None.
     :raises ValueError: If the existing global config (or its
         ``projects`` map / target project entry) is not a JSON object.
@@ -1852,7 +1863,7 @@ def ensure_claude_workspace_trusted(workspace: Path) -> None:
     :raises json.JSONDecodeError: If the existing global config is
         not valid JSON, for the same reason.
     """
-    config_path = claude_global_config_path(workspace)
+    config_path = claude_global_config_path(workspace, env)
     if config_path.exists():
         data = json.loads(config_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):

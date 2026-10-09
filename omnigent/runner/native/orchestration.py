@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from omnigent.harnesses.opencode_native.app_server import OpenCodeNativeServer
     from omnigent.harnesses.opencode_native.client import OpenCodeClient, OpenCodeSession
     from omnigent.harnesses.opencode_native.forwarder import OpenCodeNativeForwarder
-    from omnigent.inner.datamodel import OSEnvSpec
+    from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
     from omnigent.inner.terminal import TerminalInstance
     from omnigent.runner.subagent_routing import SubagentRouter
     from omnigent.runner.turn_routing import TurnRouter
@@ -7485,6 +7485,36 @@ def _claude_terminal_env_unset(
     return env_unset
 
 
+def _claude_terminal_launch_env(spec: TerminalEnvSpec) -> dict[str, str]:
+    """
+    Return the environment the native Claude terminal process starts with.
+
+    Mirrors the pane launch: the runner environment (when inherited), the
+    spec's overrides and removals, then the options and assignments of an
+    ``env`` wrapper command. Trust seeding uses it so the runner writes the
+    global config file this Claude process will read.
+
+    :param spec: The Claude terminal launch spec, e.g. one with
+        ``command="env"`` and ``args=["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
+    :returns: The effective environment, e.g.
+        ``{"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}``.
+    """
+    from omnigent.host.harness_startup import env_wrapper_environment
+
+    env = dict(os.environ) if spec.inherit_env else {}
+    env.update(spec.env)
+    for key in spec.env_unset:
+        env.pop(key, None)
+    wrapper = env_wrapper_environment(spec.command or "", list(spec.args))
+    if wrapper is not None:
+        if not wrapper.inherit:
+            env = {}
+        for key in wrapper.unset:
+            env.pop(key, None)
+        env.update(wrapper.variables)
+    return env
+
+
 def _publish_terminal_pending(
     publish_event: Callable[[str, _JsonObject], None],
     session_id: str,
@@ -8285,13 +8315,6 @@ async def _auto_create_claude_terminal(
         session_id,
         extra={"session_id": session_id},
     )
-    # Pre-accept Claude's first-run trust + onboarding TUI prompts for this
-    # workspace. They have no PermissionRequest hook, so on a host-spawned
-    # (web-UI-driven) session they would hang Claude in its terminal with
-    # nothing shown in the UI. Acute with per-session worktrees,
-    # which launch Claude in a brand-new, untrusted directory.
-    ensure_claude_workspace_trusted(Path(workspace))
-
     from omnigent.runner._entry import _make_auth_token_factory, _RunnerDatabricksAuth
 
     # The Omnigent server URL + auth are needed in two places below: the
@@ -8918,6 +8941,12 @@ async def _auto_create_claude_terminal(
         # the watcher reports the exit deterministically via `#{pane_dead}`.
         keep_alive_after_exit=True,
     )
+    # Pre-accept Claude's first-run trust + onboarding TUI prompts for this
+    # workspace. They have no PermissionRequest hook, so on a host-spawned
+    # (web-UI-driven) session they would hang Claude in its terminal with
+    # nothing shown in the UI. Seed with the launch env so the runner writes
+    # the config file this Claude process reads.
+    ensure_claude_workspace_trusted(Path(workspace), env=_claude_terminal_launch_env(env_spec))
     _logger.info(
         "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "
         "env_keys=%s cwd=%s scrollback=%d",

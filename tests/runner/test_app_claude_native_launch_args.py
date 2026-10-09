@@ -675,7 +675,8 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
     )
 
     monkeypatch.setattr(
-        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted", lambda _: None
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr("omnigent.inference_config.load_runtime_inference_config", dict)
     monkeypatch.setattr("omnigent.config.load_effective_config", dict)
@@ -753,3 +754,56 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
             await asyncio.wait_for(task, timeout=10)
         if closing.is_set():
             await asyncio.wait_for(closed.wait(), timeout=10)
+
+
+@pytest.mark.parametrize(
+    "command,args,spec_env,env_unset,expected_home,expected_config_dir",
+    [
+        # The pane inherits the runner env, so its selectors apply.
+        ("claude", [], {}, [], "/home/runner", "/runner/claude"),
+        # Spec overrides and removals are applied before launch.
+        ("claude", [], {"CLAUDE_CONFIG_DIR": "/spec/claude"}, [], "/home/runner", "/spec/claude"),
+        ("claude", [], {}, ["CLAUDE_CONFIG_DIR"], "/home/runner", None),
+        # An ``env`` wrapper's assignments, removals, and -i reach Claude last.
+        (
+            "env",
+            ["CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
+            {},
+            [],
+            "/home/runner",
+            "/wrap/claude",
+        ),
+        ("env", ["-u", "CLAUDE_CONFIG_DIR", "claude"], {}, [], "/home/runner", None),
+        ("env", ["-i", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
+    ],
+)
+def test_claude_terminal_launch_env_matches_pane_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    args: list[str],
+    spec_env: dict[str, str],
+    env_unset: list[str],
+    expected_home: str,
+    expected_config_dir: str | None,
+) -> None:
+    """
+    Trust seeding sees the environment the Claude pane process starts with.
+
+    :param command: Launch command, e.g. ``"env"``.
+    :param args: Launch args, e.g. ``["CLAUDE_CONFIG_DIR=/wrap/claude", "claude"]``.
+    :param spec_env: Terminal spec env overrides.
+    :param env_unset: Terminal spec env removals.
+    :param expected_home: Expected ``HOME`` in the launch env.
+    :param expected_config_dir: Expected ``CLAUDE_CONFIG_DIR``, or ``None`` when unset.
+    """
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    monkeypatch.setenv("HOME", "/home/runner")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
+    spec = TerminalEnvSpec(command=command, args=args, env=spec_env, env_unset=env_unset)
+
+    env = orchestration._claude_terminal_launch_env(spec)
+
+    assert env.get("HOME") == expected_home
+    assert env.get("CLAUDE_CONFIG_DIR") == expected_config_dir

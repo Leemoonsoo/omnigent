@@ -94,6 +94,20 @@ def describe_harness_startup(harness: str) -> HarnessStartup:
     )
 
 
+def env_wrapper_environment(command: str, args: list[str]) -> HarnessEnvironment | None:
+    """
+    Return the environment changes an ``env`` wrapper launch applies.
+
+    :param command: Configured harness command, e.g. ``"env"`` or ``"claude"``.
+    :param args: Arguments passed to *command*, e.g.
+        ``["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
+    :returns: The wrapper's ``-i``/``-u``/assignment changes, or ``None`` when
+        *command* is not a parseable ``env`` wrapper.
+    """
+    unwrapped = _unwrap_env(command, args, os.defpath)
+    return unwrapped[3] if unwrapped is not None else None
+
+
 def _unwrap_env(
     command: str, args: list[str], path: str
 ) -> tuple[str, list[str], str, HarnessEnvironment] | None:
