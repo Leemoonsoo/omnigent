@@ -24,6 +24,7 @@ from omnigent.harnesses.claude_native.main import (
     build_native_claude_terminal_env,
 )
 from omnigent.runner.app import _build_claude_native_base_args, _claude_terminal_env_unset
+from omnigent.runner.identity import RUNNER_AUTH_SECRET_ENV_VARS
 from omnigent.runner.native.orchestration import (
     _ROUTED_SPAWN_ALLOWED_TOOLS,
     _claude_launch_metadata_from_envelope,
@@ -835,8 +836,65 @@ def test_claude_terminal_launch_env_matches_pane_environment(
     assert env.get("HOME") == expected_home
     assert env.get("CLAUDE_CONFIG_DIR") == expected_config_dir
     if not inherit_env:
-        # Ambient runner selectors must not leak into a non-inheriting pane.
-        assert env == spec_env
+        # Ambient runner selectors must not leak into a non-inheriting pane,
+        # which adds only its UTF-8 locale default.
+        assert {key: value for key, value in env.items() if key not in ("LANG", "LC_ALL")} == (
+            spec_env
+        )
+
+
+def test_claude_terminal_launch_env_expands_the_pane_locale_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``env -S`` sees the UTF-8 locale the pane adds when the runner sets none."""
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    monkeypatch.delenv("LANG", raising=False)
+    monkeypatch.delenv("LC_ALL", raising=False)
+    spec = TerminalEnvSpec(command="env", args=["-S", "CLAUDE_CONFIG_DIR=/cfg/${LANG} claude"])
+
+    assert orchestration._claude_terminal_launch_env(spec)["CLAUDE_CONFIG_DIR"] == "/cfg/C.UTF-8"
+
+
+@pytest.mark.parametrize("secret_name", sorted(RUNNER_AUTH_SECRET_ENV_VARS))
+def test_claude_trust_seeding_never_expands_runner_auth_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    secret_name: str,
+) -> None:
+    """
+    Runner-auth secrets are removed before ``env -S`` expansion, as in the pane.
+
+    Neither the runner environment nor a spec override can put the value into
+    the selected config directory or the workspace.
+
+    :param secret_name: A runner-auth secret variable name.
+    """
+    from omnigent.harnesses.claude_native.bridge import ensure_claude_workspace_trusted
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    token = "dummy-binding-token"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
+    monkeypatch.setenv(secret_name, token)
+    spec = TerminalEnvSpec(
+        command="env",
+        args=["-S", f"CLAUDE_CONFIG_DIR=cfg${{{secret_name}}} claude"],
+        env={secret_name: token},
+    )
+
+    env = orchestration._claude_terminal_launch_env(spec)
+    ensure_claude_workspace_trusted(workspace, env=env)
+
+    assert secret_name not in env
+    assert env["CLAUDE_CONFIG_DIR"] == "cfg"
+    assert (workspace / "cfg" / ".claude.json").is_file()
+    assert not any(token in str(path) for path in tmp_path.rglob("*"))
 
 
 def test_claude_terminal_launch_cwd_uses_terminal_os_env_resolution(tmp_path: Path) -> None:
@@ -929,13 +987,7 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     args: list[str],
 ) -> None:
     """
-    Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
-
-    The shared parser does not model options such as ``-v``, unbalanced ``-S``
-    quoting, ``-S`` bare ``$NAME`` expansion, escapes, comments, and
-    ``\\v``/``\\f``/``\\r`` separators, or a nested ``env``, so their
-    assignments are not applied even though the real launch would apply them. The runner logs the
-    fallback at INFO without the wrapper's values.
+    Unmodeled wrappers use the pre-wrapper environment and log the fallback without values.
 
     :param args: Wrapper args the parser cannot model.
     """

@@ -65,7 +65,7 @@ from omnigent.errors import (
 )
 from omnigent.harness_plugins import native_provider_for_key
 from omnigent.host.harness_startup import env_wrapper_chdir, env_wrapper_environment
-from omnigent.inner.terminal import build_terminal_os_env_spec
+from omnigent.inner.terminal import build_terminal_os_env_spec, terminal_pane_environment
 from omnigent.models.model_override import validate_model_override
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
@@ -7524,18 +7524,17 @@ def _claude_terminal_pre_wrapper_env(spec: TerminalEnvSpec) -> dict[str, str]:
     """
     Return the environment a Claude launch command starts with.
 
-    This is the runner environment (when inherited) with the spec's overrides
-    and removals, before an ``env`` wrapper applies its own changes; ``env -S``
-    expands ``${NAME}`` from it.
+    The pane environment the terminal builds (runner environment when
+    inherited, the spec's overrides and removals, runner-auth secrets removed,
+    and a UTF-8 locale default) before an ``env`` wrapper applies its own
+    changes; ``env -S`` expands ``${NAME}`` from it.
 
     :param spec: The Claude terminal launch spec.
     :returns: The pre-wrapper environment, e.g. ``{"HOME": "/home/user"}``.
     """
-    env = dict(os.environ) if spec.inherit_env else {}
-    env.update(spec.env)
-    for key in spec.env_unset:
-        env.pop(key, None)
-    return env
+    return terminal_pane_environment(
+        inherit_env=spec.inherit_env, env=spec.env, env_unset=spec.env_unset
+    )
 
 
 def _claude_terminal_launch_env(spec: TerminalEnvSpec) -> dict[str, str]:
