@@ -133,6 +133,8 @@ def _real_env_supports_long_split_string() -> bool:
         ["-S", 'A="${KEEP} x" /usr/bin/env'],
         ["-S", "A='${KEEP}' /usr/bin/env"],
         ["-S", "A=${UNSET_NAME}z /usr/bin/env"],
+        ["-S", "${UNSET_NAME} A=1 /usr/bin/env"],
+        ["-S", "A=1 ${UNSET_NAME}${UNSET_NAME} B=2 /usr/bin/env"],
         ["-S", "A=x\tB=y\nC=z /usr/bin/env"],
         ["-S", "A=/tmp/a\u00a0b /usr/bin/env"],
         ["-S", "A=x\u00a0#y /usr/bin/env"],
@@ -158,6 +160,22 @@ def test_env_wrapper_environment_matches_real_env(args):
     # ``splitlines`` would also split on separators such as U+001C inside values.
     lines = process.stdout.removesuffix("\n").split("\n")
     assert dict(line.split("=", 1) for line in lines) == expected
+
+
+def test_env_split_string_keeps_a_word_only_for_set_variables():
+    """
+    A word made only of unset ``${NAME}`` references is dropped, as in ``env``.
+
+    A set but empty name still yields an empty word, which the real ``env``
+    then fails to execute.
+    """
+    assert startup._split_env_string("${UNSET} A=1 claude", {}) == ["A=1", "claude"]
+    assert startup._split_env_string("${EMPTY} A=1 claude", {"EMPTY": ""}) == [
+        "",
+        "A=1",
+        "claude",
+    ]
+    assert startup._split_env_string('"${UNSET}" A=1 claude', {}) == ["", "A=1", "claude"]
 
 
 @pytest.mark.parametrize(

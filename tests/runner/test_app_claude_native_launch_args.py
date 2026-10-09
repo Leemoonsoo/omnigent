@@ -13,6 +13,7 @@ passed. See designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 
@@ -922,6 +923,7 @@ def test_claude_terminal_launch_cwd_rejects_an_unsearchable_env_chdir_target(
 def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     args: list[str],
 ) -> None:
     """
@@ -930,7 +932,8 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     The shared parser does not model options such as ``-v``, unbalanced ``-S``
     quoting, or ``-S`` bare ``$NAME`` expansion, escapes, comments, and
     ``\\v``/``\\f``/``\\r`` separators, so their assignments are not applied
-    even though the real launch would apply them.
+    even though the real launch would apply them. The runner logs the
+    fallback at INFO without the wrapper's values.
 
     :param args: Wrapper args the parser cannot model.
     """
@@ -942,8 +945,17 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runner_config))
     monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
 
-    env = orchestration._claude_terminal_launch_env(TerminalEnvSpec(command="env", args=args))
+    with caplog.at_level(logging.INFO, logger=orchestration._logger.name):
+        env = orchestration._claude_terminal_launch_env(TerminalEnvSpec(command="env", args=args))
     assert env["CLAUDE_CONFIG_DIR"] == str(runner_config)
+    assert any(
+        record.levelno == logging.INFO and "env wrapper form is not modeled" in record.getMessage()
+        for record in caplog.records
+    )
+    values = [
+        arg.partition("CLAUDE_CONFIG_DIR=")[2] for arg in args if "CLAUDE_CONFIG_DIR=" in arg
+    ]
+    assert values and all(value not in caplog.text for value in values)
 
 
 def test_unparsed_env_wrapper_seeds_the_runner_config_not_a_literal_path(

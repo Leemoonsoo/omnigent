@@ -250,10 +250,11 @@ def _split_env_string(value: str, environ: Mapping[str, str] | None) -> list[str
     Split an ``env -S`` string the way GNU ``env`` does.
 
     Words split on unquoted spaces, tabs, and newlines; single quotes keep
-    text literal, and ``${NAME}`` expands from *environ* outside single quotes
-    (unset names become empty). Backslash escapes, ``#`` comments, bare
-    ``$NAME``, and ``\\v``/``\\f``/``\\r`` have ``env``-specific or
-    version-dependent meanings this does not model.
+    text literal, and ``${NAME}`` expands from *environ* outside single quotes.
+    An unset name adds nothing, so a word made only of unset names is dropped,
+    while a set but empty name still yields a word. Backslash escapes, ``#``
+    comments, bare ``$NAME``, and ``\\v``/``\\f``/``\\r`` have ``env``-specific
+    or version-dependent meanings this does not model.
 
     :param value: Split string, e.g. ``"CLAUDE_CONFIG_DIR=${HOME}/c claude"``.
     :param environ: Environment ``env`` expands from, or ``None`` when unknown.
@@ -278,20 +279,22 @@ def _split_env_string(value: str, environ: Mapping[str, str] | None) -> list[str
             continue
         if quote is None and not in_word and char == "#":
             raise ValueError(f"unsupported env -S comment: {value!r}")
-        in_word = True
         if quote is None and char in "'\"":
-            quote = char
+            quote, in_word = char, True
         elif char == quote:
             quote = None
         elif char == "$" and quote != "'":
             match = _ENV_VARIABLE_REFERENCE.match(value, index)
             if match is None or environ is None:
                 raise ValueError(f"unsupported env -S expansion: {value!r}")
-            current.append(environ.get(match.group(1), ""))
+            if match.group(1) in environ:
+                current.append(environ[match.group(1)])
+                in_word = True
             index = match.end()
             continue
         else:
             current.append(char)
+            in_word = True
         index += 1
     if quote is not None:
         raise ValueError(f"unbalanced quote in env -S string: {value!r}")
