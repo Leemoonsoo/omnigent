@@ -8390,9 +8390,10 @@ def test_claude_global_config_path_removes_dot_dot_like_path_join(
     ``..`` segments are removed lexically, as Claude's ``path.join`` does.
 
     A missing intermediate directory or a symlink before ``..`` must not change
-    the selected file, and the legacy lookup follows the same rule.
+    the selected file, and the legacy lookup follows the same rule. Seeding
+    writes the launch env's file and leaves the runner's ``~/.claude.json``.
     """
-    _redirect_home(monkeypatch, tmp_path / "home")
+    runner_config = _redirect_home(monkeypatch, tmp_path / "home")
     workspace = tmp_path / "workspace"
     (workspace / "selected").mkdir(parents=True)
     elsewhere = tmp_path / "elsewhere" / "deep"
@@ -8409,6 +8410,7 @@ def test_claude_global_config_path_removes_dot_dot_like_path_join(
     data = json.loads((workspace / "selected" / ".claude.json").read_text())
     assert data["projects"][str(workspace.resolve())]["hasTrustDialogAccepted"] is True
     assert not (workspace / "x").exists()
+    assert not runner_config.exists()
     (workspace / "selected" / ".config.json").write_text("{}")
     assert claude_global_config_path(workspace, env) == workspace / "selected" / ".config.json"
     assert not (workspace / "x").exists()
@@ -8510,30 +8512,6 @@ def test_claude_global_config_path_normalizes_legacy_lookup_to_nfc(
     if (Path(decomposed) / ".config.json").exists():
         pytest.skip("filesystem treats NFC and NFD names as the same file")
     assert claude_global_config_path(workspace, env) == Path(composed) / ".config.json"
-
-
-def test_ensure_trusted_seeds_the_launch_env_config(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    The seed lands in the file chosen by the terminal's launch env.
-
-    A launch-time ``CLAUDE_CONFIG_DIR`` moves Claude's global config, so the
-    runner-default ``~/.claude.json`` must stay untouched.
-    """
-    runner_config = _redirect_home(monkeypatch, tmp_path / "home")
-    selected = tmp_path / "selected"
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-
-    ensure_claude_workspace_trusted(
-        workspace, env={"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(selected)}
-    )
-
-    data = json.loads((selected / ".claude.json").read_text())
-    assert data["projects"][str(workspace.resolve())]["hasTrustDialogAccepted"] is True
-    assert not runner_config.exists()
 
 
 def test_display_cost_approval_popup_builds_detached_tmux_command(

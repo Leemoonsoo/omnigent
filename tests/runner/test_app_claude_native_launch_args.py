@@ -881,8 +881,16 @@ def test_claude_terminal_launch_cwd_applies_env_chdir(tmp_path: Path) -> None:
         ["-S", "CLAUDE_CONFIG_DIR=$HOME/claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=wrap\\_claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=wrap/claude claude #comment"],
+        ["-S", "CLAUDE_CONFIG_DIR=wrap/claude\vclaude"],
     ],
-    ids=["unmodeled-option", "unbalanced-quote", "variable-expansion", "escape", "comment"],
+    ids=[
+        "unmodeled-option",
+        "unbalanced-quote",
+        "variable-expansion",
+        "escape",
+        "comment",
+        "version-dependent-separator",
+    ],
 )
 def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms(
     tmp_path: Path,
@@ -893,10 +901,11 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
 
     The shared parser does not model options such as ``-v``, unbalanced ``-S``
-    quoting, or ``-S`` bare ``$NAME`` expansion, escapes, and comments, so
-    their assignments are not applied even though the real launch would apply
-    them. Seeding then writes the runner's selected config, never a path built
-    from the unparsed text (such as a literal ``$HOME`` directory).
+    quoting, or ``-S`` bare ``$NAME`` expansion, escapes, comments, and
+    ``\\v``/``\\f``/``\\r`` separators, so their assignments are not applied
+    even though the real launch would apply them. Seeding then writes the
+    runner's selected config, never a path built from the unparsed text (such
+    as a literal ``$HOME`` directory).
 
     :param args: Wrapper args the parser cannot model.
     """

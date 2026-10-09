@@ -133,6 +133,10 @@ def _real_env_supports_long_split_string() -> bool:
         ["-S", 'A="${KEEP} x" /usr/bin/env'],
         ["-S", "A='${KEEP}' /usr/bin/env"],
         ["-S", "A=${UNSET_NAME}z /usr/bin/env"],
+        ["-S", "A=x\tB=y\nC=z /usr/bin/env"],
+        ["-S", "A=/tmp/a\u00a0b /usr/bin/env"],
+        ["-S", "A=x\u00a0#y /usr/bin/env"],
+        ["-S", "A=x\x1cB=y /usr/bin/env"],
     ],
 )
 def test_env_wrapper_environment_matches_real_env(args):
@@ -151,7 +155,9 @@ def test_env_wrapper_environment_matches_real_env(args):
     process = subprocess.run(
         ["/usr/bin/env", *args], env=base, capture_output=True, text=True, check=True
     )
-    assert dict(line.split("=", 1) for line in process.stdout.splitlines()) == expected
+    # ``splitlines`` would also split on separators such as U+001C inside values.
+    lines = process.stdout.removesuffix("\n").split("\n")
+    assert dict(line.split("=", 1) for line in lines) == expected
 
 
 @pytest.mark.parametrize(

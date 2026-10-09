@@ -22,6 +22,10 @@ SUPPORTED_HARNESSES = {"claude-native", "codex-native"}
 
 # ``env -S`` expands only the braced form.
 _ENV_VARIABLE_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# ``env -S`` word separators; other whitespace, such as U+00A0, stays in a word.
+_ENV_SPLIT_SEPARATORS = " \t\n"
+# Newer ``env`` releases also split on these; older ones keep them in a word.
+_ENV_UNMODELED_SEPARATORS = "\v\f\r"
 
 
 class HarnessEnvironment(BaseModel):
@@ -245,10 +249,11 @@ def _split_env_string(value: str, environ: Mapping[str, str] | None) -> list[str
     """
     Split an ``env -S`` string the way GNU ``env`` does.
 
-    Words split on unquoted whitespace; single quotes keep text literal, and
-    ``${NAME}`` expands from *environ* outside single quotes (unset names
-    become empty). Backslash escapes, ``#`` comments, and bare ``$NAME`` have
-    ``env``-specific meanings this does not model.
+    Words split on unquoted spaces, tabs, and newlines; single quotes keep
+    text literal, and ``${NAME}`` expands from *environ* outside single quotes
+    (unset names become empty). Backslash escapes, ``#`` comments, bare
+    ``$NAME``, and ``\\v``/``\\f``/``\\r`` have ``env``-specific or
+    version-dependent meanings this does not model.
 
     :param value: Split string, e.g. ``"CLAUDE_CONFIG_DIR=${HOME}/c claude"``.
     :param environ: Environment ``env`` expands from, or ``None`` when unknown.
@@ -256,7 +261,7 @@ def _split_env_string(value: str, environ: Mapping[str, str] | None) -> list[str
     :raises ValueError: If *value* uses an unmodeled form, unbalanced quotes,
         or an expansion without a known *environ*.
     """
-    if "\\" in value or any(word.startswith("#") for word in value.split()):
+    if any(char in value for char in "\\" + _ENV_UNMODELED_SEPARATORS):
         raise ValueError(f"unsupported env -S syntax: {value!r}")
     words: list[str] = []
     current: list[str] = []
@@ -265,12 +270,14 @@ def _split_env_string(value: str, environ: Mapping[str, str] | None) -> list[str
     index = 0
     while index < len(value):
         char = value[index]
-        if quote is None and char.isspace():
+        if quote is None and char in _ENV_SPLIT_SEPARATORS:
             if in_word:
                 words.append("".join(current))
                 current, in_word = [], False
             index += 1
             continue
+        if quote is None and not in_word and char == "#":
+            raise ValueError(f"unsupported env -S comment: {value!r}")
         in_word = True
         if quote is None and char in "'\"":
             quote = char
