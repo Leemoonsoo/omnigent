@@ -32,7 +32,7 @@ from __future__ import annotations
 import os
 
 import httpx
-from playwright.sync_api import Browser, expect
+from playwright.sync_api import Browser, BrowserContext, CDPSession, Locator, Page, expect
 
 from tests._helpers.session import post_session_bundle
 from tests.e2e_ui.conftest import _build_hello_world_bundle
@@ -174,6 +174,73 @@ def _long_press(cdp, page, x: float, y: float, hold_ms: int = 850) -> None:
     cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
 
 
+def _new_phone_context(browser: Browser) -> BrowserContext:
+    """Open a touch phone context, filmed when the recording harness asks.
+
+    The autouse ``_record_video`` fixture only patches the async API, and these
+    journeys drive the sync API through their own context, so honor the env var
+    directly.
+    """
+    ctx_kwargs: dict = {"viewport": _VIEWPORT, "has_touch": True, "is_mobile": True}
+    record_dir = os.environ.get("OMNIGENT_E2E_RECORD_DIR")
+    if record_dir:
+        ctx_kwargs["record_video_dir"] = record_dir
+    return browser.new_context(**ctx_kwargs)
+
+
+def _open_ios_drawer(
+    context: BrowserContext, base_url: str, session_id: str, row_text: str
+) -> Page:
+    """Load a session as the iOS shell and open the drawer, scrolled to the top.
+
+    :param row_text: Text of a seeded row that shows once the drawer is open.
+    """
+    page = context.new_page()
+    page.add_init_script(_IOS_SHELL_INIT_SCRIPT)
+    page.add_init_script(_FAKE_VISUAL_VIEWPORT)
+    page.goto(f"{base_url}/c/{session_id}")
+    expect(page.locator('textarea[aria-label="Message the agent"]')).to_be_visible(timeout=60_000)
+    expect(page.locator(".app-shell")).to_have_attribute("data-ios-native", "true")
+
+    # Open the sidebar drawer and wait for its slide-in to settle.
+    page.locator('button[aria-label="Open sidebar"]').click()
+    expect(page.get_by_text(row_text, exact=False)).to_be_visible(timeout=10_000)
+    page.wait_for_function(
+        f"() => document.querySelector('{_LIST_SELECTOR}').getBoundingClientRect().x > -1"
+    )
+    page.wait_for_timeout(300)
+    page.evaluate(f"() => document.querySelector('{_LIST_SELECTOR}').scrollTo(0, 0)")
+    page.wait_for_timeout(200)
+    return page
+
+
+def _find_row(
+    page: Page, title_prefix: str, min_top: float, max_top: float
+) -> tuple[dict, str] | None:
+    """Return the first titled row whose top edge lies strictly between the bounds."""
+    for handle in page.locator('aside[aria-label="Conversations"] a[href^="/c/"]').all():
+        box = handle.bounding_box()
+        text = (handle.inner_text() or "").strip()
+        if box and min_top < box["y"] < max_top and title_prefix in text:
+            return box, text
+    return None
+
+
+def _start_rename(cdp: CDPSession, page: Page, box: dict) -> Locator:
+    """Long-press a row and choose Rename; return the focused inline edit field."""
+    _long_press(cdp, page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    expect(page.locator('[role="menu"][data-state="open"]')).to_be_visible(timeout=5_000)
+
+    # Tap Rename: the inline edit field replaces the row and focuses.
+    rename_item = page.get_by_test_id("rename-conversation")
+    expect(rename_item).to_be_visible()
+    rename_item.tap()
+    edit = page.get_by_test_id("rename-conversation-input")
+    expect(edit).to_be_visible(timeout=5_000)
+    expect(edit).to_be_focused()
+    return edit
+
+
 def test_rename_keeps_sidebar_sessions_reachable(
     browser: Browser,
     seeded_session: tuple[str, str],
@@ -194,34 +261,9 @@ def test_rename_keeps_sidebar_sessions_reachable(
     base_url, session_id = seeded_session
     _seed_filler_sessions(base_url, _FILLER_COUNT)
 
-    ctx_kwargs: dict = {"viewport": _VIEWPORT, "has_touch": True, "is_mobile": True}
-    # Film the journey when the recording harness asks for it. The autouse
-    # _record_video fixture only patches the async API, and this test drives
-    # the sync API through its own context, so honor the env var directly.
-    record_dir = os.environ.get("OMNIGENT_E2E_RECORD_DIR")
-    if record_dir:
-        ctx_kwargs["record_video_dir"] = record_dir
-
-    context = browser.new_context(**ctx_kwargs)
+    context = _new_phone_context(browser)
     try:
-        page = context.new_page()
-        page.add_init_script(_IOS_SHELL_INIT_SCRIPT)
-        page.add_init_script(_FAKE_VISUAL_VIEWPORT)
-        page.goto(f"{base_url}/c/{session_id}")
-        expect(page.locator('textarea[aria-label="Message the agent"]')).to_be_visible(
-            timeout=60_000
-        )
-        expect(page.locator(".app-shell")).to_have_attribute("data-ios-native", "true")
-
-        # Open the sidebar drawer and wait for its slide-in to settle.
-        page.locator('button[aria-label="Open sidebar"]').click()
-        expect(page.get_by_text("Filler session 00", exact=False)).to_be_visible(timeout=10_000)
-        page.wait_for_function(
-            f"() => document.querySelector('{_LIST_SELECTOR}').getBoundingClientRect().x > -1"
-        )
-        page.wait_for_timeout(300)
-        page.evaluate(f"() => document.querySelector('{_LIST_SELECTOR}').scrollTo(0, 0)")
-        page.wait_for_timeout(200)
+        page = _open_ios_drawer(context, base_url, session_id, "Filler session 00")
 
         metrics = _list_metrics(page)
         print(f"[rename-scroll] list metrics after open: {metrics}")
@@ -244,29 +286,11 @@ def test_rename_keeps_sidebar_sessions_reachable(
         page.wait_for_timeout(200)
 
         # Long-press an in-viewport filler row: the touch path to row actions.
-        box = None
-        row_label = None
-        for handle in page.locator('aside[aria-label="Conversations"] a[href^="/c/"]').all():
-            b = handle.bounding_box()
-            text = (handle.inner_text() or "").strip()
-            if b and 200 < b["y"] < 450 and "Filler" in text:
-                box = b
-                row_label = text
-                break
-        assert box is not None, "no in-viewport filler row found to long-press"
+        row = _find_row(page, "Filler session", 200, 450)
+        assert row is not None, "no in-viewport filler row found to long-press"
+        box, row_label = row
         print(f"[rename-scroll] long-pressing row {row_label!r} at {box}")
-        _long_press(cdp, page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-
-        menu = page.locator('[role="menu"][data-state="open"]')
-        expect(menu).to_be_visible(timeout=5_000)
-
-        # Tap Rename: the inline edit field replaces the row and focuses.
-        rename_item = page.get_by_test_id("rename-conversation")
-        expect(rename_item).to_be_visible()
-        rename_item.tap()
-        edit = page.get_by_test_id("rename-conversation-input")
-        expect(edit).to_be_visible(timeout=5_000)
-        expect(edit).to_be_focused()
+        edit = _start_rename(cdp, page, box)
 
         # The focused field raises the soft keyboard: WebKit shrinks the
         # visual viewport and fires resize; the app reacts with its own iOS

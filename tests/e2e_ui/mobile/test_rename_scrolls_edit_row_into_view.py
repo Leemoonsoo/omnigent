@@ -15,20 +15,19 @@ focus reveal does not move the inner list; the app must scroll it.
 
 from __future__ import annotations
 
-import os
-
-from playwright.sync_api import Browser, expect
+from playwright.sync_api import Browser
 
 from tests.e2e_ui.mobile.test_rename_keeps_sidebar_sessions_reachable import (
-    _FAKE_VISUAL_VIEWPORT,
     _FILLER_COUNT,
-    _IOS_SHELL_INIT_SCRIPT,
     _KEYBOARD_HEIGHT,
     _LIST_SELECTOR,
     _VIEWPORT,
+    _find_row,
     _list_metrics,
-    _long_press,
+    _new_phone_context,
+    _open_ios_drawer,
     _seed_filler_sessions,
+    _start_rename,
 )
 
 # Distinct from the sibling test's titles so the two can share one server.
@@ -72,60 +71,22 @@ def test_rename_scrolls_edit_row_into_view_above_keyboard(
     base_url, session_id = seeded_session
     _seed_filler_sessions(base_url, _FILLER_COUNT, title_prefix=_TITLE_PREFIX)
 
-    ctx_kwargs: dict = {"viewport": _VIEWPORT, "has_touch": True, "is_mobile": True}
-    record_dir = os.environ.get("OMNIGENT_E2E_RECORD_DIR")
-    if record_dir:
-        ctx_kwargs["record_video_dir"] = record_dir
-
-    context = browser.new_context(**ctx_kwargs)
+    context = _new_phone_context(browser)
     try:
-        page = context.new_page()
-        page.add_init_script(_IOS_SHELL_INIT_SCRIPT)
-        page.add_init_script(_FAKE_VISUAL_VIEWPORT)
-        page.goto(f"{base_url}/c/{session_id}")
-        expect(page.locator('textarea[aria-label="Message the agent"]')).to_be_visible(
-            timeout=60_000
-        )
-        expect(page.locator(".app-shell")).to_have_attribute("data-ios-native", "true")
-
-        page.locator('button[aria-label="Open sidebar"]').click()
-        expect(page.get_by_text(f"{_TITLE_PREFIX} 00", exact=False)).to_be_visible(timeout=10_000)
-        page.wait_for_function(
-            f"() => document.querySelector('{_LIST_SELECTOR}').getBoundingClientRect().x > -1"
-        )
-        page.wait_for_timeout(300)
-        page.evaluate(f"() => document.querySelector('{_LIST_SELECTOR}').scrollTo(0, 0)")
-        page.wait_for_timeout(200)
+        page = _open_ios_drawer(context, base_url, session_id, f"{_TITLE_PREFIX} 00")
 
         metrics = _list_metrics(page)
         keyboard_top = _VIEWPORT["height"] - _KEYBOARD_HEIGHT
         print(f"[rename-into-view] list metrics after open: {metrics}")
 
         # A fully visible row that the keyboard will cover once it rises.
-        box = None
-        row_label = None
-        for handle in page.locator('aside[aria-label="Conversations"] a[href^="/c/"]').all():
-            b = handle.bounding_box()
-            text = (handle.inner_text() or "").strip()
-            if (
-                b
-                and _TITLE_PREFIX in text
-                and b["y"] > keyboard_top + 40
-                and b["y"] + b["height"] < metrics["y"] + metrics["h"] - 4
-            ):
-                box = b
-                row_label = text
-                break
-        assert box is not None, "no visible row below the future keyboard top"
+        row = _find_row(page, _TITLE_PREFIX, keyboard_top + 40, metrics["y"] + metrics["h"] - 40)
+        assert row is not None, "no visible row below the future keyboard top"
+        box, row_label = row
         print(f"[rename-into-view] long-pressing row {row_label!r} at {box}")
 
         cdp = context.new_cdp_session(page)
-        _long_press(cdp, page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-        expect(page.locator('[role="menu"][data-state="open"]')).to_be_visible(timeout=5_000)
-        page.get_by_test_id("rename-conversation").tap()
-        edit = page.get_by_test_id("rename-conversation-input")
-        expect(edit).to_be_visible(timeout=5_000)
-        expect(edit).to_be_focused()
+        _start_rename(cdp, page, box)
         before = _edit_geometry(page)
         print(f"[rename-into-view] edit focused, keyboard down: {before}")
 

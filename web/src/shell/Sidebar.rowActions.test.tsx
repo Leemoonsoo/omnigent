@@ -675,39 +675,64 @@ describe("double-click to rename", () => {
 
 describe("rename under the iOS soft keyboard", () => {
   afterEach(() => {
-    delete (window as unknown as Record<string, unknown>).omnigentNative;
     vi.unstubAllGlobals();
   });
 
-  it("re-centers the focused rename field once the keyboard shrinks the list", () => {
-    // The field focuses (raising the keyboard) while still visible; the
-    // drawer's keyboard-inset padding then shrinks the list underneath it.
-    (window as unknown as Record<string, unknown>).omnigentNative = { kind: "ios" };
+  /**
+   * Stub the iOS shell on an 844px layout. The returned function raises the
+   * keyboard through UIKit's keyboard-viewport bridge or, for shells without
+   * it, through WebKit's shrinking visualViewport.
+   */
+  function stubIOSShell(source: "native" | "visualViewport"): (visibleHeight: number) => void {
+    const viewport = Object.assign(new EventTarget(), { height: 844, offsetTop: 0 });
+    let nativeViewport: { width: number; height: number } | null = null;
+    const nativeListeners = new Set<() => void>();
     vi.stubGlobal("innerHeight", 844);
-    const viewport = {
-      offsetTop: 0,
-      height: 844,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    };
     vi.stubGlobal("visualViewport", viewport);
-    renderSidebar();
-    fireEvent.dblClick(screen.getByRole("link", { name: /My Session/ }));
-    const input = screen.getByTestId("rename-conversation-input");
-    expect(input).toHaveFocus();
-    const scrollIntoView = vi.fn();
-    input.scrollIntoView = scrollIntoView;
-
-    act(() => {
-      viewport.height = 508;
-      window.dispatchEvent(new Event("resize"));
+    vi.stubGlobal("omnigentNative", {
+      kind: "ios",
+      ...(source === "native" && {
+        getKeyboardViewport: () => nativeViewport,
+        onKeyboardViewportChanged: (callback: () => void) => {
+          nativeListeners.add(callback);
+          return () => nativeListeners.delete(callback);
+        },
+      }),
     });
+    return (visibleHeight) => {
+      act(() => {
+        if (source === "native") {
+          nativeViewport = { width: window.innerWidth, height: visibleHeight };
+          nativeListeners.forEach((callback) => callback());
+        } else {
+          viewport.height = visibleHeight;
+          viewport.dispatchEvent(new Event("resize"));
+        }
+      });
+    };
+  }
 
-    expect(screen.getByRole("complementary", { name: "Conversations" })).toHaveStyle({
-      paddingBottom: "336px",
-    });
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
-  });
+  it.each(["native", "visualViewport"] as const)(
+    "re-centers the focused rename field once the %s keyboard inset shrinks the list",
+    (source) => {
+      // The field focuses (raising the keyboard) while still visible; the
+      // drawer's keyboard-inset padding then shrinks the list underneath it.
+      const openKeyboard = stubIOSShell(source);
+      renderSidebar();
+      fireEvent.dblClick(screen.getByRole("link", { name: /My Session/ }));
+      const input = screen.getByTestId("rename-conversation-input");
+      expect(input).toHaveFocus();
+      const scrollIntoView = vi.fn();
+      input.scrollIntoView = scrollIntoView;
+
+      openKeyboard(508);
+
+      expect(screen.getByRole("complementary", { name: "Conversations" })).toHaveStyle({
+        paddingBottom: "336px",
+      });
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+    },
+  );
 });
 
 describe("leave a shared session", () => {
