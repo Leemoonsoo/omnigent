@@ -7499,11 +7499,22 @@ def _claude_terminal_launch_cwd(spec: TerminalEnvSpec, parent_os_env: OSEnvSpec 
     :param parent_os_env: The agent's os_env the terminal inherits from, or
         ``None``.
     :returns: The resolved Claude cwd, e.g. ``Path("/home/user/repo")``.
+    :raises OmnigentError: If an ``env --chdir`` target is not an existing
+        directory; the real ``env`` would refuse to launch, and seeding must not
+        create it.
     """
     effective = build_terminal_os_env_spec(spec, parent_os_env_spec=parent_os_env)
     cwd = Path(effective.cwd or os.getcwd()).resolve()
     chdir = env_wrapper_chdir(spec.command or "", list(spec.args))
-    return (cwd / chdir).resolve() if chdir else cwd
+    if not chdir:
+        return cwd
+    target = (cwd / chdir).resolve()
+    if not target.is_dir():
+        raise OmnigentError(
+            "The Claude terminal's env --chdir directory does not exist.",
+            code=ErrorCode.WORKSPACE_MISSING,
+        )
+    return target
 
 
 def _claude_terminal_launch_env(spec: TerminalEnvSpec) -> dict[str, str]:

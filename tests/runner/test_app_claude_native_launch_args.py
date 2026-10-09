@@ -1165,3 +1165,49 @@ async def test_auto_create_claude_terminal_seeds_env_chdir_with_relative_config_
     data = json.loads((workspace / expected).read_text())
     assert data["projects"][str((workspace / "sub").resolve())]["hasTrustDialogAccepted"] is True
     assert not (tmp_path / "home" / ".claude.json").exists()
+
+
+async def test_auto_create_claude_terminal_rejects_missing_env_chdir_target(
+    bridge_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A missing ``env --chdir`` target fails before seeding and launch.
+
+    The real ``env`` refuses to start in a missing directory, so seeding must
+    not create it (and with it a trusted config) and turn the launch into a
+    success.
+    """
+    from unittest.mock import Mock
+
+    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(
+        "omnigent.harness_startup_config.resolve_harness_command", lambda *_a, **_k: "env"
+    )
+    monkeypatch.setattr(
+        "omnigent.harness_startup_config.resolve_harness_args",
+        lambda _harness, cli_args, cfg=None: [
+            "-C",
+            "missing",
+            "CLAUDE_CONFIG_DIR=relcfg",
+            "claude",
+            *cli_args,
+        ],
+    )
+    registry = Mock(spec=SessionResourceRegistry)
+
+    with pytest.raises(OmnigentError) as excinfo:
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch, session_id="conv_missing_chdir", workspace=workspace, registry=registry
+        )
+
+    assert excinfo.value.code == ErrorCode.WORKSPACE_MISSING
+    assert not (workspace / "missing").exists()
+    registry.launch_required_terminal.assert_not_called()

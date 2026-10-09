@@ -97,6 +97,15 @@ def test_env_resolution_matches_real_env(config, tmp_path, prefix, found):
     )
 
 
+def _real_env_supports_chdir() -> bool:
+    """Return whether ``/usr/bin/env`` accepts ``-C`` and ``--chdir``."""
+    for args in (["-C", "/", "/usr/bin/env"], ["--chdir=/", "/usr/bin/env"]):
+        probe = subprocess.run(["/usr/bin/env", *args], env={}, capture_output=True, check=False)
+        if probe.returncode != 0:
+            return False
+    return True
+
+
 def _real_env_supports_long_split_string() -> bool:
     """Return whether ``/usr/bin/env`` accepts GNU's ``--split-string`` spelling."""
     probe = subprocess.run(
@@ -126,6 +135,8 @@ def test_env_wrapper_environment_matches_real_env(args):
     """The modeled wrapper environment equals what the real ``env`` passes on."""
     if args[0].startswith("--split-string") and not _real_env_supports_long_split_string():
         pytest.skip("/usr/bin/env lacks --split-string")
+    if args[0] == "-C" and not _real_env_supports_chdir():
+        pytest.skip("/usr/bin/env lacks -C")
     base = {"PATH": "/usr/bin:/bin", "KEEP": "kept", "A": "old"}
     wrapper = startup.env_wrapper_environment("/usr/bin/env", args)
     assert wrapper is not None
@@ -151,6 +162,8 @@ def test_env_wrapper_environment_matches_real_env(args):
 )
 def test_env_wrapper_chdir_matches_real_env(tmp_path, args):
     """The modeled ``--chdir`` directory is where the real ``env`` runs the command."""
+    if not _real_env_supports_chdir():
+        pytest.skip("/usr/bin/env lacks -C/--chdir")
     (tmp_path / "sub").mkdir()
     (tmp_path / "link").symlink_to(tmp_path / "sub")
     chdir = startup.env_wrapper_chdir("/usr/bin/env", args)
