@@ -876,44 +876,29 @@ def test_claude_terminal_launch_cwd_applies_env_chdir(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "args",
     [
-        ["-v", "CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
-        ["-S", "CLAUDE_CONFIG_DIR='/wrap/claude claude"],
+        ["-v", "CLAUDE_CONFIG_DIR=wrap/claude", "claude"],
+        ["-S", "CLAUDE_CONFIG_DIR='wrap/claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=$HOME/claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=wrap\\_claude claude"],
-        ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude #comment"],
+        ["-S", "CLAUDE_CONFIG_DIR=wrap/claude claude #comment"],
     ],
     ids=["unmodeled-option", "unbalanced-quote", "variable-expansion", "escape", "comment"],
 )
 def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     args: list[str],
 ) -> None:
     """
     Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
 
-    The shared parser does not model options such as ``-v``, unbalanced ``-S`` quoting, or
-    ``-S`` bare ``$NAME`` expansion, escapes, and comments, so their assignments are
-    not applied even though the real launch would apply them.
+    The shared parser does not model options such as ``-v``, unbalanced ``-S``
+    quoting, or ``-S`` bare ``$NAME`` expansion, escapes, and comments, so
+    their assignments are not applied even though the real launch would apply
+    them. Seeding then writes the runner's selected config, never a path built
+    from the unparsed text (such as a literal ``$HOME`` directory).
 
     :param args: Wrapper args the parser cannot model.
-    """
-    from omnigent.inner.datamodel import TerminalEnvSpec
-    from omnigent.runner.native import orchestration
-
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
-    env = orchestration._claude_terminal_launch_env(TerminalEnvSpec(command="env", args=args))
-    assert env["CLAUDE_CONFIG_DIR"] == "/runner/claude"
-
-
-def test_unparsed_env_split_string_does_not_seed_a_literal_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    An unmodeled ``$HOME`` split string never becomes a literal config path.
-
-    Seeding falls back to the runner's selected config instead of writing
-    under a directory literally named ``$HOME``.
     """
     from omnigent.harnesses.claude_native.bridge import ensure_claude_workspace_trusted
     from omnigent.inner.datamodel import TerminalEnvSpec
@@ -925,12 +910,13 @@ def test_unparsed_env_split_string_does_not_seed_a_literal_path(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runner_config))
     monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
-    spec = TerminalEnvSpec(command="env", args=["-S", "CLAUDE_CONFIG_DIR=$HOME/claude claude"])
 
-    ensure_claude_workspace_trusted(workspace, env=orchestration._claude_terminal_launch_env(spec))
+    env = orchestration._claude_terminal_launch_env(TerminalEnvSpec(command="env", args=args))
+    assert env["CLAUDE_CONFIG_DIR"] == str(runner_config)
 
+    ensure_claude_workspace_trusted(workspace, env=env)
     assert (runner_config / ".claude.json").is_file()
-    assert not (workspace / "$HOME").exists()
+    assert sorted(path.name for path in workspace.iterdir()) == []
 
 
 def _claude_auto_create_session_init(session_id: str, workspace: Path):
@@ -1230,17 +1216,25 @@ async def test_auto_create_claude_terminal_seeds_env_chdir_with_relative_config_
     assert not (tmp_path / "home" / ".claude.json").exists()
 
 
+@pytest.mark.parametrize(
+    "chdir_args",
+    [["-C", "missing"], ["-C", ""], ["--chdir="]],
+    ids=["missing", "empty", "empty-long"],
+)
 async def test_auto_create_claude_terminal_rejects_missing_env_chdir_target(
     bridge_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    chdir_args: list[str],
 ) -> None:
     """
-    A missing ``env --chdir`` target fails before seeding and launch.
+    A missing or empty ``env --chdir`` target fails before seeding and launch.
 
-    The real ``env`` refuses to start in a missing directory, so seeding must
-    not create it (and with it a trusted config) and turn the launch into a
+    The real ``env`` refuses to start in such a directory, so seeding must not
+    create it (and with it a trusted config) and turn the launch into a
     success.
+
+    :param chdir_args: The wrapper's ``-C``/``--chdir`` arguments.
     """
     from unittest.mock import Mock
 
@@ -1257,8 +1251,7 @@ async def test_auto_create_claude_terminal_rejects_missing_env_chdir_target(
     monkeypatch.setattr(
         "omnigent.harness_startup_config.resolve_harness_args",
         lambda _harness, cli_args, cfg=None: [
-            "-C",
-            "missing",
+            *chdir_args,
             "CLAUDE_CONFIG_DIR=relcfg",
             "claude",
             *cli_args,
@@ -1272,5 +1265,6 @@ async def test_auto_create_claude_terminal_rejects_missing_env_chdir_target(
         )
 
     assert excinfo.value.code == ErrorCode.WORKSPACE_MISSING
-    assert not (workspace / "missing").exists()
+    assert sorted(path.name for path in workspace.iterdir()) == []
+    assert not Path("/relcfg").exists()
     registry.launch_required_terminal.assert_not_called()

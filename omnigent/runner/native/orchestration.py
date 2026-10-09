@@ -7508,10 +7508,11 @@ def _claude_terminal_launch_cwd(spec: TerminalEnvSpec, parent_os_env: OSEnvSpec 
     chdir = env_wrapper_chdir(
         spec.command or "", list(spec.args), _claude_terminal_pre_wrapper_env(spec)
     )
-    if not chdir:
+    if chdir is None:
         return cwd
     target = (cwd / chdir).resolve()
-    if not target.is_dir():
+    # ``env`` refuses an empty or missing target, so the launch would fail.
+    if not chdir or not target.is_dir():
         raise OmnigentError(
             "The Claude terminal's env --chdir directory does not exist.",
             code=ErrorCode.WORKSPACE_MISSING,
