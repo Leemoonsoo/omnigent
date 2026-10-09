@@ -1771,7 +1771,7 @@ def prune_orphaned_bridge_dirs() -> int:
     return native_bridge_common.prune_orphaned_dirs(_BRIDGE_ROOT)
 
 
-def claude_global_config_path() -> Path:
+def claude_global_config_path(cwd: Path | None = None) -> Path:
     """
     Return the global config file Claude Code actually loads.
 
@@ -1780,15 +1780,27 @@ def claude_global_config_path() -> Path:
     exists; otherwise it is ``.claude.json`` under ``$CLAUDE_CONFIG_DIR``,
     else the home directory, named ``.claude-custom-oauth.json`` when
     ``CLAUDE_CODE_CUSTOM_OAUTH_URL`` is set. Claude ignores keys written to
-    any other candidate.
+    any other candidate. An explicitly empty ``CLAUDE_CONFIG_DIR`` is not
+    the same as unset: Claude then looks for the legacy file relative to
+    its working directory but still falls back to the home directory.
 
+    :param cwd: Directory Claude Code is launched in, e.g.
+        ``Path("/home/user/repo")``; only consulted when
+        ``CLAUDE_CONFIG_DIR`` is set but empty. ``None`` uses the current
+        working directory.
     :returns: The config file path, e.g. ``Path("/home/user/.claude.json")``
         or ``Path("/home/user/.claude/.config.json")`` on a host whose
         Claude Code install predates ``~/.claude.json``.
     """
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
     config_root = Path(config_dir).expanduser() if config_dir else None
-    legacy_path = (config_root or Path.home() / ".claude") / ".config.json"
+    if config_dir is None:
+        legacy_root = Path.home() / ".claude"
+    elif config_root is None:
+        legacy_root = cwd if cwd is not None else Path.cwd()
+    else:
+        legacy_root = config_root
+    legacy_path = legacy_root / ".config.json"
     if legacy_path.exists():
         return legacy_path
     suffix = "-custom-oauth" if os.environ.get("CLAUDE_CODE_CUSTOM_OAUTH_URL") else ""
@@ -1840,7 +1852,7 @@ def ensure_claude_workspace_trusted(workspace: Path) -> None:
     :raises json.JSONDecodeError: If the existing global config is
         not valid JSON, for the same reason.
     """
-    config_path = claude_global_config_path()
+    config_path = claude_global_config_path(workspace)
     if config_path.exists():
         data = json.loads(config_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):

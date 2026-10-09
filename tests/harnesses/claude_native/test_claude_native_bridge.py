@@ -8287,23 +8287,27 @@ def test_ensure_trusted_seeds_legacy_config_when_present(
 
 
 @pytest.mark.parametrize(
-    "use_config_dir,legacy_in,custom_oauth,expected",
+    "config_dir,legacy_in,custom_oauth,expected",
     [
-        (False, None, False, "home/.claude.json"),
-        (False, "home/.claude", False, "home/.claude/.config.json"),
-        (True, None, False, "selected/.claude.json"),
-        (True, "selected", False, "selected/.config.json"),
+        (None, None, False, "home/.claude.json"),
+        (None, "home/.claude", False, "home/.claude/.config.json"),
+        ("selected", None, False, "selected/.claude.json"),
+        ("selected", "selected", False, "selected/.config.json"),
         # The legacy lookup follows the selected config dir, not ~/.claude.
-        (True, "home/.claude", False, "selected/.claude.json"),
-        (False, None, True, "home/.claude-custom-oauth.json"),
-        (True, None, True, "selected/.claude-custom-oauth.json"),
-        (False, "home/.claude", True, "home/.claude/.config.json"),
+        ("selected", "home/.claude", False, "selected/.claude.json"),
+        (None, None, True, "home/.claude-custom-oauth.json"),
+        ("selected", None, True, "selected/.claude-custom-oauth.json"),
+        (None, "home/.claude", True, "home/.claude/.config.json"),
+        # An empty selector moves only the legacy lookup, to Claude's cwd.
+        ("", "home/.claude", False, "home/.claude.json"),
+        ("", "workspace", False, "workspace/.config.json"),
+        ("", None, True, "home/.claude-custom-oauth.json"),
     ],
 )
 def test_claude_global_config_path_matches_claude_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    use_config_dir: bool,
+    config_dir: str | None,
     legacy_in: str | None,
     custom_oauth: bool,
     expected: str,
@@ -8311,24 +8315,29 @@ def test_claude_global_config_path_matches_claude_resolution(
     """
     The resolved path follows Claude Code's own global-config lookup order.
 
-    :param use_config_dir: Whether ``CLAUDE_CONFIG_DIR`` selects
-        ``tmp_path / "selected"``.
+    :param config_dir: ``CLAUDE_CONFIG_DIR`` as a directory under
+        ``tmp_path`` (e.g. ``"selected"``), ``""`` for an explicitly empty
+        value, or ``None`` to leave it unset.
     :param legacy_in: Directory under ``tmp_path`` holding a legacy
         ``.config.json``, or ``None`` for no legacy file.
     :param custom_oauth: Whether ``CLAUDE_CODE_CUSTOM_OAUTH_URL`` is set.
     :param expected: Expected path relative to ``tmp_path``.
     """
     _redirect_home(monkeypatch, tmp_path / "home")
-    if use_config_dir:
-        (tmp_path / "selected").mkdir()
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "selected"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    if config_dir:
+        (tmp_path / config_dir).mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / config_dir))
+    elif config_dir == "":
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "")
     if legacy_in is not None:
         (tmp_path / legacy_in).mkdir(parents=True, exist_ok=True)
         (tmp_path / legacy_in / ".config.json").write_text("{}")
     if custom_oauth:
         monkeypatch.setenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://oauth.example.test")
 
-    assert claude_global_config_path() == tmp_path / expected
+    assert claude_global_config_path(workspace) == tmp_path / expected
 
 
 def test_display_cost_approval_popup_builds_detached_tmux_command(
