@@ -107,7 +107,7 @@ def test_env_resolution_matches_real_env(config, tmp_path, prefix, found):
         ["-iuKEEP", "A=1", "/usr/bin/env"],
         ["-S", "A=1 /usr/bin/env"],
         ["-S", "- A='x y' /usr/bin/env"],
-        ["--split-string=-u KEEP A=1 /usr/bin/env"],
+        ["-S", "-u KEEP A=1 /usr/bin/env"],
         ["-iS", "A=1 /usr/bin/env"],
     ],
 )
@@ -124,6 +124,14 @@ def test_env_wrapper_environment_matches_real_env(args):
         ["/usr/bin/env", *args], env=base, capture_output=True, text=True, check=True
     )
     assert dict(line.split("=", 1) for line in process.stdout.splitlines()) == expected
+
+
+def test_env_wrapper_long_split_string_matches_short_form():
+    """``--split-string`` spellings model the same environment as ``-S``."""
+    short = startup.env_wrapper_environment("env", ["-S", "-u KEEP A=1 tool"])
+    assert short is not None
+    for args in (["--split-string=-u KEEP A=1 tool"], ["--split-string", "-u KEEP A=1 tool"]):
+        assert startup.env_wrapper_environment("env", args) == short
 
 
 @pytest.mark.parametrize(

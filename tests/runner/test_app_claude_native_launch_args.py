@@ -764,11 +764,8 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
         ),
         ("env", ["-u", "CLAUDE_CONFIG_DIR", "claude"], {}, [], "/home/runner", None),
         ("env", ["-i", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
-        # ``env -`` is the legacy spelling of ``-i``.
-        ("env", ["-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
-        ("env", ["-u", "X", "-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
-        # ``-S`` split strings are expanded before parsing, and their words are
-        # scanned for options again; bundled short options are split.
+        # ``-S`` words are scanned for options again; ``tests/host`` compares the
+        # wrapper forms with the real ``env``.
         (
             "env",
             ["-S", "- HOME=/split-home CLAUDE_CONFIG_DIR=/launch/claude claude"],
@@ -777,15 +774,6 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
             "/split-home",
             "/launch/claude",
         ),
-        ("env", ["-iS", "HOME=/home/wrapped claude"], {}, [], "/home/wrapped", None),
-        (
-            "env",
-            ["-iuCLAUDE_CONFIG_DIR", "HOME=/home/wrapped", "claude"],
-            {},
-            [],
-            "/home/wrapped",
-            None,
-        ),
         (
             "env",
             ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude"],
@@ -793,15 +781,6 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
             [],
             "/home/runner",
             "/wrap/claude",
-        ),
-        ("env", ["-S-i HOME=/home/wrapped claude"], {}, [], "/home/wrapped", None),
-        (
-            "env",
-            ["--split-string=CLAUDE_CONFIG_DIR='/wrap/my claude' claude"],
-            {},
-            [],
-            "/home/runner",
-            "/wrap/my claude",
         ),
     ],
 )
