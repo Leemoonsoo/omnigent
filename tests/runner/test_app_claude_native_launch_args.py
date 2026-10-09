@@ -746,23 +746,34 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
 
 
 @pytest.mark.parametrize(
-    "command,args,spec_env,env_unset,expected_home,expected_config_dir",
+    "command,args,spec_env,env_unset,inherit_env,expected_home,expected_config_dir",
     [
         # The pane inherits the runner env, so its selectors apply.
-        ("claude", [], {}, [], "/home/runner", "/runner/claude"),
+        ("claude", [], {}, [], True, "/home/runner", "/runner/claude"),
+        # Without inheritance only the spec's explicit overrides remain.
+        ("claude", [], {"HOME": "/home/spec"}, [], False, "/home/spec", None),
         # Spec overrides and removals are applied before launch.
-        ("claude", [], {"CLAUDE_CONFIG_DIR": "/spec/claude"}, [], "/home/runner", "/spec/claude"),
-        ("claude", [], {}, ["CLAUDE_CONFIG_DIR"], "/home/runner", None),
+        (
+            "claude",
+            [],
+            {"CLAUDE_CONFIG_DIR": "/spec/claude"},
+            [],
+            True,
+            "/home/runner",
+            "/spec/claude",
+        ),
+        ("claude", [], {}, ["CLAUDE_CONFIG_DIR"], True, "/home/runner", None),
         # An ``env`` wrapper's assignments and -i apply after the spec.
         (
             "env",
             ["CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
             {},
             [],
+            True,
             "/home/runner",
             "/wrap/claude",
         ),
-        ("env", ["-i", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
+        ("env", ["-i", "HOME=/home/wrapped", "claude"], {}, [], True, "/home/wrapped", None),
         # ``-S`` words are scanned for options again. ``tests/host`` checks the
         # remaining wrapper syntax against the real ``env``.
         (
@@ -770,6 +781,7 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
             ["-S", "- HOME=/split-home CLAUDE_CONFIG_DIR=/launch/claude claude"],
             {},
             [],
+            True,
             "/split-home",
             "/launch/claude",
         ),
@@ -781,6 +793,7 @@ def test_claude_terminal_launch_env_matches_pane_environment(
     args: list[str],
     spec_env: dict[str, str],
     env_unset: list[str],
+    inherit_env: bool,
     expected_home: str,
     expected_config_dir: str | None,
 ) -> None:
@@ -791,6 +804,7 @@ def test_claude_terminal_launch_env_matches_pane_environment(
     :param args: Launch args, e.g. ``["CLAUDE_CONFIG_DIR=/wrap/claude", "claude"]``.
     :param spec_env: Terminal spec env overrides.
     :param env_unset: Terminal spec env removals.
+    :param inherit_env: Whether the pane inherits the runner environment.
     :param expected_home: Expected ``HOME`` in the launch env.
     :param expected_config_dir: Expected ``CLAUDE_CONFIG_DIR``, or ``None`` when unset.
     """
@@ -799,12 +813,17 @@ def test_claude_terminal_launch_env_matches_pane_environment(
 
     monkeypatch.setenv("HOME", "/home/runner")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
-    spec = TerminalEnvSpec(command=command, args=args, env=spec_env, env_unset=env_unset)
+    spec = TerminalEnvSpec(
+        command=command, args=args, env=spec_env, env_unset=env_unset, inherit_env=inherit_env
+    )
 
     env = orchestration._claude_terminal_launch_env(spec)
 
     assert env.get("HOME") == expected_home
     assert env.get("CLAUDE_CONFIG_DIR") == expected_config_dir
+    if not inherit_env:
+        # Ambient runner selectors must not leak into a non-inheriting pane.
+        assert env == spec_env
 
 
 def test_claude_terminal_launch_cwd_uses_terminal_os_env_resolution(tmp_path: Path) -> None:
@@ -842,25 +861,6 @@ def test_claude_terminal_launch_cwd_applies_env_chdir(tmp_path: Path) -> None:
         assert (
             orchestration._claude_terminal_launch_cwd(spec, None) == (workspace / "sub").resolve()
         )
-
-
-def test_claude_terminal_launch_env_without_inheritance_keeps_only_spec_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    A terminal that does not inherit the runner env drops ambient selectors.
-
-    Only the spec's explicit overrides reach the launch env, so seeding cannot
-    pick a config from the runner's ``CLAUDE_CONFIG_DIR``.
-    """
-    from omnigent.inner.datamodel import TerminalEnvSpec
-    from omnigent.runner.native import orchestration
-
-    monkeypatch.setenv("HOME", "/home/runner")
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
-    spec = TerminalEnvSpec(command="claude", env={"HOME": "/home/spec"}, inherit_env=False)
-
-    assert orchestration._claude_terminal_launch_env(spec) == {"HOME": "/home/spec"}
 
 
 @pytest.mark.parametrize(
@@ -1105,3 +1105,63 @@ async def test_auto_create_claude_terminal_cleans_routers_when_trust_seeding_fai
         expected.append(("turn", turn_router))
     assert shutdowns == expected
     registry.launch_required_terminal.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "config_dir,legacy_in_cwd,expected",
+    [("relcfg", False, "sub/relcfg/.claude.json"), ("", True, "sub/.config.json")],
+)
+async def test_auto_create_claude_terminal_seeds_env_chdir_with_relative_config_dir(
+    bridge_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_dir: str,
+    legacy_in_cwd: bool,
+    expected: str,
+) -> None:
+    """
+    ``env -C`` and a relative or empty ``CLAUDE_CONFIG_DIR`` compose in auto-create.
+
+    The wrapper moves Claude's cwd first; the config dir then resolves against
+    that cwd, and the trust key names it. The real seeder writes the file.
+
+    :param config_dir: ``CLAUDE_CONFIG_DIR`` assigned by the wrapper.
+    :param legacy_in_cwd: Whether a legacy ``.config.json`` exists in the cwd.
+    :param expected: Expected config file relative to the workspace.
+    """
+    import json
+    from unittest.mock import Mock
+
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+
+    workspace = tmp_path / "workspace"
+    (workspace / "sub").mkdir(parents=True)
+    if legacy_in_cwd:
+        (workspace / "sub" / ".config.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
+    monkeypatch.setattr(
+        "omnigent.harness_startup_config.resolve_harness_command", lambda *_a, **_k: "env"
+    )
+    monkeypatch.setattr(
+        "omnigent.harness_startup_config.resolve_harness_args",
+        lambda _harness, cli_args, cfg=None: [
+            "-C",
+            "sub",
+            f"CLAUDE_CONFIG_DIR={config_dir}",
+            "claude",
+            *cli_args,
+        ],
+    )
+    registry = Mock(spec=SessionResourceRegistry)
+    registry.launch_required_terminal.side_effect = RuntimeError("stop after seeding")
+
+    with pytest.raises(RuntimeError, match="stop after seeding"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch, session_id="conv_seed_env_chdir", workspace=workspace, registry=registry
+        )
+
+    data = json.loads((workspace / expected).read_text())
+    assert data["projects"][str((workspace / "sub").resolve())]["hasTrustDialogAccepted"] is True
+    assert not (tmp_path / "home" / ".claude.json").exists()
