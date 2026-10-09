@@ -25,6 +25,12 @@ comment -- fixed full-viewport overlays like the mobile TerminalsPanel pad
 themselves), so without the drawer consuming the keyboard inset the bottom of
 the list continues underneath the keyboard and its last rows can never be
 scrolled into view while renaming.
+
+A second journey renames a row in the lower half of the screen. Once the
+keyboard rises, the focused field and its Save and Cancel controls must sit in
+the list's visible area above the keyboard. The iOS shell disables document
+scrolling while the app owns keyboard layout, so WebKit's native focus reveal
+does not move the inner list; the app must scroll it.
 """
 
 from __future__ import annotations
@@ -364,6 +370,98 @@ def test_rename_keeps_sidebar_sessions_reachable(
             f"extends to {last_row_bottom}px, so the bottom rows sit behind the "
             "keyboard and cannot be scrolled into view -- other sessions are "
             "inaccessible while renaming."
+        )
+    finally:
+        context.close()
+
+
+# Distinct from the reachability journey's titles so both can share one server.
+_KEYBOARD_ROW_PREFIX = "Keyboard rename row"
+
+
+def _edit_geometry(page: Page) -> dict:
+    return page.evaluate(
+        f"""
+        () => {{
+          const input = document.querySelector('[data-testid="rename-conversation-input"]');
+          const list = document.querySelector('{_LIST_SELECTOR}');
+          const ir = input.getBoundingClientRect();
+          const lr = list.getBoundingClientRect();
+          // A control is usable when a tap at its center reaches it.
+          const uncovered = (label) => {{
+            const button = document.querySelector('button[aria-label="' + label + '"]');
+            const r = button.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return !!hit && button.contains(hit);
+          }};
+          return {{
+            inputTop: ir.top, inputBottom: ir.bottom,
+            listTop: lr.top, listBottom: lr.bottom,
+            listScrollTop: list.scrollTop,
+            keyboardTop: window.visualViewport.height,
+            focused: document.activeElement === input,
+            saveUncovered: uncovered("Save rename"),
+            cancelUncovered: uncovered("Cancel rename"),
+          }};
+        }}
+        """
+    )
+
+
+def test_rename_scrolls_edit_row_into_view_above_keyboard(
+    browser: Browser,
+    seeded_session: tuple[str, str],
+) -> None:
+    """The focused rename field must be visible once the keyboard is up.
+
+    :param browser: Playwright browser to open a touch phone context on.
+    :param seeded_session: ``(base_url, session_id)`` for a pre-created
+        runner-bound session.
+    """
+    base_url, session_id = seeded_session
+    _seed_filler_sessions(base_url, _FILLER_COUNT, title_prefix=_KEYBOARD_ROW_PREFIX)
+
+    context = _new_phone_context(browser)
+    try:
+        page = _open_ios_drawer(context, base_url, session_id, f"{_KEYBOARD_ROW_PREFIX} 00")
+
+        metrics = _list_metrics(page)
+        keyboard_top = _VIEWPORT["height"] - _KEYBOARD_HEIGHT
+        print(f"[rename-into-view] list metrics after open: {metrics}")
+
+        # A fully visible row that the keyboard will cover once it rises.
+        row = _find_row(
+            page, _KEYBOARD_ROW_PREFIX, keyboard_top + 40, metrics["y"] + metrics["h"] - 40
+        )
+        assert row is not None, "no visible row below the future keyboard top"
+        box, row_label = row
+        print(f"[rename-into-view] long-pressing row {row_label!r} at {box}")
+
+        cdp = context.new_cdp_session(page)
+        _start_rename(cdp, page, box)
+        before = _edit_geometry(page)
+        print(f"[rename-into-view] edit focused, keyboard down: {before}")
+
+        # The focused field raises the soft keyboard.
+        page.evaluate(f"() => window.__setKeyboardHeight({_KEYBOARD_HEIGHT})")
+        page.wait_for_timeout(400)
+        after = _edit_geometry(page)
+        print(f"[rename-into-view] keyboard up: {after}")
+
+        assert after["focused"], f"rename field lost focus: {after}"
+        visible_bottom = min(after["listBottom"], after["keyboardTop"])
+        assert after["inputTop"] >= after["listTop"] - 1, (
+            f"rename field scrolled above the list's visible area: {after}"
+        )
+        assert after["inputBottom"] <= visible_bottom + 1, (
+            "while renaming with the soft keyboard up, the focused rename field "
+            f"sits at y={after['inputTop']:.0f}-{after['inputBottom']:.0f}, below "
+            f"the list's visible bottom ({visible_bottom:.0f}px). The list did not "
+            f"scroll it into view (scrollTop {before['listScrollTop']} -> "
+            f"{after['listScrollTop']})."
+        )
+        assert after["saveUncovered"] and after["cancelUncovered"], (
+            f"the rename field's Save or Cancel control is covered by other drawer chrome: {after}"
         )
     finally:
         context.close()
