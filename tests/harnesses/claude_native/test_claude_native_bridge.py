@@ -8409,6 +8409,48 @@ def test_claude_global_config_path_removes_dot_dot_like_path_join(
     assert not (workspace / "x").exists()
 
 
+def test_ensure_trusted_updates_a_symlinked_config_in_place(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A symlinked legacy config stays a symlink; its target receives the seed.
+
+    Dotfile managers often link ``~/.claude/.config.json`` into a repository,
+    so the atomic replace must not swap the link for a standalone file.
+    """
+    home = tmp_path / "home"
+    _redirect_home(monkeypatch, home)
+    target = tmp_path / "dotfiles" / "claude-config.json"
+    target.parent.mkdir()
+    target.write_text(json.dumps({"oauthAccount": {"emailAddress": "user@example.com"}}))
+    link = home / ".claude" / ".config.json"
+    link.parent.mkdir()
+    link.symlink_to(target)
+
+    ensure_claude_workspace_trusted(home)
+
+    assert link.is_symlink()
+    data = json.loads(target.read_text())
+    assert data["oauthAccount"] == {"emailAddress": "user@example.com"}
+    assert data["projects"][str(home.resolve())]["hasTrustDialogAccepted"] is True
+
+
+def test_ensure_trusted_refuses_a_non_file_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config path that exists but is not a regular file is refused, not replaced."""
+    home = tmp_path / "home"
+    _redirect_home(monkeypatch, home)
+    (home / ".claude" / ".config.json").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        ensure_claude_workspace_trusted(home)
+
+    assert (home / ".claude" / ".config.json").is_dir()
+
+
 def test_ensure_trusted_preserves_config_behind_dot_dot_selector(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1888,15 +1888,21 @@ def ensure_claude_workspace_trusted(workspace: Path, env: Mapping[str, str] | No
         find the config file Claude will load. ``None`` uses this process's
         environment.
     :returns: None.
-    :raises ValueError: If the existing global config (or its
-        ``projects`` map / target project entry) is not a JSON object.
+    :raises ValueError: If the existing global config is not a regular
+        file, or it (or its ``projects`` map / target project entry) is not a
+        JSON object. A symlinked config is updated at its target.
         Surfaced rather than silently overwritten so a corrupt or
         unexpected user config is never clobbered (fail loud).
     :raises json.JSONDecodeError: If the existing global config is
         not valid JSON, for the same reason.
     """
     config_path = claude_global_config_path(workspace, env)
+    if config_path.is_symlink():
+        # Keep a symlinked (e.g. dotfile-managed) config; update its target.
+        config_path = config_path.resolve()
     if config_path.exists():
+        if not config_path.is_file():
+            raise ValueError(f"{config_path} is not a regular file; refusing to overwrite.")
         data = json.loads(config_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError(f"{config_path} is not a JSON object; refusing to overwrite.")
