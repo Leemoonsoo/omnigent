@@ -116,39 +116,71 @@ def env_wrapper_environment(command: str, args: list[str]) -> HarnessEnvironment
 
 def _normalize_env_wrapper_args(args: list[str]) -> list[str]:
     """
-    Rewrite env's legacy ``-`` and ``-S`` split strings into the modeled form.
+    Rewrite env's legacy ``-``, bundled short options, and ``-S`` split strings.
 
-    Split strings use POSIX shell quoting, which matches GNU ``env -S`` when
-    the string has no ``${VAR}`` expansion, backslash escape, or ``#`` comment.
+    Split-string words are scanned again, so options inside them apply. Split
+    strings use POSIX shell quoting, which matches GNU ``env -S`` when the
+    string has no ``${VAR}`` expansion, backslash escape, or ``#`` comment.
 
-    :param args: ``env`` arguments, e.g. ``["-S", "A=1 claude"]``.
-    :returns: Equivalent arguments, e.g. ``["A=1", "claude"]``.
+    :param args: ``env`` arguments, e.g. ``["-iS", "A=1 claude"]``.
+    :returns: Equivalent arguments, e.g. ``["-i", "A=1", "claude"]``.
     :raises ValueError: If a split string has unbalanced quotes or uses
-        syntax that POSIX quoting would read differently from ``env``.
+        syntax that POSIX quoting would read differently from ``env``, or an
+        option is missing its value.
     """
+    pending = list(args)
     normalized: list[str] = []
-    index = 0
-    while index < len(args):
-        arg = args[index]
+    while pending:
+        arg = pending.pop(0)
         if arg == "-":
             normalized.append("-i")  # env's legacy spelling of --ignore-environment
-        elif arg in ("-S", "--split-string") and index + 1 < len(args):
-            normalized.extend(_split_env_string(args[index + 1]))
-            index += 1
+        elif arg == "--split-string":
+            if not pending:
+                raise ValueError("env --split-string needs a value")
+            pending[:0] = _split_env_string(pending.pop(0))
         elif arg.startswith("--split-string="):
-            normalized.extend(_split_env_string(arg.partition("=")[2]))
-        elif arg.startswith("-S") and len(arg) > 2:
-            normalized.extend(_split_env_string(arg[2:]))
-        elif arg in ("-u", "--unset") and index + 1 < len(args):
-            normalized.extend(args[index : index + 2])
-            index += 1
-        elif arg.startswith("-") and arg != "--":
+            pending[:0] = _split_env_string(arg.partition("=")[2])
+        elif arg == "--unset" and pending:
+            normalized.extend([arg, pending.pop(0)])
+        elif arg.startswith("--") and arg != "--":
             normalized.append(arg)
+        elif arg.startswith("-") and arg != "--":
+            _normalize_short_option_cluster(arg, pending, normalized)
         else:
-            normalized.extend(args[index:])
+            normalized.append(arg)
+            normalized.extend(pending)
             break
-        index += 1
     return normalized
+
+
+def _normalize_short_option_cluster(arg: str, pending: list[str], normalized: list[str]) -> None:
+    """
+    Expand one short-option cluster such as ``-iS`` or ``-uNAME``.
+
+    :param arg: The cluster, e.g. ``"-iS"``.
+    :param pending: Remaining arguments; ``-u``/``-S`` values are taken from
+        here, and split-string words are pushed back onto it.
+    :param normalized: Output arguments, extended in place.
+    :returns: None.
+    :raises ValueError: If ``-u`` or ``-S`` is missing its value.
+    """
+    cluster = arg[1:]
+    for position, flag in enumerate(cluster):
+        if flag == "i":
+            normalized.append("-i")
+            continue
+        if flag in ("u", "S"):
+            value = cluster[position + 1 :] or (pending.pop(0) if pending else None)
+            if value is None:
+                raise ValueError(f"env -{flag} needs a value")
+            if flag == "u":
+                normalized.extend(["-u", value])
+            else:
+                pending[:0] = _split_env_string(value)
+            return
+        # Leave unmodeled flags for the parser to reject.
+        normalized.append(f"-{cluster[position:]}")
+        return
 
 
 def _split_env_string(value: str) -> list[str]:

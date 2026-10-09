@@ -778,7 +778,25 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
         # ``env -`` is the legacy spelling of ``-i``.
         ("env", ["-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
         ("env", ["-u", "X", "-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
-        # ``-S`` split strings are expanded before parsing.
+        # ``-S`` split strings are expanded before parsing, and their words are
+        # scanned for options again; bundled short options are split.
+        (
+            "env",
+            ["-S", "- HOME=/split-home CLAUDE_CONFIG_DIR=/launch/claude claude"],
+            {},
+            [],
+            "/split-home",
+            "/launch/claude",
+        ),
+        ("env", ["-iS", "HOME=/home/wrapped claude"], {}, [], "/home/wrapped", None),
+        (
+            "env",
+            ["-iuCLAUDE_CONFIG_DIR", "HOME=/home/wrapped", "claude"],
+            {},
+            [],
+            "/home/wrapped",
+            None,
+        ),
         (
             "env",
             ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude"],
@@ -828,6 +846,25 @@ def test_claude_terminal_launch_env_matches_pane_environment(
 
     assert env.get("HOME") == expected_home
     assert env.get("CLAUDE_CONFIG_DIR") == expected_config_dir
+
+
+def test_claude_terminal_launch_env_without_inheritance_keeps_only_spec_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A terminal that does not inherit the runner env drops ambient selectors.
+
+    Only the spec's explicit overrides reach the launch env, so seeding cannot
+    pick a config from the runner's ``CLAUDE_CONFIG_DIR``.
+    """
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    monkeypatch.setenv("HOME", "/home/runner")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
+    spec = TerminalEnvSpec(command="claude", env={"HOME": "/home/spec"}, inherit_env=False)
+
+    assert orchestration._claude_terminal_launch_env(spec) == {"HOME": "/home/spec"}
 
 
 @pytest.mark.parametrize(
