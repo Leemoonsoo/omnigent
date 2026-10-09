@@ -8941,11 +8941,7 @@ async def _auto_create_claude_terminal(
         # the watcher reports the exit deterministically via `#{pane_dead}`.
         keep_alive_after_exit=True,
     )
-    # Pre-accept Claude's first-run trust + onboarding TUI prompts for this
-    # workspace. They have no PermissionRequest hook, so on a host-spawned
-    # (web-UI-driven) session they would hang Claude in its terminal with
-    # nothing shown in the UI. Seed with the launch env so the runner writes
-    # the config file this Claude process reads.
+    # Seed trust and onboarding in the config selected by the terminal's launch environment.
     ensure_claude_workspace_trusted(Path(workspace), env=_claude_terminal_launch_env(env_spec))
     _logger.info(
         "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "

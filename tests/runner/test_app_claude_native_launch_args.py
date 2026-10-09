@@ -778,15 +778,6 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
         # ``env -`` is the legacy spelling of ``-i``.
         ("env", ["-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
         ("env", ["-u", "X", "-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
-        # Unparsed wrapper forms such as ``-S`` keep the pre-wrapper env.
-        (
-            "env",
-            ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude"],
-            {},
-            [],
-            "/home/runner",
-            "/runner/claude",
-        ),
     ],
 )
 def test_claude_terminal_launch_env_matches_pane_environment(
@@ -819,6 +810,25 @@ def test_claude_terminal_launch_env_matches_pane_environment(
 
     assert env.get("HOME") == expected_home
     assert env.get("CLAUDE_CONFIG_DIR") == expected_config_dir
+
+
+def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
+
+    The shared parser does not model ``env -S``, so its assignments are not
+    applied even though the real launch would apply them. Seeding then uses
+    the runner and spec environment, as it did before launch-env resolution.
+    """
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
+    spec = TerminalEnvSpec(command="env", args=["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude"])
+
+    assert orchestration._claude_terminal_launch_env(spec)["CLAUDE_CONFIG_DIR"] == "/runner/claude"
 
 
 async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
