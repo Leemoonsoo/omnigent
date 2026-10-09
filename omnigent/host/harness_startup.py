@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import getopt
 import os
-import shlex
+import re
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,10 @@ from omnigent.harness_aliases import canonicalize_harness
 from omnigent.harness_startup_config import resolve_harness_config
 
 SUPPORTED_HARNESSES = {"claude-native", "codex-native"}
+
+
+# ``env -S`` expands only the braced form.
+_ENV_VARIABLE_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 class HarnessEnvironment(BaseModel):
@@ -95,39 +100,47 @@ def describe_harness_startup(harness: str) -> HarnessStartup:
     )
 
 
-def env_wrapper_environment(command: str, args: list[str]) -> HarnessEnvironment | None:
+def env_wrapper_environment(
+    command: str, args: list[str], environ: Mapping[str, str] | None = None
+) -> HarnessEnvironment | None:
     """
     Return the environment changes an ``env`` wrapper launch applies.
 
     :param command: Configured harness command, e.g. ``"env"`` or ``"claude"``.
     :param args: Arguments passed to *command*, e.g.
         ``["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
+    :param environ: Environment the wrapper starts from, used to expand
+        ``${NAME}`` in ``-S`` strings; ``None`` treats such strings as unparsed.
     :returns: The wrapper's ``-i``/``-``/``-u``/``-S``/assignment changes, or
         ``None`` when *command* is not a parseable ``env`` wrapper (e.g. it
         uses ``-v``). A ``-C``/``--chdir`` directory is reported by
         :func:`env_wrapper_chdir`.
     """
     try:
-        normalized = _normalize_env_wrapper_args(args)
+        normalized = _normalize_env_wrapper_args(args, environ=environ)
     except ValueError:
         return None
     unwrapped = _unwrap_env(command, normalized, os.defpath)
     return unwrapped[3] if unwrapped is not None else None
 
 
-def env_wrapper_chdir(command: str, args: list[str]) -> str | None:
+def env_wrapper_chdir(
+    command: str, args: list[str], environ: Mapping[str, str] | None = None
+) -> str | None:
     """
     Return the directory an ``env -C``/``--chdir`` wrapper changes into.
 
     :param command: Configured harness command, e.g. ``"env"``.
     :param args: Arguments passed to *command*, e.g.
         ``["--chdir=/srv/repo", "claude"]``.
+    :param environ: Environment the wrapper starts from; see
+        :func:`env_wrapper_environment`.
     :returns: The last ``-C``/``--chdir`` value, e.g. ``"/srv/repo"``, or
         ``None`` when there is none or the wrapper is not parseable.
     """
     chdirs: list[str] = []
     try:
-        normalized = _normalize_env_wrapper_args(args, chdirs)
+        normalized = _normalize_env_wrapper_args(args, chdirs, environ)
     except ValueError:
         return None
     if _unwrap_env(command, normalized, os.defpath) is None:
@@ -135,18 +148,22 @@ def env_wrapper_chdir(command: str, args: list[str]) -> str | None:
     return chdirs[-1] if chdirs else None
 
 
-def _normalize_env_wrapper_args(args: list[str], chdirs: list[str] | None = None) -> list[str]:
+def _normalize_env_wrapper_args(
+    args: list[str],
+    chdirs: list[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
     """
     Rewrite env's legacy ``-``, bundled short options, and ``-S`` split strings.
 
-    Split-string words are scanned again, so options inside them apply. Split
-    strings use POSIX shell quoting, which matches GNU ``env -S`` when the
-    string has no ``${VAR}`` expansion, backslash escape, or ``#`` comment.
-    ``-C``/``--chdir`` options are removed and their directories recorded.
+    Split-string words are scanned again, so options inside them apply; see
+    :func:`_split_env_string` for the modeled split syntax. ``-C``/``--chdir``
+    options are removed and their directories recorded.
 
     :param args: ``env`` arguments, e.g. ``["-iS", "A=1 claude"]``.
     :param chdirs: Receives each ``-C``/``--chdir`` directory in order, or
         ``None`` to discard them.
+    :param environ: Environment ``-S`` strings expand from, or ``None``.
     :returns: Equivalent arguments, e.g. ``["-i", "A=1", "claude"]``.
     :raises ValueError: If a split string has unbalanced quotes or uses
         syntax that POSIX quoting would read differently from ``env``, or an
@@ -168,15 +185,15 @@ def _normalize_env_wrapper_args(args: list[str], chdirs: list[str] | None = None
         elif arg == "--split-string":
             if not pending:
                 raise ValueError("env --split-string needs a value")
-            pending[:0] = _split_env_string(pending.pop(0))
+            pending[:0] = _split_env_string(pending.pop(0), environ)
         elif arg.startswith("--split-string="):
-            pending[:0] = _split_env_string(arg.partition("=")[2])
+            pending[:0] = _split_env_string(arg.partition("=")[2], environ)
         elif arg == "--unset" and pending:
             normalized.extend([arg, pending.pop(0)])
         elif arg.startswith("--") and arg != "--":
             normalized.append(arg)
         elif arg.startswith("-") and arg != "--":
-            _normalize_short_option_cluster(arg, pending, normalized, recorded)
+            _normalize_short_option_cluster(arg, pending, normalized, recorded, environ)
         else:
             normalized.append(arg)
             normalized.extend(pending)
@@ -185,7 +202,11 @@ def _normalize_env_wrapper_args(args: list[str], chdirs: list[str] | None = None
 
 
 def _normalize_short_option_cluster(
-    arg: str, pending: list[str], normalized: list[str], chdirs: list[str]
+    arg: str,
+    pending: list[str],
+    normalized: list[str],
+    chdirs: list[str],
+    environ: Mapping[str, str] | None,
 ) -> None:
     """
     Expand one short-option cluster such as ``-iS`` or ``-uNAME``.
@@ -195,6 +216,7 @@ def _normalize_short_option_cluster(
         from here, and split-string words are pushed back onto it.
     :param normalized: Output arguments, extended in place.
     :param chdirs: Receives a ``-C`` directory.
+    :param environ: Environment ``-S`` strings expand from, or ``None``.
     :returns: None.
     :raises ValueError: If ``-u``, ``-S``, or ``-C`` is missing its value.
     """
@@ -212,25 +234,63 @@ def _normalize_short_option_cluster(
             elif flag == "C":
                 chdirs.append(value)
             else:
-                pending[:0] = _split_env_string(value)
+                pending[:0] = _split_env_string(value, environ)
             return
         # Leave unmodeled flags for the parser to reject.
         normalized.append(f"-{cluster[position:]}")
         return
 
 
-def _split_env_string(value: str) -> list[str]:
+def _split_env_string(value: str, environ: Mapping[str, str] | None) -> list[str]:
     """
-    Split an ``env -S`` string, rejecting syntax POSIX quoting would misread.
+    Split an ``env -S`` string the way GNU ``env`` does.
 
-    :param value: Split string, e.g. ``"CLAUDE_CONFIG_DIR=/srv/claude claude"``.
-    :returns: The arguments, e.g. ``["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
-    :raises ValueError: If *value* uses ``$`` expansion, a backslash escape, a
-        ``#`` comment, or unbalanced quotes.
+    Words split on unquoted whitespace; single quotes keep text literal, and
+    ``${NAME}`` expands from *environ* outside single quotes (unset names
+    become empty). Backslash escapes, ``#`` comments, and bare ``$NAME`` have
+    ``env``-specific meanings this does not model.
+
+    :param value: Split string, e.g. ``"CLAUDE_CONFIG_DIR=${HOME}/c claude"``.
+    :param environ: Environment ``env`` expands from, or ``None`` when unknown.
+    :returns: The arguments, e.g. ``["CLAUDE_CONFIG_DIR=/home/user/c", "claude"]``.
+    :raises ValueError: If *value* uses an unmodeled form, unbalanced quotes,
+        or an expansion without a known *environ*.
     """
-    if "$" in value or "\\" in value or any(word.startswith("#") for word in value.split()):
+    if "\\" in value or any(word.startswith("#") for word in value.split()):
         raise ValueError(f"unsupported env -S syntax: {value!r}")
-    return shlex.split(value)
+    words: list[str] = []
+    current: list[str] = []
+    in_word = False
+    quote: str | None = None
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if quote is None and char.isspace():
+            if in_word:
+                words.append("".join(current))
+                current, in_word = [], False
+            index += 1
+            continue
+        in_word = True
+        if quote is None and char in "'\"":
+            quote = char
+        elif char == quote:
+            quote = None
+        elif char == "$" and quote != "'":
+            match = _ENV_VARIABLE_REFERENCE.match(value, index)
+            if match is None or environ is None:
+                raise ValueError(f"unsupported env -S expansion: {value!r}")
+            current.append(environ.get(match.group(1), ""))
+            index = match.end()
+            continue
+        else:
+            current.append(char)
+        index += 1
+    if quote is not None:
+        raise ValueError(f"unbalanced quote in env -S string: {value!r}")
+    if in_word:
+        words.append("".join(current))
+    return words
 
 
 def _unwrap_env(

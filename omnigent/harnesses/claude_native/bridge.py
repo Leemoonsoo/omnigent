@@ -1889,8 +1889,9 @@ def ensure_claude_workspace_trusted(workspace: Path, env: Mapping[str, str] | No
         environment.
     :returns: None.
     :raises ValueError: If the existing global config is not a regular
-        file, or it (or its ``projects`` map / target project entry) is not a
-        JSON object. A symlinked config is updated at its target.
+        file or is a broken or looping symlink, or it (or its ``projects`` map /
+        target project entry) is not a JSON object. A symlinked config is
+        updated at its target.
         Surfaced rather than silently overwritten so a corrupt or
         unexpected user config is never clobbered (fail loud).
     :raises json.JSONDecodeError: If the existing global config is
@@ -1899,7 +1900,12 @@ def ensure_claude_workspace_trusted(workspace: Path, env: Mapping[str, str] | No
     config_path = claude_global_config_path(workspace, env)
     if config_path.is_symlink():
         # Keep a symlinked (e.g. dotfile-managed) config; update its target.
-        config_path = config_path.resolve()
+        try:
+            config_path = config_path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                f"{config_path} is a broken or looping symlink; refusing to overwrite."
+            ) from exc
     if config_path.exists():
         if not config_path.is_file():
             raise ValueError(f"{config_path} is not a regular file; refusing to overwrite.")

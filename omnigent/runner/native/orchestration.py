@@ -7505,7 +7505,9 @@ def _claude_terminal_launch_cwd(spec: TerminalEnvSpec, parent_os_env: OSEnvSpec 
     """
     effective = build_terminal_os_env_spec(spec, parent_os_env_spec=parent_os_env)
     cwd = Path(effective.cwd or os.getcwd()).resolve()
-    chdir = env_wrapper_chdir(spec.command or "", list(spec.args))
+    chdir = env_wrapper_chdir(
+        spec.command or "", list(spec.args), _claude_terminal_pre_wrapper_env(spec)
+    )
     if not chdir:
         return cwd
     target = (cwd / chdir).resolve()
@@ -7515,6 +7517,24 @@ def _claude_terminal_launch_cwd(spec: TerminalEnvSpec, parent_os_env: OSEnvSpec 
             code=ErrorCode.WORKSPACE_MISSING,
         )
     return target
+
+
+def _claude_terminal_pre_wrapper_env(spec: TerminalEnvSpec) -> dict[str, str]:
+    """
+    Return the environment a Claude launch command starts with.
+
+    This is the runner environment (when inherited) with the spec's overrides
+    and removals, before an ``env`` wrapper applies its own changes; ``env -S``
+    expands ``${NAME}`` from it.
+
+    :param spec: The Claude terminal launch spec.
+    :returns: The pre-wrapper environment, e.g. ``{"HOME": "/home/user"}``.
+    """
+    env = dict(os.environ) if spec.inherit_env else {}
+    env.update(spec.env)
+    for key in spec.env_unset:
+        env.pop(key, None)
+    return env
 
 
 def _claude_terminal_launch_env(spec: TerminalEnvSpec) -> dict[str, str]:
@@ -7531,11 +7551,8 @@ def _claude_terminal_launch_env(spec: TerminalEnvSpec) -> dict[str, str]:
     :returns: The effective environment, e.g.
         ``{"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}``.
     """
-    env = dict(os.environ) if spec.inherit_env else {}
-    env.update(spec.env)
-    for key in spec.env_unset:
-        env.pop(key, None)
-    wrapper = env_wrapper_environment(spec.command or "", list(spec.args))
+    env = _claude_terminal_pre_wrapper_env(spec)
+    wrapper = env_wrapper_environment(spec.command or "", list(spec.args), env)
     if wrapper is None and Path(spec.command or "").name == "env":
         _logger.info(
             "Claude terminal env wrapper form is not modeled; trust seeding uses the "
@@ -8985,10 +9002,21 @@ async def _auto_create_claude_terminal(
     except BaseException:
         # No forwarder owns the routers yet, so release the ones this launch started.
         # A ``None`` handle would shut down whichever router is registered now.
-        if _subagent_router is not None:
-            await _shutdown_session_router_async(session_id, _subagent_router)
-        if _claude_turn_router is not None:
-            await _shutdown_session_turn_router_async(session_id, _claude_turn_router)
+        for shutdown_router, router in (
+            (_shutdown_session_router_async, _subagent_router),
+            (_shutdown_session_turn_router_async, _claude_turn_router),
+        ):
+            if router is None:
+                continue
+            try:
+                await shutdown_router(session_id, router)
+            except Exception:  # noqa: BLE001 - keep the seeding failure as the error.
+                _logger.warning(
+                    "Router cleanup failed after Claude trust seeding failed: session=%s",
+                    session_id,
+                    exc_info=True,
+                    extra={"session_id": session_id},
+                )
         raise
     _logger.info(
         "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "

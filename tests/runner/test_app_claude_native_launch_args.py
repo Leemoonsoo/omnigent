@@ -785,6 +785,16 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
             "/split-home",
             "/launch/claude",
         ),
+        # ``-S`` expands ``${NAME}`` from the pre-wrapper environment.
+        (
+            "env",
+            ["-S", "CLAUDE_CONFIG_DIR=${HOME}/claude claude"],
+            {},
+            [],
+            True,
+            "/home/runner",
+            "/home/runner/claude",
+        ),
     ],
 )
 def test_claude_terminal_launch_env_matches_pane_environment(
@@ -868,7 +878,7 @@ def test_claude_terminal_launch_cwd_applies_env_chdir(tmp_path: Path) -> None:
     [
         ["-v", "CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
         ["-S", "CLAUDE_CONFIG_DIR='/wrap/claude claude"],
-        ["-S", "CLAUDE_CONFIG_DIR=${HOME}/claude claude"],
+        ["-S", "CLAUDE_CONFIG_DIR=$HOME/claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=wrap\\_claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude #comment"],
     ],
@@ -882,7 +892,7 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
 
     The shared parser does not model options such as ``-v``, unbalanced ``-S`` quoting, or
-    ``-S`` variable expansion, escapes, and comments, so their assignments are
+    ``-S`` bare ``$NAME`` expansion, escapes, and comments, so their assignments are
     not applied even though the real launch would apply them.
 
     :param args: Wrapper args the parser cannot model.
@@ -900,10 +910,10 @@ def test_unparsed_env_split_string_does_not_seed_a_literal_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    An unexpanded ``${HOME}`` split string never becomes a literal config path.
+    An unmodeled ``$HOME`` split string never becomes a literal config path.
 
     Seeding falls back to the runner's selected config instead of writing
-    under a directory literally named ``${HOME}``.
+    under a directory literally named ``$HOME``.
     """
     from omnigent.harnesses.claude_native.bridge import ensure_claude_workspace_trusted
     from omnigent.inner.datamodel import TerminalEnvSpec
@@ -915,12 +925,12 @@ def test_unparsed_env_split_string_does_not_seed_a_literal_path(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runner_config))
     monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
-    spec = TerminalEnvSpec(command="env", args=["-S", "CLAUDE_CONFIG_DIR=${HOME}/claude claude"])
+    spec = TerminalEnvSpec(command="env", args=["-S", "CLAUDE_CONFIG_DIR=$HOME/claude claude"])
 
     ensure_claude_workspace_trusted(workspace, env=orchestration._claude_terminal_launch_env(spec))
 
     assert (runner_config / ".claude.json").is_file()
-    assert not (workspace / "${HOME}").exists()
+    assert not (workspace / "$HOME").exists()
 
 
 def _claude_auto_create_session_init(session_id: str, workspace: Path):
@@ -1104,6 +1114,59 @@ async def test_auto_create_claude_terminal_cleans_routers_when_trust_seeding_fai
     if turn_started:
         expected.append(("turn", turn_router))
     assert shutdowns == expected
+    registry.launch_required_terminal.assert_not_called()
+
+
+async def test_auto_create_claude_terminal_cleanup_keeps_seeding_error_and_both_shutdowns(
+    bridge_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A failing router shutdown neither hides the seeding error nor skips the other.
+
+    Both started routers are shut down even when the first shutdown raises,
+    and the trust-seeding failure is what propagates.
+    """
+    from unittest.mock import Mock
+
+    from omnigent.runner.native import orchestration
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+
+    subagent_router = object()
+    turn_router = object()
+    shutdowns: list[str] = []
+
+    async def failing_subagent_shutdown(_session_id: str, _router: object) -> None:
+        shutdowns.append("subagent")
+        raise RuntimeError("subagent shutdown failed")
+
+    async def record_turn_shutdown(_session_id: str, _router: object) -> None:
+        shutdowns.append("turn")
+
+    def failing_seed(_workspace: Path, env: dict[str, str] | None = None) -> None:
+        raise ValueError("config is not a JSON object")
+
+    monkeypatch.setattr(
+        orchestration,
+        "_start_subagent_router_for_native_session",
+        lambda *_a, **_k: (bridge_dir, subagent_router),
+    )
+    monkeypatch.setattr(
+        orchestration, "_start_turn_router_for_native_session", lambda *_a, **_k: turn_router
+    )
+    monkeypatch.setattr(orchestration, "_shutdown_session_router_async", failing_subagent_shutdown)
+    monkeypatch.setattr(orchestration, "_shutdown_session_turn_router_async", record_turn_shutdown)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted", failing_seed
+    )
+    registry = Mock(spec=SessionResourceRegistry)
+
+    with pytest.raises(ValueError, match="config is not a JSON object"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch, session_id="conv_cleanup_failure", workspace=bridge_dir, registry=registry
+        )
+
+    assert shutdowns == ["subagent", "turn"]
     registry.launch_required_terminal.assert_not_called()
 
 

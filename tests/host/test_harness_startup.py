@@ -129,6 +129,10 @@ def _real_env_supports_long_split_string() -> bool:
         ["--split-string=-u KEEP A=1 /usr/bin/env"],
         ["--split-string", "-u KEEP A=1 /usr/bin/env"],
         ["-C", "/", "A=1", "/usr/bin/env"],
+        ["-S", "A=${KEEP}/c /usr/bin/env"],
+        ["-S", 'A="${KEEP} x" /usr/bin/env'],
+        ["-S", "A='${KEEP}' /usr/bin/env"],
+        ["-S", "A=${UNSET_NAME}z /usr/bin/env"],
     ],
 )
 def test_env_wrapper_environment_matches_real_env(args):
@@ -138,7 +142,7 @@ def test_env_wrapper_environment_matches_real_env(args):
     if args[0] == "-C" and not _real_env_supports_chdir():
         pytest.skip("/usr/bin/env lacks -C")
     base = {"PATH": "/usr/bin:/bin", "KEEP": "kept", "A": "old"}
-    wrapper = startup.env_wrapper_environment("/usr/bin/env", args)
+    wrapper = startup.env_wrapper_environment("/usr/bin/env", args, base)
     assert wrapper is not None
     expected = dict(base) if wrapper.inherit else {}
     for name in wrapper.unset:

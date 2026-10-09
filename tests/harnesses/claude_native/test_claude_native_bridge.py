@@ -8441,6 +8441,34 @@ def test_ensure_trusted_updates_a_symlinked_config_in_place(
     assert data["projects"][str(home.resolve())]["hasTrustDialogAccepted"] is True
 
 
+def test_ensure_trusted_refuses_broken_or_looping_config_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A dangling or looping config symlink is refused rather than written through.
+
+    Writing through a dangling link would create a new config at an arbitrary
+    target; a loop cannot be resolved at all.
+    """
+    home = tmp_path / "home"
+    _redirect_home(monkeypatch, home)
+    link = home / ".claude.json"
+    missing_target = tmp_path / "elsewhere" / "claude.json"
+    link.symlink_to(missing_target)
+
+    with pytest.raises(ValueError, match="broken or looping symlink"):
+        ensure_claude_workspace_trusted(home)
+    assert not missing_target.parent.exists()
+
+    link.unlink()
+    loop = home / "loop.json"
+    loop.symlink_to(link)
+    link.symlink_to(loop)
+    with pytest.raises(ValueError, match="broken or looping symlink"):
+        ensure_claude_workspace_trusted(home)
+
+
 def test_ensure_trusted_refuses_a_non_file_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
