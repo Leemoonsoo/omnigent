@@ -35,6 +35,7 @@ def test_isolates_inherited_native_state(tmp_path):
 
 def test_onboarding_uses_selected_claude_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "selected"))
+    monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     workspace = tmp_path / "workspace"
     ensure_claude_workspace_trusted(workspace)

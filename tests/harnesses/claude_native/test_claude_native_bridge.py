@@ -8296,6 +8296,7 @@ def test_ensure_trusted_seeds_legacy_config_when_present(
         # The legacy lookup follows the selected config dir, not ~/.claude.
         (True, "home/.claude", False, "selected/.claude.json"),
         (False, None, True, "home/.claude-custom-oauth.json"),
+        (True, None, True, "selected/.claude-custom-oauth.json"),
         (False, "home/.claude", True, "home/.claude/.config.json"),
     ],
 )
