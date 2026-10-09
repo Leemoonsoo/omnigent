@@ -1792,9 +1792,10 @@ def claude_global_config_path(
     """
     env = os.environ if env is None else env
     base = cwd if cwd is not None else Path.cwd()
-    home = Path(env["HOME"]) if env.get("HOME") else Path.home()
+    # Claude joins these paths verbatim: no ``~`` expansion, relative to its cwd.
+    home = base / env["HOME"] if env.get("HOME") else Path.home()
     config_dir = env.get("CLAUDE_CONFIG_DIR")
-    config_root = base / Path(config_dir).expanduser() if config_dir else None
+    config_root = base / config_dir if config_dir else None
     if config_dir is None:
         legacy_root = home / ".claude"
     elif config_root is None:

@@ -8366,6 +8366,15 @@ def test_claude_global_config_path_uses_launch_env_and_cwd(
     )
     home_only = {"HOME": str(tmp_path / "home")}
     assert claude_global_config_path(workspace, home_only) == tmp_path / "home" / ".claude.json"
+    # Claude joins both values verbatim: a relative HOME and a literal ``~``
+    # resolve against its working directory, not the runner's home or cwd.
+    assert claude_global_config_path(workspace, {"HOME": "relhome"}) == (
+        workspace / "relhome" / ".claude.json"
+    )
+    tilde_env = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": "~/cfg"}
+    assert (
+        claude_global_config_path(workspace, tilde_env) == workspace / "~" / "cfg" / ".claude.json"
+    )
 
 
 def test_ensure_trusted_seeds_the_launch_env_config(

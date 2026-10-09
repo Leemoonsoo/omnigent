@@ -830,17 +830,47 @@ def test_claude_terminal_launch_env_matches_pane_environment(
     assert env.get("CLAUDE_CONFIG_DIR") == expected_config_dir
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--chdir", "/srv", "CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
+        ["-S", "CLAUDE_CONFIG_DIR='/wrap/claude claude"],
+        ["-S", "CLAUDE_CONFIG_DIR=${HOME}/claude claude"],
+        ["-S", "CLAUDE_CONFIG_DIR=wrap\\_claude claude"],
+        ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude #comment"],
+    ],
+    ids=["chdir", "unbalanced-quote", "variable-expansion", "escape", "comment"],
+)
 def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    args: list[str],
 ) -> None:
     """
     Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
 
     The shared parser does not model ``--chdir``, unbalanced ``-S`` quoting, or
     ``-S`` variable expansion, escapes, and comments, so their assignments are
-    not applied even though the real launch would apply them. Seeding then uses
-    the runner and spec environment instead of a misread path.
+    not applied even though the real launch would apply them.
+
+    :param args: Wrapper args the parser cannot model.
+    """
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
+    env = orchestration._claude_terminal_launch_env(TerminalEnvSpec(command="env", args=args))
+    assert env["CLAUDE_CONFIG_DIR"] == "/runner/claude"
+
+
+def test_unparsed_env_split_string_does_not_seed_a_literal_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    An unexpanded ``${HOME}`` split string never becomes a literal config path.
+
+    Seeding falls back to the runner's selected config instead of writing
+    under a directory literally named ``${HOME}``.
     """
     from omnigent.harnesses.claude_native.bridge import ensure_claude_workspace_trusted
     from omnigent.inner.datamodel import TerminalEnvSpec
@@ -852,20 +882,12 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runner_config))
     monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
-    for args in (
-        ["--chdir", "/srv", "CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
-        ["-S", "CLAUDE_CONFIG_DIR='/wrap/claude claude"],
-        ["-S", "CLAUDE_CONFIG_DIR=${HOME}/claude claude"],
-        ["-S", "CLAUDE_CONFIG_DIR=wrap\\_claude claude"],
-        ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude #comment"],
-    ):
-        env = orchestration._claude_terminal_launch_env(TerminalEnvSpec(command="env", args=args))
-        assert env["CLAUDE_CONFIG_DIR"] == str(runner_config)
+    spec = TerminalEnvSpec(command="env", args=["-S", "CLAUDE_CONFIG_DIR=${HOME}/claude claude"])
 
-        ensure_claude_workspace_trusted(workspace, env=env)
+    ensure_claude_workspace_trusted(workspace, env=orchestration._claude_terminal_launch_env(spec))
 
-        assert (runner_config / ".claude.json").is_file()
-        assert not (workspace / "${HOME}").exists()
+    assert (runner_config / ".claude.json").is_file()
+    assert not (workspace / "${HOME}").exists()
 
 
 def _claude_auto_create_session_init(session_id: str, workspace: Path):
