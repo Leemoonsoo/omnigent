@@ -1,4 +1,4 @@
-import { useQuery, type QueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { authenticatedFetch } from "@/lib/identity";
 import { setSessionParent } from "@/lib/sessionHost";
 import { isTempConvId } from "@/lib/tempConversationId";
@@ -121,6 +121,25 @@ export function cachedTreeContains(
   targetId: string,
   maxDepth: number,
 ): boolean {
+  return findCachedDescendant(queryClient, rootId, targetId, maxDepth) !== null;
+}
+
+/**
+ * Find ``targetId``'s summary in the cached child-session lists under
+ * ``rootId``. Synchronous and cache-only, like ``cachedTreeContains``.
+ *
+ * @param queryClient - The app QueryClient holding child-session caches.
+ * @param rootId - Root session whose cached tree to walk, e.g. ``"conv_root"``.
+ * @param targetId - Session to look for, e.g. ``"conv_grandchild"``.
+ * @param maxDepth - Levels below the root to examine, e.g. ``MAX_TREE_DEPTH``.
+ * @returns The cached summary, or ``null`` when no cached list holds it.
+ */
+export function findCachedDescendant(
+  queryClient: QueryClient,
+  rootId: string,
+  targetId: string,
+  maxDepth: number,
+): ChildSessionInfo | null {
   let frontier = [rootId];
   for (let depth = 0; depth < maxDepth && frontier.length > 0; depth++) {
     const next: string[] = [];
@@ -128,13 +147,13 @@ export function cachedTreeContains(
       const children = queryClient.getQueryData<ChildSessionInfo[]>(childSessionsQueryKey(id));
       if (!children) continue;
       for (const child of children) {
-        if (child.id === targetId) return true;
+        if (child.id === targetId) return child;
         next.push(child.id);
       }
     }
     frontier = next;
   }
-  return false;
+  return null;
 }
 
 /**
@@ -239,4 +258,29 @@ export function useChildSessions(
     isLoading,
     error: (error as Error | null) ?? null,
   };
+}
+
+/**
+ * Summary of ``targetId`` as listed under ``ancestorId``'s spawn tree.
+ *
+ * Direct children come from ``useChildSessions`` (fetched when not yet
+ * cached); deeper descendants are read from lists the Agents rail has
+ * already cached.
+ *
+ * @param ancestorId - Session whose tree to search, e.g. ``"conv_root"``;
+ *   ``null`` disables the lookup.
+ * @param targetId - Descendant to find, e.g. ``"conv_child123"``.
+ * @returns The descendant's summary, or ``null`` while unknown.
+ */
+export function useDescendantSession(
+  ancestorId: string | null,
+  targetId: string,
+): ChildSessionInfo | null {
+  const queryClient = useQueryClient();
+  const { children } = useChildSessions(ancestorId);
+  if (ancestorId === null) return null;
+  return (
+    children.find((child) => child.id === targetId) ??
+    findCachedDescendant(queryClient, ancestorId, targetId, MAX_TREE_DEPTH)
+  );
 }
