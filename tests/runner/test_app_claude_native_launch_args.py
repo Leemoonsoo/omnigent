@@ -907,3 +907,80 @@ async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
     assert env is not None
     assert env["CLAUDE_CONFIG_DIR"] == "/launch/claude"
     registry.launch_required_terminal.assert_awaited_once()
+
+
+async def test_auto_create_claude_terminal_cleans_routers_when_trust_seeding_fails(
+    bridge_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A trust-seeding failure releases the session's routers before it propagates.
+
+    Seeding runs after the subagent and turn routers start but before the
+    forwarder that normally shuts them down exists, so a malformed config must
+    not leave them running.
+    """
+    from unittest.mock import AsyncMock, Mock
+
+    import httpx
+
+    from omnigent.runner.native import orchestration
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.runner.session_init_protocol import (
+        SESSION_INIT_PROTOCOL_VERSION,
+        RunnerSessionInitEnvelope,
+        RunnerSessionInitSnapshot,
+    )
+
+    subagent_router = object()
+    turn_router = object()
+    shutdowns: list[tuple[str, object]] = []
+
+    async def record_subagent_shutdown(_session_id: str, router: object) -> None:
+        shutdowns.append(("subagent", router))
+
+    async def record_turn_shutdown(_session_id: str, router: object) -> None:
+        shutdowns.append(("turn", router))
+
+    def failing_seed(_workspace: Path, env: dict[str, str] | None = None) -> None:
+        raise ValueError("config is not a JSON object")
+
+    monkeypatch.setattr(
+        orchestration,
+        "_start_subagent_router_for_native_session",
+        lambda *_a, **_k: (bridge_dir, subagent_router),
+    )
+    monkeypatch.setattr(
+        orchestration, "_start_turn_router_for_native_session", lambda *_a, **_k: turn_router
+    )
+    monkeypatch.setattr(orchestration, "_shutdown_session_router_async", record_subagent_shutdown)
+    monkeypatch.setattr(orchestration, "_shutdown_session_turn_router_async", record_turn_shutdown)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted", failing_seed
+    )
+    monkeypatch.setattr("omnigent.inference_config.load_runtime_inference_config", dict)
+    monkeypatch.setattr("omnigent.config.load_effective_config", dict)
+    monkeypatch.setattr(orchestration, "resolve_cli_binary", lambda _: None)
+    registry = Mock(spec=SessionResourceRegistry)
+    session_id = "conv_seed_failure_routers"
+    session_init = RunnerSessionInitEnvelope(
+        protocol_version=SESSION_INIT_PROTOCOL_VERSION,
+        server_version="test",
+        session_id=session_id,
+        agent_id="agent",
+        snapshot=RunnerSessionInitSnapshot(created_at=0, updated_at=0, workspace=str(bridge_dir)),
+    )
+
+    with pytest.raises(ValueError, match="config is not a JSON object"):
+        await orchestration._auto_create_claude_terminal(
+            session_id,
+            registry,
+            Mock(),
+            server_client=AsyncMock(spec=httpx.AsyncClient),
+            session_init=session_init,
+            auth_token_factory=lambda: None,
+            resolve_launch_config=AsyncMock(return_value=None),
+        )
+
+    assert shutdowns == [("subagent", subagent_router), ("turn", turn_router)]
+    registry.launch_required_terminal.assert_not_called()

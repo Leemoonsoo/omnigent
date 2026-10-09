@@ -8942,7 +8942,13 @@ async def _auto_create_claude_terminal(
         keep_alive_after_exit=True,
     )
     # Seed trust and onboarding in the config selected by the terminal's launch environment.
-    ensure_claude_workspace_trusted(Path(workspace), env=_claude_terminal_launch_env(env_spec))
+    try:
+        ensure_claude_workspace_trusted(Path(workspace), env=_claude_terminal_launch_env(env_spec))
+    except BaseException:
+        # No forwarder owns the routers yet, so release them before failing.
+        await _shutdown_session_router_async(session_id, _subagent_router)
+        await _shutdown_session_turn_router_async(session_id, _claude_turn_router)
+        raise
     _logger.info(
         "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "
         "env_keys=%s cwd=%s scrollback=%d",
