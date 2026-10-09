@@ -807,6 +807,28 @@ def test_claude_terminal_launch_env_matches_pane_environment(
     assert env.get("CLAUDE_CONFIG_DIR") == expected_config_dir
 
 
+def test_claude_terminal_launch_cwd_uses_terminal_os_env_resolution(tmp_path: Path) -> None:
+    """
+    Trust seeding resolves the pane cwd the way terminal creation does.
+
+    An explicit ``os_env`` cwd wins, and ``inherit`` takes the parent os_env's
+    cwd, both resolved through symlinks like the launched pane's cwd.
+    """
+    from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(workspace)
+    explicit = TerminalEnvSpec(os_env=OSEnvSpec(type="caller_process", cwd=str(link)))
+    inherited = TerminalEnvSpec(os_env="inherit")
+    parent = OSEnvSpec(type="caller_process", cwd=str(link))
+
+    assert orchestration._claude_terminal_launch_cwd(explicit, None) == workspace.resolve()
+    assert orchestration._claude_terminal_launch_cwd(inherited, parent) == workspace.resolve()
+
+
 def test_claude_terminal_launch_env_without_inheritance_keeps_only_spec_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -992,7 +1014,7 @@ async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
 
     assert len(seeded) == 1
     workspace, env = seeded[0]
-    assert workspace == Path(bridge_dir).absolute()
+    assert workspace == Path(bridge_dir).resolve()
     assert env is not None
     assert env["CLAUDE_CONFIG_DIR"] == "/launch/claude"
     registry.launch_required_terminal.assert_awaited_once()
