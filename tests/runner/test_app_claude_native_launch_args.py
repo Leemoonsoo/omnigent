@@ -903,11 +903,31 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     The shared parser does not model options such as ``-v``, unbalanced ``-S``
     quoting, or ``-S`` bare ``$NAME`` expansion, escapes, comments, and
     ``\\v``/``\\f``/``\\r`` separators, so their assignments are not applied
-    even though the real launch would apply them. Seeding then writes the
-    runner's selected config, never a path built from the unparsed text (such
-    as a literal ``$HOME`` directory).
+    even though the real launch would apply them.
 
     :param args: Wrapper args the parser cannot model.
+    """
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    runner_config = tmp_path / "runner-claude"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runner_config))
+    monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
+
+    env = orchestration._claude_terminal_launch_env(TerminalEnvSpec(command="env", args=args))
+    assert env["CLAUDE_CONFIG_DIR"] == str(runner_config)
+
+
+def test_unparsed_env_wrapper_seeds_the_runner_config_not_a_literal_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Seeding with a fallback launch env writes the runner's selected config.
+
+    The unexpanded ``$HOME`` text must not become a literal directory in the
+    workspace.
     """
     from omnigent.harnesses.claude_native.bridge import ensure_claude_workspace_trusted
     from omnigent.inner.datamodel import TerminalEnvSpec
@@ -919,11 +939,10 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runner_config))
     monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
+    spec = TerminalEnvSpec(command="env", args=["-S", "CLAUDE_CONFIG_DIR=$HOME/claude claude"])
 
-    env = orchestration._claude_terminal_launch_env(TerminalEnvSpec(command="env", args=args))
-    assert env["CLAUDE_CONFIG_DIR"] == str(runner_config)
+    ensure_claude_workspace_trusted(workspace, env=orchestration._claude_terminal_launch_env(spec))
 
-    ensure_claude_workspace_trusted(workspace, env=env)
     assert (runner_config / ".claude.json").is_file()
     assert sorted(path.name for path in workspace.iterdir()) == []
 
@@ -1252,6 +1271,8 @@ async def test_auto_create_claude_terminal_rejects_missing_env_chdir_target(
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    # Relative, so a wrongly accepted target would put it under that cwd.
+    config_dir = f"{tmp_path.name}-config"
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(
@@ -1261,7 +1282,7 @@ async def test_auto_create_claude_terminal_rejects_missing_env_chdir_target(
         "omnigent.harness_startup_config.resolve_harness_args",
         lambda _harness, cli_args, cfg=None: [
             *chdir_args,
-            "CLAUDE_CONFIG_DIR=relcfg",
+            f"CLAUDE_CONFIG_DIR={config_dir}",
             "claude",
             *cli_args,
         ],
@@ -1275,5 +1296,5 @@ async def test_auto_create_claude_terminal_rejects_missing_env_chdir_target(
 
     assert excinfo.value.code == ErrorCode.WORKSPACE_MISSING
     assert sorted(path.name for path in workspace.iterdir()) == []
-    assert not Path("/relcfg").exists()
+    assert not (Path.cwd() / config_dir).exists()
     registry.launch_required_terminal.assert_not_called()
