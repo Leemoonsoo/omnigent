@@ -829,6 +829,21 @@ def test_claude_terminal_launch_cwd_uses_terminal_os_env_resolution(tmp_path: Pa
     assert orchestration._claude_terminal_launch_cwd(inherited, parent) == workspace.resolve()
 
 
+def test_claude_terminal_launch_cwd_applies_env_chdir(tmp_path: Path) -> None:
+    """An ``env --chdir`` wrapper moves the seeded cwd to Claude's real cwd."""
+    from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
+    from omnigent.runner.native import orchestration
+
+    workspace = tmp_path / "workspace"
+    (workspace / "sub").mkdir(parents=True)
+    os_env = OSEnvSpec(type="caller_process", cwd=str(workspace))
+    for args in (["--chdir=sub", "claude"], ["-C", str(workspace / "sub"), "claude"]):
+        spec = TerminalEnvSpec(command="env", args=args, os_env=os_env)
+        assert (
+            orchestration._claude_terminal_launch_cwd(spec, None) == (workspace / "sub").resolve()
+        )
+
+
 def test_claude_terminal_launch_env_without_inheritance_keeps_only_spec_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -851,13 +866,13 @@ def test_claude_terminal_launch_env_without_inheritance_keeps_only_spec_env(
 @pytest.mark.parametrize(
     "args",
     [
-        ["--chdir", "/srv", "CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
+        ["-v", "CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
         ["-S", "CLAUDE_CONFIG_DIR='/wrap/claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=${HOME}/claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=wrap\\_claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude #comment"],
     ],
-    ids=["chdir", "unbalanced-quote", "variable-expansion", "escape", "comment"],
+    ids=["unmodeled-option", "unbalanced-quote", "variable-expansion", "escape", "comment"],
 )
 def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms(
     monkeypatch: pytest.MonkeyPatch,
@@ -866,7 +881,7 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     """
     Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
 
-    The shared parser does not model ``--chdir``, unbalanced ``-S`` quoting, or
+    The shared parser does not model options such as ``-v``, unbalanced ``-S`` quoting, or
     ``-S`` variable expansion, escapes, and comments, so their assignments are
     not applied even though the real launch would apply them.
 

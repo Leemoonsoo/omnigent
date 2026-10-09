@@ -104,7 +104,8 @@ def env_wrapper_environment(command: str, args: list[str]) -> HarnessEnvironment
         ``["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
     :returns: The wrapper's ``-i``/``-``/``-u``/``-S``/assignment changes, or
         ``None`` when *command* is not a parseable ``env`` wrapper (e.g. it
-        uses ``--chdir``).
+        uses ``-v``). A ``-C``/``--chdir`` directory is reported by
+        :func:`env_wrapper_chdir`.
     """
     try:
         normalized = _normalize_env_wrapper_args(args)
@@ -114,15 +115,38 @@ def env_wrapper_environment(command: str, args: list[str]) -> HarnessEnvironment
     return unwrapped[3] if unwrapped is not None else None
 
 
-def _normalize_env_wrapper_args(args: list[str]) -> list[str]:
+def env_wrapper_chdir(command: str, args: list[str]) -> str | None:
+    """
+    Return the directory an ``env -C``/``--chdir`` wrapper changes into.
+
+    :param command: Configured harness command, e.g. ``"env"``.
+    :param args: Arguments passed to *command*, e.g.
+        ``["--chdir=/srv/repo", "claude"]``.
+    :returns: The last ``-C``/``--chdir`` value, e.g. ``"/srv/repo"``, or
+        ``None`` when there is none or the wrapper is not parseable.
+    """
+    chdirs: list[str] = []
+    try:
+        normalized = _normalize_env_wrapper_args(args, chdirs)
+    except ValueError:
+        return None
+    if _unwrap_env(command, normalized, os.defpath) is None:
+        return None
+    return chdirs[-1] if chdirs else None
+
+
+def _normalize_env_wrapper_args(args: list[str], chdirs: list[str] | None = None) -> list[str]:
     """
     Rewrite env's legacy ``-``, bundled short options, and ``-S`` split strings.
 
     Split-string words are scanned again, so options inside them apply. Split
     strings use POSIX shell quoting, which matches GNU ``env -S`` when the
     string has no ``${VAR}`` expansion, backslash escape, or ``#`` comment.
+    ``-C``/``--chdir`` options are removed and their directories recorded.
 
     :param args: ``env`` arguments, e.g. ``["-iS", "A=1 claude"]``.
+    :param chdirs: Receives each ``-C``/``--chdir`` directory in order, or
+        ``None`` to discard them.
     :returns: Equivalent arguments, e.g. ``["-i", "A=1", "claude"]``.
     :raises ValueError: If a split string has unbalanced quotes or uses
         syntax that POSIX quoting would read differently from ``env``, or an
@@ -130,10 +154,17 @@ def _normalize_env_wrapper_args(args: list[str]) -> list[str]:
     """
     pending = list(args)
     normalized: list[str] = []
+    recorded = chdirs if chdirs is not None else []
     while pending:
         arg = pending.pop(0)
         if arg == "-":
             normalized.append("-i")  # env's legacy spelling of --ignore-environment
+        elif arg == "--chdir":
+            if not pending:
+                raise ValueError("env --chdir needs a value")
+            recorded.append(pending.pop(0))
+        elif arg.startswith("--chdir="):
+            recorded.append(arg.partition("=")[2])
         elif arg == "--split-string":
             if not pending:
                 raise ValueError("env --split-string needs a value")
@@ -145,7 +176,7 @@ def _normalize_env_wrapper_args(args: list[str]) -> list[str]:
         elif arg.startswith("--") and arg != "--":
             normalized.append(arg)
         elif arg.startswith("-") and arg != "--":
-            _normalize_short_option_cluster(arg, pending, normalized)
+            _normalize_short_option_cluster(arg, pending, normalized, recorded)
         else:
             normalized.append(arg)
             normalized.extend(pending)
@@ -153,28 +184,33 @@ def _normalize_env_wrapper_args(args: list[str]) -> list[str]:
     return normalized
 
 
-def _normalize_short_option_cluster(arg: str, pending: list[str], normalized: list[str]) -> None:
+def _normalize_short_option_cluster(
+    arg: str, pending: list[str], normalized: list[str], chdirs: list[str]
+) -> None:
     """
     Expand one short-option cluster such as ``-iS`` or ``-uNAME``.
 
     :param arg: The cluster, e.g. ``"-iS"``.
-    :param pending: Remaining arguments; ``-u``/``-S`` values are taken from
-        here, and split-string words are pushed back onto it.
+    :param pending: Remaining arguments; ``-u``/``-S``/``-C`` values are taken
+        from here, and split-string words are pushed back onto it.
     :param normalized: Output arguments, extended in place.
+    :param chdirs: Receives a ``-C`` directory.
     :returns: None.
-    :raises ValueError: If ``-u`` or ``-S`` is missing its value.
+    :raises ValueError: If ``-u``, ``-S``, or ``-C`` is missing its value.
     """
     cluster = arg[1:]
     for position, flag in enumerate(cluster):
         if flag == "i":
             normalized.append("-i")
             continue
-        if flag in ("u", "S"):
+        if flag in ("u", "S", "C"):
             value = cluster[position + 1 :] or (pending.pop(0) if pending else None)
             if value is None:
                 raise ValueError(f"env -{flag} needs a value")
             if flag == "u":
                 normalized.extend(["-u", value])
+            elif flag == "C":
+                chdirs.append(value)
             else:
                 pending[:0] = _split_env_string(value)
             return

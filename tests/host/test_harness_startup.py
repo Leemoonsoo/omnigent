@@ -119,6 +119,7 @@ def _real_env_supports_long_split_string() -> bool:
         ["-iS", "A=1 /usr/bin/env"],
         ["--split-string=-u KEEP A=1 /usr/bin/env"],
         ["--split-string", "-u KEEP A=1 /usr/bin/env"],
+        ["-C", "/", "A=1", "/usr/bin/env"],
     ],
 )
 def test_env_wrapper_environment_matches_real_env(args):
@@ -136,6 +137,28 @@ def test_env_wrapper_environment_matches_real_env(args):
         ["/usr/bin/env", *args], env=base, capture_output=True, text=True, check=True
     )
     assert dict(line.split("=", 1) for line in process.stdout.splitlines()) == expected
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-C", "sub", "/bin/pwd"],
+        ["-Csub", "/bin/pwd"],
+        ["--chdir=link", "/bin/pwd"],
+        ["-iC", "sub", "/bin/pwd"],
+        ["-S", "-C sub /bin/pwd"],
+    ],
+)
+def test_env_wrapper_chdir_matches_real_env(tmp_path, args):
+    """The modeled ``--chdir`` directory is where the real ``env`` runs the command."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "sub")
+    chdir = startup.env_wrapper_chdir("/usr/bin/env", args)
+    assert chdir is not None
+    process = subprocess.run(
+        ["/usr/bin/env", *args], cwd=tmp_path, env={}, capture_output=True, text=True, check=True
+    )
+    assert process.stdout.strip() == str((tmp_path / chdir).resolve())
 
 
 @pytest.mark.parametrize(
