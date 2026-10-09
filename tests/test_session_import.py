@@ -26,7 +26,7 @@ from omnigent.session_import.local import (
     load_qwen_session,
 )
 from omnigent.session_import.models import LocalSessionImport, SessionImportNotFoundError
-from tests._helpers.codex_rollout import CodexRollout
+from tests._helpers.codex_rollout import CodexRollout, codex_message
 
 
 def test_import_adapters_use_stable_forwarder_parser_contracts(tmp_path: Path) -> None:
@@ -1209,13 +1209,15 @@ def test_load_codex_session_skips_compaction_boundary_without_baseline(tmp_path:
     assert [item.type for item in imported.items] == ["message"]
 
 
-def test_imported_codex_compaction_rebuilds_the_resume_rollout_baseline(tmp_path: Path) -> None:
-    """A cold resume rebuilt from the imported items restarts at the compaction baseline."""
+def _codex_cold_resume(
+    imported: LocalSessionImport, *, cwd: Path
+) -> tuple[list[list[str]], list[str]]:
+    """Rebuild a Codex rollout from the imported items, as a cold resume does.
+
+    Returns each ``compacted`` record's baseline texts and the message texts replayed after them.
+    """
     from omnigent.harnesses.codex_native.main import _codex_rollout_records_from_session_items
 
-    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    _write_codex_rollout_with_compaction(tmp_path, session_id)
-    imported = load_codex_session(session_id, codex_home=tmp_path)
     stored_items = [
         {
             "id": f"item_{index}",
@@ -1225,25 +1227,36 @@ def test_imported_codex_compaction_rebuilds_the_resume_rollout_baseline(tmp_path
         }
         for index, item in enumerate(imported.items)
     ]
-
     records = _codex_rollout_records_from_session_items(
         stored_items,
         session_id="conv_import",
-        external_session_id=session_id,
-        cwd=tmp_path,
+        external_session_id=imported.external_session_id,
+        cwd=cwd,
         model_provider="openai",
         cli_version="0.154.0",
     )
-
-    compacted = [record for record in records if record["type"] == "compacted"]
-    assert len(compacted) == 1
-    baseline = compacted[0]["payload"]["replacement_history"]
-    assert [entry["content"][0]["text"] for entry in baseline] == ["compaction summary baseline"]
+    baselines = [
+        [entry["content"][0]["text"] for entry in record["payload"]["replacement_history"]]
+        for record in records
+        if record["type"] == "compacted"
+    ]
     replayed = [
         record["payload"]["content"][0]["text"]
         for record in records
         if record["type"] == "response_item" and record["payload"].get("type") == "message"
     ]
+    return baselines, replayed
+
+
+def test_imported_codex_compaction_rebuilds_the_resume_rollout_baseline(tmp_path: Path) -> None:
+    """A cold resume rebuilt from the imported items restarts at the compaction baseline."""
+    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    _write_codex_rollout_with_compaction(tmp_path, session_id)
+    imported = load_codex_session(session_id, codex_home=tmp_path)
+
+    baselines, replayed = _codex_cold_resume(imported, cwd=tmp_path)
+
+    assert baselines == [["compaction summary baseline"]]
     assert replayed == ["post compaction question", "post compaction answer"]
 
 
@@ -1400,28 +1413,71 @@ def test_load_codex_session_reads_rollout_named_by_threads_rollout_path(
 
 
 def test_load_codex_session_follows_history_base_of_forked_thread(tmp_path: Path) -> None:
-    """A fork child inherits the parent items before history_base.end_ordinal_exclusive."""
+    """A fork child inherits the parent records before ``history_base.end_ordinal_exclusive``.
+
+    The base turn that starts at the cutoff is excluded. ``end_byte_offset`` only lets Codex
+    check that the base file still holds the prefix, so its value here is deliberately unrelated.
+    """
     parent_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     child_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
     sessions = tmp_path / "sessions" / "2026" / "10" / "02"
-    parent_records = _write_codex_turns(
+    _write_codex_turns(
         sessions / f"rollout-2026-10-02T10-00-00-{parent_id}.jsonl",
         parent_id,
-        [("parent question 1", "parent answer 1"), ("parent question 2", "parent answer 2")],
+        [("parent question 1", "parent answer 1"), ("after the fork", "after the fork")],
     )
+    cutoff = _codex_turn_end(0, 1)
     _write_codex_turns(
         sessions / f"rollout-2026-10-02T10-30-00-{child_id}.jsonl",
         child_id,
         [("child question", "child answer")],
-        start_ordinal=parent_records,
+        start_ordinal=cutoff,
         forked_from_id=parent_id,
-        forked_from_ordinal_exclusive=parent_records,
+        forked_from_ordinal_exclusive=cutoff,
         history_base={
             "thread_id": parent_id,
-            "end_ordinal_exclusive": parent_records,
+            "end_ordinal_exclusive": cutoff,
             "end_byte_offset": 0,
         },
     )
+
+    imported = load_codex_session(child_id, codex_home=tmp_path)
+
+    assert _codex_item_texts(imported) == [
+        "parent question 1",
+        "parent answer 1",
+        "child question",
+        "child answer",
+    ]
+
+
+def test_load_codex_session_keeps_a_compaction_inherited_from_the_fork_base(
+    tmp_path: Path,
+) -> None:
+    """A base compaction before the fork cutoff is imported, and cold resume starts from it."""
+    parent_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    child_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
+    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    parent = CodexRollout(parent_id, cwd="/repo")
+    parent.turn(1, "parent question 1", "parent answer 1")
+    parent.append(
+        "compacted",
+        {
+            "message": "summary of turn 1",
+            "replacement_history": [codex_message("user", "summary of turn 1")],
+        },
+    )
+    parent.turn(2, "parent question 2", "parent answer 2")
+    cutoff = parent.next_ordinal
+    parent.turn(3, "after the fork", "after the fork")
+    parent.write(sessions / f"rollout-2026-10-02T10-00-00-{parent_id}.jsonl")
+    child = CodexRollout(
+        child_id,
+        cwd="/repo",
+        history_base={"thread_id": parent_id, "end_ordinal_exclusive": cutoff},
+    )
+    child.turn(1, "child question", "child answer")
+    child.write(sessions / f"rollout-2026-10-02T10-30-00-{child_id}.jsonl")
 
     imported = load_codex_session(child_id, codex_home=tmp_path)
 
@@ -1433,6 +1489,10 @@ def test_load_codex_session_follows_history_base_of_forked_thread(tmp_path: Path
         "child question",
         "child answer",
     ]
+    assert _codex_compaction_baselines(imported) == [["summary of turn 1"]]
+    baselines, replayed = _codex_cold_resume(imported, cwd=tmp_path)
+    assert baselines == [["summary of turn 1"]]
+    assert replayed == ["parent question 2", "parent answer 2", "child question", "child answer"]
 
 
 def test_load_codex_session_falls_back_to_filename_when_rollout_path_is_stale(
@@ -1633,37 +1693,6 @@ def test_load_codex_session_reads_fork_base_by_rollout_id_after_base_revert(
         "parent answer 1",
         "parent question 2",
         "parent answer 2",
-        "child question",
-        "child answer",
-    ]
-
-
-def test_load_codex_session_excludes_base_records_at_and_after_the_fork_cutoff(
-    tmp_path: Path,
-) -> None:
-    """``end_ordinal_exclusive`` excludes the base turn that starts at the cutoff."""
-    parent_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    child_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
-    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
-    _write_codex_turns(
-        sessions / f"rollout-2026-10-02T10-00-00-{parent_id}.jsonl",
-        parent_id,
-        [("parent question 1", "parent answer 1"), ("after the fork", "after the fork")],
-    )
-    cutoff = _codex_turn_end(0, 1)
-    _write_codex_turns(
-        sessions / f"rollout-2026-10-02T10-30-00-{child_id}.jsonl",
-        child_id,
-        [("child question", "child answer")],
-        start_ordinal=cutoff,
-        history_base={"thread_id": parent_id, "end_ordinal_exclusive": cutoff},
-    )
-
-    imported = load_codex_session(child_id, codex_home=tmp_path)
-
-    assert _codex_item_texts(imported) == [
-        "parent question 1",
-        "parent answer 1",
         "child question",
         "child answer",
     ]
