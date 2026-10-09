@@ -1129,6 +1129,7 @@ def test_load_codex_session_carries_compaction_summary_and_window(tmp_path: Path
 
     imported = load_codex_session(session_id, codex_home=tmp_path)
 
+    assert [item.type for item in imported.items] == ["message", "compaction"]
     compaction = imported.items[1].data.model_dump()
     assert compaction["summary"] == "Summary of the first question."
     assert compaction["window_id"] == window_id
