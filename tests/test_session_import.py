@@ -1418,6 +1418,7 @@ def test_load_codex_session_follows_history_base_of_forked_thread(tmp_path: Path
         sessions / f"rollout-2026-10-02T10-30-00-{child_id}.jsonl",
         child_id,
         [("child question", "child answer")],
+        start_ordinal=parent_records,
         forked_from_id=parent_id,
         forked_from_ordinal_exclusive=parent_records,
         history_base={
@@ -1710,6 +1711,64 @@ def test_load_codex_session_caps_nested_fork_cutoffs_at_the_outer_cutoff(
         "leaf question",
         "leaf answer",
     ]
+
+
+def test_load_codex_session_stops_following_a_history_base_cycle(tmp_path: Path) -> None:
+    """Rollouts whose ``history_base`` pointers form a cycle import each rollout once."""
+    first_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    second_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
+    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    cutoff = _codex_turn_end(0, 1)
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-00-00-{second_id}.jsonl",
+        second_id,
+        [("second question", "second answer")],
+        history_base={"thread_id": first_id, "end_ordinal_exclusive": cutoff},
+    )
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-30-00-{first_id}.jsonl",
+        first_id,
+        [("first question", "first answer")],
+        start_ordinal=cutoff,
+        history_base={"thread_id": second_id, "end_ordinal_exclusive": cutoff},
+    )
+
+    imported = load_codex_session(first_id, codex_home=tmp_path)
+
+    assert _codex_item_texts(imported) == [
+        "second question",
+        "second answer",
+        "first question",
+        "first answer",
+    ]
+
+
+@pytest.mark.parametrize("cutoff", [True, 0, -1, "7", None])
+def test_load_codex_session_ignores_a_history_base_with_an_invalid_cutoff(
+    tmp_path: Path, cutoff: object
+) -> None:
+    """A non-positive or non-integer ``end_ordinal_exclusive`` inherits nothing."""
+    parent_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    child_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
+    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-00-00-{parent_id}.jsonl",
+        parent_id,
+        [("parent question", "parent answer")],
+    )
+    history_base: dict[str, object] = {"thread_id": parent_id}
+    if cutoff is not None:
+        history_base["end_ordinal_exclusive"] = cutoff
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-30-00-{child_id}.jsonl",
+        child_id,
+        [("child question", "child answer")],
+        history_base=history_base,
+    )
+
+    imported = load_codex_session(child_id, codex_home=tmp_path)
+
+    assert _codex_item_texts(imported) == ["child question", "child answer"]
 
 
 def test_load_codex_session_imports_fork_alone_when_base_rollout_is_missing(
