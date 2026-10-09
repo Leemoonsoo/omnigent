@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getopt
 import os
+import shlex
 import shutil
 from pathlib import Path
 from typing import Literal
@@ -101,20 +102,52 @@ def env_wrapper_environment(command: str, args: list[str]) -> HarnessEnvironment
     :param command: Configured harness command, e.g. ``"env"`` or ``"claude"``.
     :param args: Arguments passed to *command*, e.g.
         ``["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
-    :returns: The wrapper's ``-i``/``-``/``-u``/assignment changes, or ``None``
-        when *command* is not a parseable ``env`` wrapper (e.g. ``env -S``).
+    :returns: The wrapper's ``-i``/``-``/``-u``/``-S``/assignment changes, or
+        ``None`` when *command* is not a parseable ``env`` wrapper (e.g. it
+        uses ``--chdir``).
     """
-    normalized = list(args)
-    index = 0
-    while index < len(normalized) and normalized[index].startswith("-"):
-        if normalized[index] == "-":
-            normalized[index] = "-i"  # env's legacy spelling of --ignore-environment
-            break
-        if normalized[index] == "--":
-            break
-        index += 2 if normalized[index] in ("-u", "--unset") else 1
+    try:
+        normalized = _normalize_env_wrapper_args(args)
+    except ValueError:
+        return None
     unwrapped = _unwrap_env(command, normalized, os.defpath)
     return unwrapped[3] if unwrapped is not None else None
+
+
+def _normalize_env_wrapper_args(args: list[str]) -> list[str]:
+    """
+    Rewrite env's legacy ``-`` and ``-S`` split strings into the modeled form.
+
+    Split strings use POSIX shell quoting, which covers GNU ``env -S`` except
+    its ``${VAR}`` expansion and ``\\_`` escapes.
+
+    :param args: ``env`` arguments, e.g. ``["-S", "A=1 claude"]``.
+    :returns: Equivalent arguments, e.g. ``["A=1", "claude"]``.
+    :raises ValueError: If a split string has unbalanced quotes.
+    """
+    normalized: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "-":
+            normalized.append("-i")  # env's legacy spelling of --ignore-environment
+        elif arg in ("-S", "--split-string") and index + 1 < len(args):
+            normalized.extend(shlex.split(args[index + 1]))
+            index += 1
+        elif arg.startswith("--split-string="):
+            normalized.extend(shlex.split(arg.partition("=")[2]))
+        elif arg.startswith("-S") and len(arg) > 2:
+            normalized.extend(shlex.split(arg[2:]))
+        elif arg in ("-u", "--unset") and index + 1 < len(args):
+            normalized.extend(args[index : index + 2])
+            index += 1
+        elif arg.startswith("-") and arg != "--":
+            normalized.append(arg)
+        else:
+            normalized.extend(args[index:])
+            break
+        index += 1
+    return normalized
 
 
 def _unwrap_env(

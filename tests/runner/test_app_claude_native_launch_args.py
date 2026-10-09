@@ -778,6 +778,24 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
         # ``env -`` is the legacy spelling of ``-i``.
         ("env", ["-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
         ("env", ["-u", "X", "-", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
+        # ``-S`` split strings are expanded before parsing.
+        (
+            "env",
+            ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude"],
+            {},
+            [],
+            "/home/runner",
+            "/wrap/claude",
+        ),
+        ("env", ["-S-i HOME=/home/wrapped claude"], {}, [], "/home/wrapped", None),
+        (
+            "env",
+            ["--split-string=CLAUDE_CONFIG_DIR='/wrap/my claude' claude"],
+            {},
+            [],
+            "/home/runner",
+            "/wrap/my claude",
+        ),
     ],
 )
 def test_claude_terminal_launch_env_matches_pane_environment(
@@ -818,17 +836,23 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     """
     Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
 
-    The shared parser does not model ``env -S``, so its assignments are not
-    applied even though the real launch would apply them. Seeding then uses
-    the runner and spec environment, as it did before launch-env resolution.
+    The shared parser does not model ``--chdir`` or unbalanced ``-S`` quoting,
+    so their assignments are not applied even though the real launch would
+    apply them. Seeding then uses the runner and spec environment.
     """
     from omnigent.inner.datamodel import TerminalEnvSpec
     from omnigent.runner.native import orchestration
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/claude")
-    spec = TerminalEnvSpec(command="env", args=["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude"])
-
-    assert orchestration._claude_terminal_launch_env(spec)["CLAUDE_CONFIG_DIR"] == "/runner/claude"
+    for args in (
+        ["--chdir", "/srv", "CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
+        ["-S", "CLAUDE_CONFIG_DIR='/wrap/claude claude"],
+    ):
+        spec = TerminalEnvSpec(command="env", args=args)
+        assert (
+            orchestration._claude_terminal_launch_env(spec)["CLAUDE_CONFIG_DIR"]
+            == "/runner/claude"
+        )
 
 
 async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
