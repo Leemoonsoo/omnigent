@@ -18,7 +18,7 @@ from omnigent.harnesses.claude_native.bridge import (
     ClaudeTranscriptItem,
     read_transcript_items_from_offset,
 )
-from omnigent.harnesses.codex_native.main import _CODEX_THREAD_ID_RE, _find_codex_rollout
+from omnigent.harnesses.codex_native.main import _CODEX_THREAD_ID_RE
 from omnigent.harnesses.kimi_native.credentials import resolve_user_kimi_home
 from omnigent.harnesses.kimi_native.forwarder import (
     read_kimi_wire_items,
@@ -240,8 +240,8 @@ def _codex_thread_id_from_rollout(path: Path, meta: dict[str, object] | None) ->
     recorded = meta.get("id") if meta else None
     if isinstance(recorded, str) and _is_codex_thread_id(recorded):
         return recorded
-    suffix = path.stem[-36:]
-    return suffix if _is_codex_thread_id(suffix) else None
+    ids = _codex_rollout_ids(path)
+    return ids[0] if ids is not None else None
 
 
 def _codex_source_is_interactive(source: object) -> bool:
@@ -648,18 +648,35 @@ def _codex_response_item(
     )
 
 
-def _find_archived_codex_rollout(codex_home: Path, session_id: str) -> Path | None:
-    """Return the newest archived Codex rollout matching a session id."""
-    archived_sessions = codex_home / "archived_sessions"
-    if not archived_sessions.is_dir():
+_CODEX_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+# rollout-<timestamp>-<thread id>.jsonl; a reverted thread's new rollout adds _<rollout id>.
+_CODEX_ROLLOUT_NAME_RE = re.compile(rf"^rollout-.+-({_CODEX_UUID})(?:_({_CODEX_UUID}))?\.jsonl$")
+
+
+def _codex_rollout_ids(path: Path) -> tuple[str, str] | None:
+    """``(thread id, rollout id)`` from a rollout filename; they differ only after a revert."""
+    match = _CODEX_ROLLOUT_NAME_RE.match(path.name)
+    if match is None:
         return None
-    suffix = f"-{session_id}.jsonl"
-    matches = [
-        path
-        for path in archived_sessions.glob("rollout-*.jsonl")
-        if path.name.endswith(suffix) and path.is_file()
-    ]
-    return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
+    thread_id, rollout_id = match.groups()
+    return thread_id, rollout_id or thread_id
+
+
+def _find_codex_rollout_file(home: Path, codex_id: str, *, by_rollout_id: bool) -> Path | None:
+    """Newest rollout whose filename carries ``codex_id``, searching sessions/ before archives."""
+    if not _is_codex_thread_id(codex_id):
+        return None
+    for root in (home / "sessions", home / "archived_sessions"):
+        if not root.is_dir():
+            continue
+        matches = []
+        for path in root.glob(f"**/rollout-*{codex_id}*.jsonl"):
+            ids = _codex_rollout_ids(path)
+            if ids is not None and ids[1 if by_rollout_id else 0] == codex_id and path.is_file():
+                matches.append(path)
+        if matches:
+            return max(matches, key=lambda path: path.stat().st_mtime)
+    return None
 
 
 def _codex_thread_name_from_index(home: Path, session_id: str) -> str | None:
@@ -748,10 +765,8 @@ def _codex_rollout_path(
     home: Path, session_id: str, thread_row: dict[str, object] | None
 ) -> Path | None:
     """Locate a thread's rollout: the thread store's ``rollout_path``, else the filename match."""
-    return (
-        _codex_recorded_rollout(home, thread_row)
-        or _find_codex_rollout(home, session_id)
-        or _find_archived_codex_rollout(home, session_id)
+    return _codex_recorded_rollout(home, thread_row) or _find_codex_rollout_file(
+        home, session_id, by_rollout_id=False
     )
 
 
@@ -785,9 +800,13 @@ def _codex_record_ordinal(record: dict[str, object], position: int) -> int:
 
 
 def _codex_inherited_records(
-    home: Path, meta: dict[str, object], *, seen: set[str]
+    home: Path, meta: dict[str, object], *, seen: set[str], limit: int | None = None
 ) -> Iterator[dict[str, object]]:
-    """Yield the base-thread records a fork inherits before its ``history_base`` ordinal."""
+    """Yield the records a rollout inherits through ``history_base``, oldest first.
+
+    ``history_base.thread_id`` names the base *rollout*, whose id differs from its thread id
+    after a revert. ``seen`` holds rollout ids; ``limit`` caps nested cutoffs at the outer one.
+    """
     base = meta.get("history_base")
     if not isinstance(base, dict):
         return
@@ -795,15 +814,16 @@ def _codex_inherited_records(
     end = base.get("end_ordinal_exclusive")
     if (
         not isinstance(base_id, str)
-        or not _is_codex_thread_id(base_id)
         or base_id in seen
         or isinstance(end, bool)
         or not isinstance(end, int)
         or end <= 0
     ):
         return
+    if limit is not None:
+        end = min(end, limit)
     seen.add(base_id)
-    base_path = _codex_rollout_path(home, base_id, _codex_thread_row(home, base_id))
+    base_path = _find_codex_rollout_file(home, base_id, by_rollout_id=True)
     if base_path is None:
         return
     records = _codex_rollout_records(base_path)
@@ -812,11 +832,13 @@ def _codex_inherited_records(
         return
     if first.get("type") == "session_meta":
         yield from _codex_inherited_records(
-            home, cast(dict[str, object], first["payload"]), seen=seen
+            home, cast(dict[str, object], first["payload"]), seen=seen, limit=end
         )
     for position, record in enumerate(chain([first], records)):
-        if _codex_record_ordinal(record, position) < end:
-            yield record
+        # Paginated rollouts append records in ordinal order.
+        if _codex_record_ordinal(record, position) >= end:
+            break
+        yield record
 
 
 _CODEX_COMPACTION_FALLBACK_SUMMARY = "[Codex compaction — context was compacted in Codex]"
@@ -902,7 +924,10 @@ def load_codex_session(
         if first is not None and first.get("type") == "session_meta"
         else {}
     )
-    inherited = _codex_inherited_records(home, meta, seen={session_id})
+    own_ids = _codex_rollout_ids(rollout_path)
+    inherited = _codex_inherited_records(
+        home, meta, seen={own_ids[1] if own_ids is not None else session_id}
+    )
     items, workspace = _codex_items_from_records(
         chain(inherited, [] if first is None else [first], own_records)
     )

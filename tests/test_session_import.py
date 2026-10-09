@@ -1540,6 +1540,178 @@ def test_load_codex_session_follows_fork_lineage_through_intermediate_forks(
     ]
 
 
+def _codex_turn_end(start_ordinal: int, turns: int) -> int:
+    """Exclusive ordinal after ``turns`` turns of a rollout written by ``_write_codex_turns``."""
+    return start_ordinal + 1 + 3 * turns
+
+
+@pytest.mark.parametrize("with_thread_store", [True, False])
+def test_load_codex_session_keeps_history_from_before_a_revert(
+    tmp_path: Path, with_thread_store: bool
+) -> None:
+    """A reverted thread's new rollout inherits the original rollout up to the revert point."""
+    thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    rollout_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
+    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    original = sessions / f"rollout-2026-10-02T09-00-00-{thread_id}.jsonl"
+    _write_codex_turns(
+        original,
+        thread_id,
+        [("question 1", "answer 1"), ("question 2", "answer 2"), ("dropped", "dropped")],
+    )
+    revert_point = _codex_turn_end(0, 2)
+    reverted = sessions / f"rollout-2026-10-02T09-30-00-{thread_id}_{rollout_id}.jsonl"
+    _write_codex_turns(
+        reverted,
+        thread_id,
+        [("question after revert", "answer after revert")],
+        start_ordinal=revert_point,
+        history_base={"thread_id": thread_id, "end_ordinal_exclusive": revert_point},
+    )
+    os.utime(original, (1, 1))
+    if with_thread_store:
+        _write_codex_threads_db(
+            tmp_path,
+            thread_id,
+            title="question 1",
+            first_user_message="question 1",
+            rollout_path=reverted,
+        )
+
+    imported = load_codex_session(thread_id, codex_home=tmp_path)
+
+    assert _codex_item_texts(imported) == [
+        "question 1",
+        "answer 1",
+        "question 2",
+        "answer 2",
+        "question after revert",
+        "answer after revert",
+    ]
+
+
+def test_load_codex_session_reads_fork_base_by_rollout_id_after_base_revert(
+    tmp_path: Path,
+) -> None:
+    """A fork inherits the base rollout it names, not the base thread's later revert rollout."""
+    parent_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    revert_rollout_id = "01a11f4f-af66-74e3-92a6-6e9c14bf68a2"
+    child_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
+    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    parent_end = _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-00-00-{parent_id}.jsonl",
+        parent_id,
+        [("parent question 1", "parent answer 1"), ("parent question 2", "parent answer 2")],
+    )
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-30-00-{child_id}.jsonl",
+        child_id,
+        [("child question", "child answer")],
+        start_ordinal=parent_end,
+        history_base={"thread_id": parent_id, "end_ordinal_exclusive": parent_end},
+    )
+    # The parent is reverted to its first turn after the fork and continues elsewhere.
+    revert_point = _codex_turn_end(0, 1)
+    parent_current = (
+        sessions / f"rollout-2026-10-02T11-00-00-{parent_id}_{revert_rollout_id}.jsonl"
+    )
+    _write_codex_turns(
+        parent_current,
+        parent_id,
+        [("parent question after revert", "parent answer after revert")],
+        start_ordinal=revert_point,
+        history_base={"thread_id": parent_id, "end_ordinal_exclusive": revert_point},
+    )
+    _write_codex_threads_db(
+        tmp_path,
+        parent_id,
+        title="parent question 1",
+        first_user_message="parent question 1",
+        rollout_path=parent_current,
+    )
+
+    imported = load_codex_session(child_id, codex_home=tmp_path)
+
+    assert _codex_item_texts(imported) == [
+        "parent question 1",
+        "parent answer 1",
+        "parent question 2",
+        "parent answer 2",
+        "child question",
+        "child answer",
+    ]
+
+
+def test_load_codex_session_excludes_base_records_at_and_after_the_fork_cutoff(
+    tmp_path: Path,
+) -> None:
+    """``end_ordinal_exclusive`` excludes the base turn that starts at the cutoff."""
+    parent_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    child_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
+    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-00-00-{parent_id}.jsonl",
+        parent_id,
+        [("parent question 1", "parent answer 1"), ("after the fork", "after the fork")],
+    )
+    cutoff = _codex_turn_end(0, 1)
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-30-00-{child_id}.jsonl",
+        child_id,
+        [("child question", "child answer")],
+        start_ordinal=cutoff,
+        history_base={"thread_id": parent_id, "end_ordinal_exclusive": cutoff},
+    )
+
+    imported = load_codex_session(child_id, codex_home=tmp_path)
+
+    assert _codex_item_texts(imported) == [
+        "parent question 1",
+        "parent answer 1",
+        "child question",
+        "child answer",
+    ]
+
+
+def test_load_codex_session_caps_nested_fork_cutoffs_at_the_outer_cutoff(
+    tmp_path: Path,
+) -> None:
+    """A cutoff inside a base's own inherited range also bounds that base's ancestors."""
+    root_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    middle_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
+    leaf_id = "01a11f4f-af66-74e3-92a6-6e9c14bf68a2"
+    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    root_end = _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-00-00-{root_id}.jsonl",
+        root_id,
+        [("root question 1", "root answer 1"), ("root question 2", "root answer 2")],
+    )
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-30-00-{middle_id}.jsonl",
+        middle_id,
+        [("middle question", "middle answer")],
+        start_ordinal=root_end,
+        history_base={"thread_id": root_id, "end_ordinal_exclusive": root_end},
+    )
+    leaf_cutoff = _codex_turn_end(0, 1)
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T11-00-00-{leaf_id}.jsonl",
+        leaf_id,
+        [("leaf question", "leaf answer")],
+        start_ordinal=leaf_cutoff,
+        history_base={"thread_id": middle_id, "end_ordinal_exclusive": leaf_cutoff},
+    )
+
+    imported = load_codex_session(leaf_id, codex_home=tmp_path)
+
+    assert _codex_item_texts(imported) == [
+        "root question 1",
+        "root answer 1",
+        "leaf question",
+        "leaf answer",
+    ]
+
+
 def test_load_codex_session_imports_fork_alone_when_base_rollout_is_missing(
     tmp_path: Path,
 ) -> None:
