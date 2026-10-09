@@ -43,6 +43,7 @@ from omnigent.harnesses.claude_native.bridge import (
     _JsonlRecord,
     _occupying_surface,
     augment_claude_args,
+    claude_global_config_path,
     count_hook_events,
     display_cost_approval_popup,
     ensure_claude_workspace_trusted,
@@ -8115,6 +8116,9 @@ def _redirect_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> Path:
     """
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    # Inherited selectors would move Claude's global config elsewhere.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", raising=False)
     assert Path.home() == home  # guards against env-resolution surprises
     return home / ".claude.json"
 
@@ -8253,6 +8257,77 @@ def test_ensure_trusted_refuses_malformed_config(
 
     # The original (malformed) bytes are preserved — no clobber occurred.
     assert config_path.read_text() == raw
+
+
+def test_ensure_trusted_seeds_legacy_config_when_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A host with a legacy ``~/.claude/.config.json`` gets the gates seeded there.
+
+    Claude Code loads that legacy file instead of ``~/.claude.json`` whenever
+    it exists, so a seed in ``~/.claude.json`` is ignored and the trust
+    dialog blocks every session rooted at the home directory.
+    """
+    home = tmp_path / "home"
+    home_config_path = _redirect_home(monkeypatch, home)
+    legacy_path = home / ".claude" / ".config.json"
+    legacy_path.parent.mkdir()
+    legacy_path.write_text(json.dumps({"oauthAccount": {"emailAddress": "user@example.com"}}))
+
+    ensure_claude_workspace_trusted(home)
+
+    data = json.loads(legacy_path.read_text())
+    assert data["oauthAccount"] == {"emailAddress": "user@example.com"}
+    assert data["hasCompletedOnboarding"] is True
+    assert data["projects"][str(home.resolve())]["hasTrustDialogAccepted"] is True
+    # Writing the file Claude ignores would leave the prompt in place.
+    assert not home_config_path.exists()
+
+
+@pytest.mark.parametrize(
+    "use_config_dir,legacy_in,custom_oauth,expected",
+    [
+        (False, None, False, "home/.claude.json"),
+        (False, "home/.claude", False, "home/.claude/.config.json"),
+        (True, None, False, "selected/.claude.json"),
+        (True, "selected", False, "selected/.config.json"),
+        # The legacy lookup follows the selected config dir, not ~/.claude.
+        (True, "home/.claude", False, "selected/.claude.json"),
+        (False, None, True, "home/.claude-custom-oauth.json"),
+        (False, "home/.claude", True, "home/.claude/.config.json"),
+    ],
+)
+def test_claude_global_config_path_matches_claude_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_config_dir: bool,
+    legacy_in: str | None,
+    custom_oauth: bool,
+    expected: str,
+) -> None:
+    """
+    The resolved path follows Claude Code's own global-config lookup order.
+
+    :param use_config_dir: Whether ``CLAUDE_CONFIG_DIR`` selects
+        ``tmp_path / "selected"``.
+    :param legacy_in: Directory under ``tmp_path`` holding a legacy
+        ``.config.json``, or ``None`` for no legacy file.
+    :param custom_oauth: Whether ``CLAUDE_CODE_CUSTOM_OAUTH_URL`` is set.
+    :param expected: Expected path relative to ``tmp_path``.
+    """
+    _redirect_home(monkeypatch, tmp_path / "home")
+    if use_config_dir:
+        (tmp_path / "selected").mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "selected"))
+    if legacy_in is not None:
+        (tmp_path / legacy_in).mkdir(parents=True, exist_ok=True)
+        (tmp_path / legacy_in / ".config.json").write_text("{}")
+    if custom_oauth:
+        monkeypatch.setenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://oauth.example.test")
+
+    assert claude_global_config_path() == tmp_path / expected
 
 
 def test_display_cost_approval_popup_builds_detached_tmux_command(

@@ -1771,23 +1771,50 @@ def prune_orphaned_bridge_dirs() -> int:
     return native_bridge_common.prune_orphaned_dirs(_BRIDGE_ROOT)
 
 
+def claude_global_config_path() -> Path:
+    """
+    Return the global config file Claude Code actually loads.
+
+    Mirrors Claude Code's resolution. A legacy ``.config.json`` in the
+    config dir (``$CLAUDE_CONFIG_DIR``, else ``~/.claude``) wins whenever it
+    exists; otherwise it is ``.claude.json`` under ``$CLAUDE_CONFIG_DIR``,
+    else the home directory, named ``.claude-custom-oauth.json`` when
+    ``CLAUDE_CODE_CUSTOM_OAUTH_URL`` is set. Claude ignores keys written to
+    any other candidate.
+
+    :returns: The config file path, e.g. ``Path("/home/user/.claude.json")``
+        or ``Path("/home/user/.claude/.config.json")`` on a host whose
+        Claude Code install predates ``~/.claude.json``.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    config_root = Path(config_dir).expanduser() if config_dir else None
+    legacy_path = (config_root or Path.home() / ".claude") / ".config.json"
+    if legacy_path.exists():
+        return legacy_path
+    suffix = "-custom-oauth" if os.environ.get("CLAUDE_CODE_CUSTOM_OAUTH_URL") else ""
+    return (config_root or Path.home()) / f".claude{suffix}.json"
+
+
 def ensure_claude_workspace_trusted(workspace: Path) -> None:
     """
     Pre-accept Claude Code's first-run trust + onboarding prompts.
 
     Claude Code blocks on two TUI prompts the first time it launches in
     a new context: a global onboarding flow (theme / login) gated by the
-    top-level ``hasCompletedOnboarding`` key in ``~/.claude.json``, and a
+    top-level ``hasCompletedOnboarding`` key in its global config
+    (:func:`claude_global_config_path`, usually ``~/.claude.json``), and a
     per-directory "Do you trust the files in this folder?" dialog gated
     by ``projects["<abs cwd>"].hasTrustDialogAccepted``. Neither fires a
     ``PermissionRequest`` hook, so on a host-spawned (web-UI-driven)
     session there is nobody at the terminal to answer them: Claude hangs
     and the web UI shows nothing. This is acute with
     per-session git worktrees, which hand Claude a brand-new —
-    therefore untrusted — directory on every session.
+    therefore untrusted — directory on every session, and for sessions
+    rooted at the home directory, whose interactively accepted trust
+    Claude keeps for that session only.
 
     Seed both gating keys idempotently so the launch never blocks. Only
-    those two keys are written; all other ``~/.claude.json`` state (the
+    those two keys are written; all other global config state (the
     user's own onboarding choices, project history, MCP config, OAuth
     account) is preserved, and the file is left untouched when both keys
     are already set. This deliberately does NOT skip per-tool permission
@@ -1806,15 +1833,14 @@ def ensure_claude_workspace_trusted(workspace: Path) -> None:
         ``Path("/home/user/repo-worktrees/feature-x")``. Resolved to an
         absolute path to match Claude's ``projects`` key convention.
     :returns: None.
-    :raises ValueError: If an existing ``~/.claude.json`` (or its
+    :raises ValueError: If the existing global config (or its
         ``projects`` map / target project entry) is not a JSON object.
         Surfaced rather than silently overwritten so a corrupt or
         unexpected user config is never clobbered (fail loud).
-    :raises json.JSONDecodeError: If an existing ``~/.claude.json`` is
+    :raises json.JSONDecodeError: If the existing global config is
         not valid JSON, for the same reason.
     """
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    config_path = (Path(config_dir).expanduser() if config_dir else Path.home()) / ".claude.json"
+    config_path = claude_global_config_path()
     if config_path.exists():
         data = json.loads(config_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -1856,7 +1882,7 @@ def _atomic_write_user_json(path: Path, payload: _JsonObject) -> None:
 
     Unlike :func:`_write_json_file` (which targets the owner-only bridge
     tree under ``/tmp`` and enforces secure-directory ownership on the
-    parent), this writes the user's own ``~/.claude.json`` in their home
+    parent), this writes the user's own Claude global config in their home
     directory: it must not re-permission the home directory, but it does
     pin the result to owner-only ``0o600`` because the file holds the
     Claude OAuth account block.
