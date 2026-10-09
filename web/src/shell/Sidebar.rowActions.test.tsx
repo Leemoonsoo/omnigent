@@ -676,6 +676,7 @@ describe("double-click to rename", () => {
 describe("rename under the iOS soft keyboard", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   /**
@@ -733,6 +734,20 @@ describe("rename under the iOS soft keyboard", () => {
       expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
     },
   );
+
+  it("re-centers a rename field that opens while the keyboard is already up", () => {
+    const openKeyboard = stubIOSShell("native");
+    renderSidebar();
+    openKeyboard(508);
+    const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+
+    fireEvent.dblClick(screen.getByRole("link", { name: /My Session/ }));
+
+    const input = screen.getByTestId("rename-conversation-input");
+    expect(input).toHaveFocus();
+    expect(scrollIntoView.mock.contexts).toContain(input);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+  });
 });
 
 describe("leave a shared session", () => {
