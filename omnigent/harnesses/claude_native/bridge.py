@@ -1793,23 +1793,40 @@ def claude_global_config_path(
     """
     env = os.environ if env is None else env
     base = cwd if cwd is not None else Path.cwd()
-    # Claude joins these paths verbatim: no ``~`` expansion, relative to its cwd.
+    # Claude builds these with ``path.join``: no ``~`` expansion, ``..`` removed
+    # lexically, and relative results resolved against its cwd.
     home_value = env.get("HOME") or str(_account_home_dir())
-    home = base / home_value
     config_dir = env.get("CLAUDE_CONFIG_DIR")
-    config_root = base / config_dir if config_dir else None
     # Claude NFC-normalizes the config dir for the legacy lookup only.
     if config_dir is None:
-        legacy_root = base / unicodedata.normalize("NFC", os.path.join(home_value, ".claude"))
-    elif config_root is None:
-        legacy_root = base
+        legacy_dir = unicodedata.normalize("NFC", os.path.join(home_value, ".claude"))
+        legacy_path = _claude_joined_path(base, legacy_dir, ".config.json")
+    elif not config_dir:
+        legacy_path = base / ".config.json"
     else:
-        legacy_root = base / unicodedata.normalize("NFC", config_dir)
-    legacy_path = legacy_root / ".config.json"
+        legacy_dir = unicodedata.normalize("NFC", config_dir)
+        legacy_path = _claude_joined_path(base, legacy_dir, ".config.json")
     if legacy_path.exists():
         return legacy_path
     suffix = "-custom-oauth" if env.get("CLAUDE_CODE_CUSTOM_OAUTH_URL") else ""
-    return (config_root or home) / f".claude{suffix}.json"
+    return _claude_joined_path(base, config_dir or home_value, f".claude{suffix}.json")
+
+
+def _claude_joined_path(cwd: Path, directory: str, name: str) -> Path:
+    """
+    Return the file Claude opens for ``path.join(directory, name)`` from *cwd*.
+
+    ``path.join`` removes ``.`` and ``..`` lexically, without following
+    symlinks, before the filesystem resolves a relative result against
+    Claude's working directory.
+
+    :param cwd: Claude's working directory, e.g. ``Path("/home/user/repo")``.
+    :param directory: The joined directory value, e.g. ``"x/../cfg"``.
+    :param name: The config file name, e.g. ``".claude.json"``.
+    :returns: The file path, e.g. ``Path("/home/user/repo/cfg/.claude.json")``.
+    """
+    joined = os.path.normpath(os.path.join(directory, name))
+    return Path(joined) if os.path.isabs(joined) else cwd / joined
 
 
 def _account_home_dir() -> Path:

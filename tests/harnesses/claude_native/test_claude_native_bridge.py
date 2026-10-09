@@ -8382,6 +8382,59 @@ def test_claude_global_config_path_uses_launch_env_and_cwd(
     )
 
 
+def test_claude_global_config_path_removes_dot_dot_like_path_join(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``..`` segments are removed lexically, as Claude's ``path.join`` does.
+
+    A missing intermediate directory or a symlink before ``..`` must not change
+    the selected file, and the legacy lookup follows the same rule.
+    """
+    _redirect_home(monkeypatch, tmp_path / "home")
+    workspace = tmp_path / "workspace"
+    (workspace / "selected").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere" / "deep"
+    elsewhere.mkdir(parents=True)
+    (workspace / "link").symlink_to(elsewhere)
+    home = {"HOME": str(tmp_path / "home")}
+
+    for config_dir in ("x/../selected", "link/../selected", str(workspace / "x/../selected")):
+        env = {**home, "CLAUDE_CONFIG_DIR": config_dir}
+        assert claude_global_config_path(workspace, env) == workspace / "selected" / ".claude.json"
+    (workspace / "selected" / ".config.json").write_text("{}")
+    env = {**home, "CLAUDE_CONFIG_DIR": "x/../selected"}
+    assert claude_global_config_path(workspace, env) == workspace / "selected" / ".config.json"
+    assert not (workspace / "x").exists()
+
+
+def test_ensure_trusted_preserves_config_behind_dot_dot_selector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Seeding through ``x/../selected`` updates the existing file in place.
+
+    The intermediate directory is absent, so a non-normalized path would miss
+    the existing config, create ``x``, and replace the file's other fields.
+    """
+    _redirect_home(monkeypatch, tmp_path / "home")
+    workspace = tmp_path / "workspace"
+    config_path = workspace / "selected" / ".claude.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"oauthAccount": {"emailAddress": "user@example.com"}}))
+
+    ensure_claude_workspace_trusted(
+        workspace, env={"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": "x/../selected"}
+    )
+
+    data = json.loads(config_path.read_text())
+    assert data["oauthAccount"] == {"emailAddress": "user@example.com"}
+    assert data["projects"][str(workspace.resolve())]["hasTrustDialogAccepted"] is True
+    assert not (workspace / "x").exists()
+
+
 def test_claude_global_config_path_normalizes_legacy_lookup_to_nfc(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
