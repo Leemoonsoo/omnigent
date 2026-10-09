@@ -185,10 +185,13 @@ def test_session_import_falls_back_to_native_agent(tmp_path: Path) -> None:
     )
 
     seen_agent_ids: list[str] = []
+    seen_labels: list[object] = []
 
     def _responder(request: httpx.Request) -> httpx.Response:
-        agent_id = json.loads(request.content)["agent_id"]
+        body = json.loads(request.content)
+        agent_id = body["agent_id"]
         seen_agent_ids.append(agent_id)
+        seen_labels.append(body.get("labels"))
         if agent_id == "ag_missing":
             return httpx.Response(404, json={"error": {"message": "Agent not found"}})
         return httpx.Response(200, json={"id": "conv_new"})
@@ -203,6 +206,8 @@ def test_session_import_falls_back_to_native_agent(tmp_path: Path) -> None:
     assert "conv_new" in result.output
     # First tried the exported id, then fell back to the native agent id.
     assert seen_agent_ids == ["ag_missing", fallback_id]
+    # The retry keeps the import-source label.
+    assert seen_labels == [{IMPORT_SOURCE_LABEL_KEY: "claude"}] * 2
 
 
 _USER_ITEM = {
