@@ -97,6 +97,14 @@ def test_env_resolution_matches_real_env(config, tmp_path, prefix, found):
     )
 
 
+def _real_env_supports_long_split_string() -> bool:
+    """Return whether ``/usr/bin/env`` accepts GNU's ``--split-string`` spelling."""
+    probe = subprocess.run(
+        ["/usr/bin/env", "--split-string=/usr/bin/env"], env={}, capture_output=True, check=False
+    )
+    return probe.returncode == 0
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -109,10 +117,14 @@ def test_env_resolution_matches_real_env(config, tmp_path, prefix, found):
         ["-S", "- A='x y' /usr/bin/env"],
         ["-S", "-u KEEP A=1 /usr/bin/env"],
         ["-iS", "A=1 /usr/bin/env"],
+        ["--split-string=-u KEEP A=1 /usr/bin/env"],
+        ["--split-string", "-u KEEP A=1 /usr/bin/env"],
     ],
 )
 def test_env_wrapper_environment_matches_real_env(args):
     """The modeled wrapper environment equals what the real ``env`` passes on."""
+    if args[0].startswith("--split-string") and not _real_env_supports_long_split_string():
+        pytest.skip("/usr/bin/env lacks --split-string")
     base = {"PATH": "/usr/bin:/bin", "KEEP": "kept", "A": "old"}
     wrapper = startup.env_wrapper_environment("/usr/bin/env", args)
     assert wrapper is not None
@@ -124,14 +136,6 @@ def test_env_wrapper_environment_matches_real_env(args):
         ["/usr/bin/env", *args], env=base, capture_output=True, text=True, check=True
     )
     assert dict(line.split("=", 1) for line in process.stdout.splitlines()) == expected
-
-
-def test_env_wrapper_long_split_string_matches_short_form():
-    """``--split-string`` spellings model the same environment as ``-S``."""
-    short = startup.env_wrapper_environment("env", ["-S", "-u KEEP A=1 tool"])
-    assert short is not None
-    for args in (["--split-string=-u KEEP A=1 tool"], ["--split-string", "-u KEEP A=1 tool"]):
-        assert startup.env_wrapper_environment("env", args) == short
 
 
 @pytest.mark.parametrize(

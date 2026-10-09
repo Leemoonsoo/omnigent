@@ -51,6 +51,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.parse
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
@@ -1793,15 +1794,17 @@ def claude_global_config_path(
     env = os.environ if env is None else env
     base = cwd if cwd is not None else Path.cwd()
     # Claude joins these paths verbatim: no ``~`` expansion, relative to its cwd.
-    home = base / env["HOME"] if env.get("HOME") else _account_home_dir()
+    home_value = env.get("HOME") or str(_account_home_dir())
+    home = base / home_value
     config_dir = env.get("CLAUDE_CONFIG_DIR")
     config_root = base / config_dir if config_dir else None
+    # Claude NFC-normalizes the config dir for the legacy lookup only.
     if config_dir is None:
-        legacy_root = home / ".claude"
+        legacy_root = base / unicodedata.normalize("NFC", os.path.join(home_value, ".claude"))
     elif config_root is None:
         legacy_root = base
     else:
-        legacy_root = config_root
+        legacy_root = base / unicodedata.normalize("NFC", config_dir)
     legacy_path = legacy_root / ".config.json"
     if legacy_path.exists():
         return legacy_path

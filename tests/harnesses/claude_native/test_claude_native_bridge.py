@@ -8382,6 +8382,34 @@ def test_claude_global_config_path_uses_launch_env_and_cwd(
     )
 
 
+def test_claude_global_config_path_normalizes_legacy_lookup_to_nfc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The legacy lookup uses the NFC config dir; the modern path keeps its spelling.
+
+    Claude Code normalizes its config dir to NFC before checking for a legacy
+    ``.config.json`` but joins ``.claude.json`` onto the raw value, which
+    differ on a byte-sensitive filesystem.
+    """
+    import unicodedata
+
+    _redirect_home(monkeypatch, tmp_path / "home")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    decomposed = str(tmp_path / unicodedata.normalize("NFD", "caf\u00e9"))
+    composed = unicodedata.normalize("NFC", decomposed)
+    env = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": decomposed}
+
+    assert claude_global_config_path(workspace, env) == Path(decomposed) / ".claude.json"
+    Path(composed).mkdir()
+    (Path(composed) / ".config.json").write_text("{}")
+    if (Path(decomposed) / ".config.json").exists():
+        pytest.skip("filesystem treats NFC and NFD names as the same file")
+    assert claude_global_config_path(workspace, env) == Path(composed) / ".config.json"
+
+
 def test_ensure_trusted_seeds_the_launch_env_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
