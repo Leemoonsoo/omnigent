@@ -194,8 +194,10 @@ def _normalize_env_wrapper_args(
     while pending:
         arg = pending.pop(0)
         if arg == "-":
-            normalized.append("-i")  # env's legacy spelling of --ignore-environment
-        elif arg == "--chdir":
+            # env's legacy spelling of --ignore-environment also ends its options.
+            normalized.extend(["-i", "--", *pending])
+            break
+        if arg == "--chdir":
             if not pending:
                 raise ValueError("env --chdir needs a value")
             recorded.append(pending.pop(0))

@@ -125,6 +125,7 @@ def _real_env_supports_long_split_string() -> bool:
         ["-i", "A=1", "/usr/bin/printenv"],
         ["-", "A=1", "/usr/bin/printenv"],
         ["-u", "KEEP", "A=1", "/usr/bin/printenv"],
+        ["-u", "KEEP", "-", "A=1", "/usr/bin/printenv"],
         ["-iuKEEP", "A=1", "/usr/bin/printenv"],
         ["-S", "A=1 /usr/bin/printenv"],
         ["-S", "- A='x y' /usr/bin/printenv"],
@@ -164,6 +165,19 @@ def test_env_wrapper_environment_matches_real_env(args):
     # ``splitlines`` would also split on separators such as U+001C inside values.
     lines = process.stdout.removesuffix("\n").split("\n")
     assert dict(line.split("=", 1) for line in lines) == expected
+
+
+def test_standalone_dash_ends_env_option_parsing():
+    """
+    Arguments after ``env -`` are not options, as in GNU ``env``.
+
+    ``env - -u KEEP claude`` runs ``-u`` as the command, so it neither unsets
+    ``KEEP`` nor changes directory.
+    """
+    environment = startup.env_wrapper_environment("/usr/bin/env", ["-", "-u", "KEEP", "claude"])
+    assert environment is not None
+    assert (environment.inherit, environment.unset, environment.variables) == (False, [], {})
+    assert startup.env_wrapper_chdir("/usr/bin/env", ["-", "-C", "/", "claude"]) is None
 
 
 def test_nested_env_wrapper_is_not_modeled():
