@@ -7,10 +7,11 @@ import os
 import re
 import sqlite3
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from hashlib import sha256
+from itertools import chain
 from pathlib import Path
-from typing import get_args
+from typing import cast, get_args
 
 from omnigent.entities import NewConversationItem, parse_item_data
 from omnigent.harnesses.claude_native.bridge import (
@@ -44,13 +45,9 @@ _MAX_EXTERNAL_SESSION_ID_LENGTH = 128
 _MAX_RESPONSE_ID_LENGTH = 64
 _OPENCODE_COMMAND_TIMEOUT_SECONDS = 120
 
-# Transcript byte size past which an import is trimmed to the last compaction
-# boundary instead of the full history. Below it the whole transcript imports
-# (cheap, and the full record is useful to browse); above it the file has almost
-# certainly been compacted at least once, so importing every pre-compaction
-# record replays megabytes the live agent no longer sees. Shared by the Claude
-# (``isCompactSummary``) and Codex (``compacted`` record) paths — see
-# docs/session-compaction.md.
+# Claude transcript byte size past which an import keeps only the last compaction
+# summary onward; Codex imports never trim (each ``compacted`` record becomes a
+# compaction item). See docs/session-compaction.md.
 _IMPORT_COMPACT_TRIM_BYTES = 2 * 1024 * 1024
 
 
@@ -141,6 +138,14 @@ def _is_safe_pi_import_session_id(session_id: str) -> bool:
     )
 
 
+def _is_codex_thread_id(value: str) -> bool:
+    """Match Codex's uuid thread ids within the import API's identity limit."""
+    return (
+        len(value) <= _MAX_EXTERNAL_SESSION_ID_LENGTH
+        and _CODEX_THREAD_ID_RE.fullmatch(value) is not None
+    )
+
+
 def _is_safe_opencode_import_session_id(session_id: str) -> bool:
     """Accept native OpenCode ids without permitting CLI option injection."""
     return (
@@ -209,13 +214,11 @@ def _qwen_session_locator(path: Path) -> str:
 _CODEX_INTERACTIVE_SOURCES = frozenset({"cli", "vscode"})
 
 
-def _codex_rollout_source(path: Path) -> object | None:
-    """Return a Codex rollout's recorded ``session_meta.source``, if present.
+def _codex_rollout_meta(path: Path) -> dict[str, object] | None:
+    """Return a Codex rollout's ``session_meta`` payload, if present.
 
     ``session_meta`` is the first record in a rollout, so only the first line is
-    read. Returns the raw value (a string like ``"cli"`` / ``"exec"`` for
-    top-level sources, or a dict for sub-agent / internal ones), or ``None`` when
-    the file is unreadable or predates the ``source`` field.
+    read. ``None`` when the file is unreadable or does not start with one.
     """
     try:
         with path.open(encoding="utf-8") as handle:
@@ -229,7 +232,21 @@ def _codex_rollout_source(path: Path) -> object | None:
     if not isinstance(record, dict) or record.get("type") != "session_meta":
         return None
     payload = record.get("payload")
-    return payload.get("source") if isinstance(payload, dict) else None
+    return payload if isinstance(payload, dict) else None
+
+
+def _codex_thread_id_from_rollout(path: Path, meta: dict[str, object] | None) -> str | None:
+    """Return the thread a rollout belongs to, preferring ``session_meta.id``.
+
+    Rollouts are named ``rollout-<ts>-<uuid>.jsonl``, but the file a thread
+    currently writes to can carry a different uuid than the thread itself, so
+    the id recorded inside the file wins over the filename suffix.
+    """
+    recorded = meta.get("id") if meta else None
+    if isinstance(recorded, str) and _is_codex_thread_id(recorded):
+        return recorded
+    suffix = path.stem[-36:]
+    return suffix if _is_codex_thread_id(suffix) else None
 
 
 def _codex_source_is_interactive(source: object) -> bool:
@@ -346,12 +363,13 @@ def _recent_local_sessions_with_recency(
             )
         candidates = []
         for path in rollouts:
-            session_id = path.stem[-36:]
-            if not _CODEX_THREAD_ID_RE.fullmatch(session_id):
+            meta = _codex_rollout_meta(path)
+            session_id = _codex_thread_id_from_rollout(path, meta)
+            if session_id is None:
                 continue
-            # Read the rollout's source (one line) and skip non-interactive
-            # runs (exec / mcp / sub-agent / internal) that Codex itself hides.
-            if not _codex_source_is_interactive(_codex_rollout_source(path)):
+            # Skip non-interactive runs (exec / mcp / sub-agent / internal)
+            # that Codex itself hides.
+            if not _codex_source_is_interactive(meta.get("source") if meta else None):
                 continue
             candidates.append((path, session_id))
         return _recent_unique_sessions_with_recency(candidates, limit=limit)
@@ -676,11 +694,41 @@ def _codex_thread_name_from_index(home: Path, session_id: str) -> str | None:
     return name
 
 
-def _codex_native_title(home: Path, session_id: str) -> str | None:
+def _codex_state_db_version(path: Path) -> int:
+    match = re.search(r"state_(\d+)\.sqlite$", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def _codex_thread_row(home: Path, session_id: str) -> dict[str, object] | None:
+    """Return the thread's row from the newest ``state_<n>.sqlite`` that has it.
+
+    Codex's thread store records, per thread, the rollout file it currently
+    writes to (``rollout_path``), whether it is archived, and its title. The
+    columns vary across Codex versions, so callers read them with ``.get``.
+    """
+    dbs = sorted(home.glob("state_*.sqlite"), key=_codex_state_db_version, reverse=True)
+    for db in dbs:
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                con.row_factory = sqlite3.Row
+                row = con.execute("SELECT * FROM threads WHERE id = ?", (session_id,)).fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            continue
+        if row is not None:
+            return dict(row)
+    return None
+
+
+def _codex_native_title(
+    home: Path, session_id: str, thread_row: dict[str, object] | None
+) -> str | None:
     """Return the user's custom Codex thread title, or None if auto-derived.
 
     A rename lands in ``session_index.jsonl`` (``thread_name``) — the reliable
-    source — so check that first. As a fallback, ``state_<n>.sqlite``'s
+    source — so check that first. As a fallback, the thread store's
     ``threads.title`` holds the raw first user message until renamed, so only a
     title that diverges from ``first_user_message`` is a real custom name;
     otherwise the first-message synthesis is better.
@@ -688,52 +736,176 @@ def _codex_native_title(home: Path, session_id: str) -> str | None:
     indexed = _codex_thread_name_from_index(home, session_id)
     if indexed:
         return indexed
+    if thread_row is None:
+        return None
+    title = str(thread_row.get("title") or "").strip()
+    first_message = str(thread_row.get("first_user_message") or "").strip()
+    return title if title and title != first_message else None
 
-    def _state_db_version(path: Path) -> int:
-        match = re.search(r"state_(\d+)\.sqlite$", path.name)
-        return int(match.group(1)) if match else -1
 
-    dbs = sorted(home.glob("state_*.sqlite"), key=_state_db_version, reverse=True)
-    for db in dbs:
-        try:
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+def _codex_recorded_rollout(home: Path, thread_row: dict[str, object] | None) -> Path | None:
+    """Return the rollout file the thread store names for a thread, if it exists."""
+    recorded = thread_row.get("rollout_path") if thread_row else None
+    if not isinstance(recorded, str) or not recorded.strip():
+        return None
+    path = Path(recorded.strip()).expanduser()
+    if not path.is_absolute():
+        path = home / path
+    return path if path.suffix == ".jsonl" and path.is_file() else None
+
+
+def _codex_rollout_path(
+    home: Path, session_id: str, thread_row: dict[str, object] | None
+) -> Path | None:
+    """Locate a thread's rollout: the thread store's ``rollout_path``, else by filename.
+
+    Codex can leave an older ``rollout-*-<id>.jsonl`` behind while the thread
+    writes to a file named after another uuid, so a filename match may be stale;
+    ``rollout_path`` is the file Codex itself resumes.
+    """
+    return (
+        _codex_recorded_rollout(home, thread_row)
+        or _find_codex_rollout(home, session_id)
+        or _find_archived_codex_rollout(home, session_id)
+    )
+
+
+def _codex_thread_archived(
+    home: Path, thread_row: dict[str, object] | None, rollout_path: Path
+) -> bool:
+    """Whether Codex archived the thread: ``threads.archived`` or an archived_sessions/ rollout."""
+    if thread_row is not None and thread_row.get("archived"):
+        return True
+    return (home / "archived_sessions").resolve() in rollout_path.resolve().parents
+
+
+def _codex_rollout_records(path: Path) -> Iterator[dict[str, object]]:
+    """Yield a rollout's records that carry a dict ``payload``, skipping malformed lines."""
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
             try:
-                row = con.execute(
-                    "SELECT title, first_user_message FROM threads WHERE id = ?",
-                    (session_id,),
-                ).fetchone()
-            finally:
-                con.close()
-        except sqlite3.Error:
-            continue
-        if row is None:
-            continue
-        title = (row[0] or "").strip()
-        first_message = (row[1] or "").strip()
-        return title if title and title != first_message else None
-    return None
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict) and isinstance(record.get("payload"), dict):
+                yield record
 
 
-def _codex_compacted_baseline_items(payload: dict[str, object]) -> list[NewConversationItem]:
-    """Convert a Codex ``compacted`` record's replacement_history into items.
+def _codex_record_ordinal(record: dict[str, object], position: int) -> int:
+    """A paginated record's ``ordinal``; legacy rollouts fall back to the line position."""
+    ordinal = record.get("ordinal")
+    if isinstance(ordinal, int) and not isinstance(ordinal, bool):
+        return ordinal
+    return position
 
-    Codex appends ``{type: "compacted", payload: {replacement_history: [...]}}``
-    after compacting; ``replacement_history`` is the post-compaction context
-    baseline it resumes from (the summary plus any retained messages), each entry
-    response-item shaped. Unsupported entries (e.g. reasoning) parse to ``None``
-    and are skipped, mirroring the ordinary response-item path.
+
+def _codex_inherited_records(
+    home: Path, meta: dict[str, object], *, seen: set[str]
+) -> Iterator[dict[str, object]]:
+    """Yield the records a forked thread inherits from its base thread, oldest first.
+
+    A fork's ``session_meta.history_base`` names the thread it branched from and
+    the ordinal its own records continue at; the base's earlier records are not
+    copied into the fork's rollout. Ordinals run across the whole lineage, so a
+    base that is itself a fork contributes its own inherited records first.
+    """
+    base = meta.get("history_base")
+    if not isinstance(base, dict):
+        return
+    base_id = base.get("thread_id")
+    end = base.get("end_ordinal_exclusive")
+    if (
+        not isinstance(base_id, str)
+        or not _is_codex_thread_id(base_id)
+        or base_id in seen
+        or isinstance(end, bool)
+        or not isinstance(end, int)
+        or end <= 0
+    ):
+        return
+    seen.add(base_id)
+    base_path = _codex_rollout_path(home, base_id, _codex_thread_row(home, base_id))
+    if base_path is None:
+        return
+    records = _codex_rollout_records(base_path)
+    first = next(records, None)
+    if first is None:
+        return
+    if first.get("type") == "session_meta":
+        yield from _codex_inherited_records(
+            home, cast(dict[str, object], first["payload"]), seen=seen
+        )
+    for position, record in enumerate(chain([first], records)):
+        if _codex_record_ordinal(record, position) < end:
+            yield record
+
+
+_CODEX_COMPACTION_FALLBACK_SUMMARY = "[Codex compaction — context was compacted in Codex]"
+
+
+def _codex_compaction_item(payload: dict[str, object]) -> NewConversationItem | None:
+    """Convert a Codex ``compacted`` record into a compaction item.
+
+    Its ``replacement_history`` rides along as ``compacted_messages`` — what a
+    live codex-native session persists — so a cold resume rebuilds the same
+    post-compaction context while every earlier turn stays visible. A record
+    with no usable baseline is skipped.
     """
     history = payload.get("replacement_history")
     if not isinstance(history, list):
-        return []
-    baseline: list[NewConversationItem] = []
-    for entry in history:
-        if not isinstance(entry, dict):
-            continue
-        item = _codex_response_item(entry, response_id="codex:compaction")
-        if item is not None:
-            baseline.append(item)
-    return baseline
+        return None
+    messages = [entry for entry in history if isinstance(entry, dict)]
+    if not messages:
+        return None
+    summary = payload.get("message")
+    data: dict[str, object] = {
+        "summary": (
+            summary.strip()
+            if isinstance(summary, str) and summary.strip()
+            else _CODEX_COMPACTION_FALLBACK_SUMMARY
+        ),
+        # Imported boundaries predate any store item id.
+        "last_item_id": "codex:compaction",
+        "token_count": 0,
+        "compacted_messages": messages,
+    }
+    window_id = payload.get("window_id")
+    if isinstance(window_id, (int, str)) and not isinstance(window_id, bool):
+        data["window_id"] = window_id
+    return NewConversationItem(
+        type="compaction",
+        response_id="codex:compaction",
+        data=parse_item_data("compaction", data),
+    )
+
+
+def _codex_items_from_records(
+    records: Iterable[dict[str, object]],
+) -> tuple[list[NewConversationItem], str | None]:
+    """Convert rollout records to items; also returns the last recorded cwd."""
+    workspace: str | None = None
+    turn_id = "history"
+    items: list[NewConversationItem] = []
+    for record in records:
+        payload = cast(dict[str, object], record["payload"])
+        kind = record.get("type")
+        if kind == "session_meta":
+            cwd = payload.get("cwd")
+            if isinstance(cwd, str) and cwd.strip():
+                workspace = cwd.strip()
+        elif kind == "turn_context":
+            candidate = payload.get("turn_id")
+            if isinstance(candidate, str) and candidate:
+                turn_id = candidate
+        elif kind == "compacted":
+            compaction = _codex_compaction_item(payload)
+            if compaction is not None:
+                items.append(compaction)
+        elif kind == "response_item":
+            item = _codex_response_item(payload, response_id=f"codex:{turn_id}")
+            if item is not None:
+                items.append(item)
+    return items, workspace
 
 
 def load_codex_session(
@@ -741,60 +913,33 @@ def load_codex_session(
     *,
     codex_home: Path | None = None,
 ) -> LocalSessionImport:
-    """Load one Codex session from its local rollout JSONL file."""
+    """Load one Codex thread from its local rollout JSONL.
+
+    Reads the rollout Codex's thread store names for the thread (falling back to
+    the filename match), prepends the base thread's records a fork inherits via
+    ``session_meta.history_base``, and imports the whole transcript with each
+    ``compacted`` record carried as a compaction item (see
+    docs/session-compaction.md).
+    """
     configured_home = os.environ.get("CODEX_HOME")
     home = codex_home or (Path(configured_home).expanduser() if configured_home else None)
     home = home or Path.home() / ".codex"
-    rollout_path = _find_codex_rollout(home, session_id) or _find_archived_codex_rollout(
-        home, session_id
-    )
+    thread_row = _codex_thread_row(home, session_id)
+    rollout_path = _codex_rollout_path(home, session_id, thread_row)
     if rollout_path is None:
         raise SessionImportNotFoundError(f"Codex session {session_id!r} was not found")
 
-    # Past the size threshold, restart from each compaction boundary so the
-    # import matches what the agent resumes with, dropping the pre-compaction
-    # records it no longer sees. See docs/session-compaction.md.
-    trim_at_compaction = _exceeds_compaction_trim_size(rollout_path)
-
-    workspace: str | None = None
-    turn_id = "history"
-    items: list[NewConversationItem] = []
-    with rollout_path.open(encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict) or not isinstance(record.get("payload"), dict):
-                continue
-            payload = record["payload"]
-            if record.get("type") == "session_meta":
-                cwd = payload.get("cwd")
-                if isinstance(cwd, str) and cwd.strip():
-                    workspace = cwd.strip()
-                continue
-            if record.get("type") == "turn_context":
-                candidate = payload.get("turn_id")
-                if isinstance(candidate, str) and candidate:
-                    turn_id = candidate
-                continue
-            if record.get("type") == "compacted":
-                # replacement_history is the new context baseline; resetting to it
-                # discards prior items so only the last compaction's baseline and
-                # what follows survive (mirrors the terminal agent on resume). A
-                # boundary with no usable baseline is ignored rather than wiping
-                # history to nothing (matches _read_compacted_history's guard).
-                if trim_at_compaction:
-                    baseline = _codex_compacted_baseline_items(payload)
-                    if baseline:
-                        items = baseline
-                continue
-            if record.get("type") != "response_item":
-                continue
-            item = _codex_response_item(payload, response_id=f"codex:{turn_id}")
-            if item is not None:
-                items.append(item)
-
+    own_records = _codex_rollout_records(rollout_path)
+    first = next(own_records, None)
+    meta: dict[str, object] = (
+        cast(dict[str, object], first["payload"])
+        if first is not None and first.get("type") == "session_meta"
+        else {}
+    )
+    inherited = _codex_inherited_records(home, meta, seen={session_id})
+    items, workspace = _codex_items_from_records(
+        chain(inherited, [] if first is None else [first], own_records)
+    )
     if not items:
         raise SessionImportNotFoundError(f"Codex session {session_id!r} has no importable history")
     return LocalSessionImport(
@@ -802,7 +947,8 @@ def load_codex_session(
         external_session_id=session_id,
         workspace=workspace,
         items=tuple(items),
-        native_title=_codex_native_title(home, session_id),
+        native_title=_codex_native_title(home, session_id, thread_row),
+        archived=_codex_thread_archived(home, thread_row, rollout_path),
     )
 
 
