@@ -1,5 +1,6 @@
 """Launch precedence, env-wrapper settings, and host defaults."""
 
+import functools
 import os
 import subprocess
 
@@ -97,6 +98,7 @@ def test_env_resolution_matches_real_env(config, tmp_path, prefix, found):
     )
 
 
+@functools.cache
 def _real_env_supports_chdir() -> bool:
     """Return whether ``/usr/bin/env`` accepts ``-C`` and ``--chdir``."""
     for args in (["-C", "/", "/usr/bin/env"], ["--chdir=/", "/usr/bin/env"]):
@@ -106,6 +108,7 @@ def _real_env_supports_chdir() -> bool:
     return True
 
 
+@functools.cache
 def _real_env_supports_long_split_string() -> bool:
     """Return whether ``/usr/bin/env`` accepts GNU's ``--split-string`` spelling."""
     probe = subprocess.run(
@@ -114,31 +117,32 @@ def _real_env_supports_long_split_string() -> bool:
     return probe.returncode == 0
 
 
+# The rows print with printenv because a wrapper that runs another env is not modeled.
 @pytest.mark.parametrize(
     "args",
     [
-        ["A=1", "/usr/bin/env"],
-        ["-i", "A=1", "/usr/bin/env"],
-        ["-", "A=1", "/usr/bin/env"],
-        ["-u", "KEEP", "A=1", "/usr/bin/env"],
-        ["-iuKEEP", "A=1", "/usr/bin/env"],
-        ["-S", "A=1 /usr/bin/env"],
-        ["-S", "- A='x y' /usr/bin/env"],
-        ["-S", "-u KEEP A=1 /usr/bin/env"],
-        ["-iS", "A=1 /usr/bin/env"],
-        ["--split-string=-u KEEP A=1 /usr/bin/env"],
-        ["--split-string", "-u KEEP A=1 /usr/bin/env"],
-        ["-C", "/", "A=1", "/usr/bin/env"],
-        ["-S", "A=${KEEP}/c /usr/bin/env"],
-        ["-S", 'A="${KEEP} x" /usr/bin/env'],
-        ["-S", "A='${KEEP}' /usr/bin/env"],
-        ["-S", "A=${UNSET_NAME}z /usr/bin/env"],
-        ["-S", "${UNSET_NAME} A=1 /usr/bin/env"],
-        ["-S", "A=1 ${UNSET_NAME}${UNSET_NAME} B=2 /usr/bin/env"],
-        ["-S", "A=x\tB=y\nC=z /usr/bin/env"],
-        ["-S", "A=/tmp/a\u00a0b /usr/bin/env"],
-        ["-S", "A=x\u00a0#y /usr/bin/env"],
-        ["-S", "A=x\x1cB=y /usr/bin/env"],
+        ["A=1", "/usr/bin/printenv"],
+        ["-i", "A=1", "/usr/bin/printenv"],
+        ["-", "A=1", "/usr/bin/printenv"],
+        ["-u", "KEEP", "A=1", "/usr/bin/printenv"],
+        ["-iuKEEP", "A=1", "/usr/bin/printenv"],
+        ["-S", "A=1 /usr/bin/printenv"],
+        ["-S", "- A='x y' /usr/bin/printenv"],
+        ["-S", "-u KEEP A=1 /usr/bin/printenv"],
+        ["-iS", "A=1 /usr/bin/printenv"],
+        ["--split-string=-u KEEP A=1 /usr/bin/printenv"],
+        ["--split-string", "-u KEEP A=1 /usr/bin/printenv"],
+        ["-C", "/", "A=1", "/usr/bin/printenv"],
+        ["-S", "A=${KEEP}/c /usr/bin/printenv"],
+        ["-S", 'A="${KEEP} x" /usr/bin/printenv'],
+        ["-S", "A='${KEEP}' /usr/bin/printenv"],
+        ["-S", "A=${UNSET_NAME}z /usr/bin/printenv"],
+        ["-S", "${UNSET_NAME} A=1 /usr/bin/printenv"],
+        ["-S", "A=1 ${UNSET_NAME}${UNSET_NAME} B=2 /usr/bin/printenv"],
+        ["-S", "A=x\tB=y\nC=z /usr/bin/printenv"],
+        ["-S", "A=/tmp/a\u00a0b /usr/bin/printenv"],
+        ["-S", "A=x\u00a0#y /usr/bin/printenv"],
+        ["-S", "A=x\x1cB=y /usr/bin/printenv"],
     ],
 )
 def test_env_wrapper_environment_matches_real_env(args):
@@ -160,6 +164,13 @@ def test_env_wrapper_environment_matches_real_env(args):
     # ``splitlines`` would also split on separators such as U+001C inside values.
     lines = process.stdout.removesuffix("\n").split("\n")
     assert dict(line.split("=", 1) for line in lines) == expected
+
+
+def test_nested_env_wrapper_is_not_modeled():
+    """A wrapper that runs another ``env`` reports no changes, so callers fall back."""
+    args = ["-C", "/", "A=1", "env", "CLAUDE_CONFIG_DIR=/srv/claude", "claude"]
+    assert startup.env_wrapper_environment("/usr/bin/env", args) is None
+    assert startup.env_wrapper_chdir("/usr/bin/env", args) is None
 
 
 def test_env_split_string_keeps_a_word_only_for_set_variables():

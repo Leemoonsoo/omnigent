@@ -910,6 +910,7 @@ def test_claude_terminal_launch_cwd_rejects_an_unsearchable_env_chdir_target(
         ["-S", "CLAUDE_CONFIG_DIR=wrap\\_claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=wrap/claude claude #comment"],
         ["-S", "CLAUDE_CONFIG_DIR=wrap/claude\vclaude"],
+        ["A=1", "env", "CLAUDE_CONFIG_DIR=wrap/claude", "claude"],
     ],
     ids=[
         "unmodeled-option",
@@ -918,6 +919,7 @@ def test_claude_terminal_launch_cwd_rejects_an_unsearchable_env_chdir_target(
         "escape",
         "comment",
         "version-dependent-separator",
+        "nested-env",
     ],
 )
 def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms(
@@ -930,9 +932,9 @@ def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms
     Unsupported ``env`` wrapper forms fall back to the pre-wrapper environment.
 
     The shared parser does not model options such as ``-v``, unbalanced ``-S``
-    quoting, or ``-S`` bare ``$NAME`` expansion, escapes, comments, and
-    ``\\v``/``\\f``/``\\r`` separators, so their assignments are not applied
-    even though the real launch would apply them. The runner logs the
+    quoting, ``-S`` bare ``$NAME`` expansion, escapes, comments, and
+    ``\\v``/``\\f``/``\\r`` separators, or a nested ``env``, so their
+    assignments are not applied even though the real launch would apply them. The runner logs the
     fallback at INFO without the wrapper's values.
 
     :param args: Wrapper args the parser cannot model.

@@ -117,15 +117,11 @@ def env_wrapper_environment(
         ``${NAME}`` in ``-S`` strings; ``None`` treats such strings as unparsed.
     :returns: The wrapper's ``-i``/``-``/``-u``/``-S``/assignment changes, or
         ``None`` when *command* is not a parseable ``env`` wrapper (e.g. it
-        uses ``-v``). A ``-C``/``--chdir`` directory is reported by
-        :func:`env_wrapper_chdir`.
+        uses ``-v``) or runs another ``env``. A ``-C``/``--chdir`` directory
+        is reported by :func:`env_wrapper_chdir`.
     """
-    try:
-        normalized = _normalize_env_wrapper_args(args, environ=environ)
-    except ValueError:
-        return None
-    unwrapped = _unwrap_env(command, normalized, os.defpath)
-    return unwrapped[3] if unwrapped is not None else None
+    parsed = _parse_env_wrapper(command, args, environ)
+    return parsed[0] if parsed is not None else None
 
 
 def env_wrapper_chdir(
@@ -142,14 +138,33 @@ def env_wrapper_chdir(
     :returns: The last ``-C``/``--chdir`` value, e.g. ``"/srv/repo"``, or
         ``None`` when there is none or the wrapper is not parseable.
     """
+    parsed = _parse_env_wrapper(command, args, environ)
+    return parsed[1] if parsed is not None else None
+
+
+def _parse_env_wrapper(
+    command: str, args: list[str], environ: Mapping[str, str] | None
+) -> tuple[HarnessEnvironment, str | None] | None:
+    """
+    Parse one ``env`` wrapper layer.
+
+    :param command: Configured harness command, e.g. ``"env"``.
+    :param args: Arguments passed to *command*.
+    :param environ: Environment the wrapper starts from, or ``None``.
+    :returns: The wrapper's environment changes and its last ``-C``
+        directory (or ``None``), or ``None`` when *command* is not a
+        parseable ``env`` wrapper or its command is another ``env``, whose
+        changes are not modeled.
+    """
     chdirs: list[str] = []
     try:
         normalized = _normalize_env_wrapper_args(args, chdirs, environ)
     except ValueError:
         return None
-    if _unwrap_env(command, normalized, os.defpath) is None:
+    unwrapped = _unwrap_env(command, normalized, os.defpath)
+    if unwrapped is None or Path(unwrapped[0]).name == "env":
         return None
-    return chdirs[-1] if chdirs else None
+    return unwrapped[3], (chdirs[-1] if chdirs else None)
 
 
 def _normalize_env_wrapper_args(
