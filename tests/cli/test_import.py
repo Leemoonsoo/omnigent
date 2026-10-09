@@ -100,6 +100,47 @@ def test_import_command_loads_local_session_and_posts_normalized_items(tmp_path:
 
 
 @respx.mock
+def test_import_command_marks_a_codex_archived_thread_as_archived(tmp_path: Path) -> None:
+    """A thread Codex archived (its rollout under archived_sessions/) posts ``archived: true``."""
+    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    rollout = (
+        tmp_path
+        / ".codex"
+        / "archived_sessions"
+        / f"rollout-2026-10-02T09-00-00-{session_id}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True)
+    records = [
+        {"type": "session_meta", "payload": {"id": session_id, "cwd": "/repo"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "inspect TODO.md"}],
+            },
+        },
+    ]
+    rollout.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
+    route = respx.post(f"{_BASE}/v1/imports").mock(
+        return_value=httpx.Response(
+            201,
+            json={"session_id": "conv_imported", "status": "imported", "item_count": 1},
+        )
+    )
+
+    with patch("omnigent.cli._resolve_attach_server", return_value=_BASE):
+        result = CliRunner().invoke(
+            cli,
+            ["import", "--harness", "codex", "--session", session_id],
+            env={"HOME": str(tmp_path)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content)["archived"] is True
+
+
+@respx.mock
 def test_import_command_sends_force_override(tmp_path: Path) -> None:
     """The force flag asks the server to replace the previous source import."""
     session_id = "a1b2c3d4-1234-5678-9abc-def012345679"

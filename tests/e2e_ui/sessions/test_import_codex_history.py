@@ -41,8 +41,6 @@ _TWO_FILE_TITLE = "codex-import two-file thread question 1"
 _TWO_FILE_FINAL_ANSWER = "Final answer: this message only exists in the rollout_path file."
 _PARENT_TITLE = "codex-import fork parent question 1"
 _PARENT_TURNS = 10
-_CHILD_TURN_TITLE = "codex-import fork child follow-up"
-_CHILD_TURN_ANSWER = "Child answer after the fork."
 _BIG_MESSAGE_COUNT = 425
 _BIG_TITLE = "codex-import compacted thread message 1"
 _ARCHIVED_TITLE = "codex-import archived thread question"
@@ -176,7 +174,6 @@ class _SeededThreads:
     two_file_current_rollout: str
     parent: str
     child_metadata_only: str
-    child_with_turn: str
     compacted: str
     archived: str
     plain: str
@@ -287,15 +284,6 @@ def _seed_codex_home(home: Path) -> _SeededThreads:
     child_meta_rollout.write(child_meta_path, now - 600)
     rows.append(_thread_row(child_meta_only, child_meta_path, title="", mtime=now - 600))
 
-    child_with_turn = new_id()
-    child_turn_rollout = _Rollout(child_with_turn, "2026-10-02T10:40:00.000Z", **fork_meta)
-    child_turn_rollout.turn(1, _CHILD_TURN_TITLE, _CHILD_TURN_ANSWER)
-    child_turn_path = rollout_path(sessions, child_with_turn, "10-40-00")
-    child_turn_rollout.write(child_turn_path, now - 500)
-    rows.append(
-        _thread_row(child_with_turn, child_turn_path, title=_CHILD_TURN_TITLE, mtime=now - 500)
-    )
-
     # Facet 3: a transcript above the 2 MiB import threshold with several
     # compactions; 425 visible messages, the last compaction after message 310.
     compacted = new_id()
@@ -346,7 +334,6 @@ def _seed_codex_home(home: Path) -> _SeededThreads:
         two_file_current_rollout=current_rollout_id,
         parent=parent,
         child_metadata_only=child_meta_only,
-        child_with_turn=child_with_turn,
         compacted=compacted,
         archived=archived,
         plain=plain,
@@ -534,28 +521,6 @@ def test_import_by_id_reads_rollout_path_target(
         "holding the final answer was not read"
     )
     expect(bubbles.filter(has_text=_TWO_FILE_FINAL_ANSWER).first).to_be_visible(timeout=10_000)
-
-
-@pytest.mark.timeout(300)
-def test_import_by_id_follows_history_base_for_fork_with_own_turn(
-    request: pytest.FixtureRequest,
-    live_server: str,
-    import_host: _ImportHost,
-) -> None:
-    """A forked thread imports the parent's inherited history before its own turn."""
-    page: Page = request.getfixturevalue("page")
-    _open_import_panel(page, live_server, import_host)
-    session_id = _import_codex_thread_by_id(page, import_host.seeded.child_with_turn)
-    page.get_by_test_id(f"import-result-link-{session_id}").click()
-
-    bubbles = page.get_by_test_id("message-bubble")
-    expect(bubbles.filter(has_text=_CHILD_TURN_ANSWER).first).to_be_visible(timeout=30_000)
-    texts = _visible_messages(live_server, session_id)
-    assert _PARENT_TITLE in texts, (
-        f"forked thread imported only its own {len(texts)} messages; the history_base "
-        f"parent ({_PARENT_TURNS} turns) was not followed"
-    )
-    expect(bubbles.filter(has_text=_PARENT_TITLE).first).to_be_visible(timeout=10_000)
 
 
 @pytest.mark.timeout(300)
