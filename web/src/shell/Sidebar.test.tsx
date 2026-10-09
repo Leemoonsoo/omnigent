@@ -44,6 +44,7 @@ const {
   conversationsRef,
   pinnedIdsRef,
   projectSessionsMock,
+  projectPaginationMock,
   useHostsMock,
 } = vi.hoisted(() => ({
   projectsMock: [] as string[],
@@ -71,6 +72,10 @@ const {
   // serves exactly those rows instead of deriving from the global list — used to
   // prove a folder fetches its members independently of the global window.
   projectSessionsMock: { current: {} as Record<string, unknown[]> },
+  // Per-project pagination override: lets a test report older server pages.
+  projectPaginationMock: {
+    current: {} as Record<string, { hasNextPage: boolean; fetchNextPage: () => Promise<void> }>,
+  },
   useHostsMock: vi.fn(),
 }));
 
@@ -128,8 +133,8 @@ vi.mock("@/hooks/useConversations", async () => {
         isLoading: false,
         isError: false,
         error: null,
-        fetchNextPage: vi.fn(),
-        hasNextPage: false,
+        fetchNextPage: projectPaginationMock.current[project]?.fetchNextPage ?? vi.fn(),
+        hasNextPage: projectPaginationMock.current[project]?.hasNextPage ?? false,
         isFetchingNextPage: false,
       };
     },
@@ -282,6 +287,7 @@ beforeEach(() => {
   fetchProjectSessionIdsMock.mockReset();
   fetchProjectSessionIdsMock.mockResolvedValue([]);
   projectSessionsMock.current = {};
+  projectPaginationMock.current = {};
   pinnedIdsRef.current = [];
   // Default to a multi-user server so the tab-based tests see the tabs.
   isServerLocalMock.mockReturnValue(false);
@@ -2137,6 +2143,150 @@ describe("Sidebar visibility filter (server-side mine/shared split)", () => {
 // "Sessions" list into a folder under the "Projects" group (rendered between
 // Pinned and Sessions). The project list comes from useProjects() (mocked here).
 describe("Sidebar project sections", () => {
+  const DAY_S = 24 * 60 * 60;
+  /** A session in `project` last updated `ageDays` ago. */
+  const projectConv = (
+    id: string,
+    project: string,
+    ageDays: number,
+    partial: Partial<Conversation> = {},
+  ) =>
+    conv(id, "Claude Code", {
+      labels: { omni_project: project },
+      updated_at: Math.floor(Date.now() / 1000 - ageDays * DAY_S),
+      ...partial,
+    });
+  const folderSection = (name: string) => within(screen.getByText(name).closest("section")!);
+
+  it("previews sessions from the last three days, padded to three, per project", () => {
+    projectsMock.push("Busy", "Quiet");
+    mockConversations([
+      // Five recent sessions all show, even past the three-session minimum.
+      ...[0, 0.5, 1, 2, 2.9].map((age, i) => projectConv(`Busy-recent-${i}`, "Busy", age)),
+      ...[4, 6, 9].map((age, i) => projectConv(`Busy-old-${i}`, "Busy", age)),
+      // One recent session is padded with the two newest older ones.
+      projectConv("Quiet-recent-0", "Quiet", 0.1),
+      ...[5, 6, 7, 8].map((age, i) => projectConv(`Quiet-old-${i}`, "Quiet", age)),
+    ]);
+    renderSidebar();
+    fireEvent.click(screen.getByRole("button", { name: "Busy" }));
+    fireEvent.click(screen.getByRole("button", { name: "Quiet" }));
+
+    const busy = folderSection("Busy");
+    for (let i = 0; i < 5; i++) expect(busy.getByText(`Busy-recent-${i}`)).toBeInTheDocument();
+    expect(busy.queryByText("Busy-old-0")).not.toBeInTheDocument();
+    const quiet = folderSection("Quiet");
+    expect(quiet.getByText("Quiet-recent-0")).toBeInTheDocument();
+    expect(quiet.getByText("Quiet-old-1")).toBeInTheDocument();
+    expect(quiet.queryByText("Quiet-old-2")).not.toBeInTheDocument();
+
+    // Show more expands only its own project; Show less restores the preview.
+    fireEvent.click(busy.getByRole("button", { name: "Show more" }));
+    expect(busy.getByText("Busy-old-2")).toBeInTheDocument();
+    expect(quiet.queryByText("Quiet-old-2")).not.toBeInTheDocument();
+    fireEvent.click(busy.getByRole("button", { name: "Show less" }));
+    expect(busy.queryByText("Busy-old-0")).not.toBeInTheDocument();
+    expect(busy.getByText("Busy-recent-4")).toBeInTheDocument();
+  });
+
+  it("omits Show more when every session is in the preview", () => {
+    projectsMock.push("Alpha");
+    mockConversations([
+      projectConv("Alpha-recent", "Alpha", 0.5),
+      ...[10, 20].map((age, i) => projectConv(`Alpha-old-${i}`, "Alpha", age)),
+    ]);
+    renderSidebar();
+    fireEvent.click(screen.getByRole("button", { name: "Alpha" }));
+
+    const alpha = folderSection("Alpha");
+    expect(alpha.getByText("Alpha-old-1")).toBeInTheDocument();
+    expect(alpha.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+  });
+
+  it("keeps paging while loaded sessions are recent and older pages wait for Show more", () => {
+    projectsMock.push("Recent", "Mixed");
+    mockConversations([
+      ...[0, 1, 2, 2.5].map((age, i) => projectConv(`Recent-${i}`, "Recent", age)),
+      ...[0, 1, 2, 5].map((age, i) => projectConv(`Mixed-${i}`, "Mixed", age)),
+    ]);
+    const recentNextPage = vi.fn().mockResolvedValue(undefined);
+    const mixedNextPage = vi.fn().mockResolvedValue(undefined);
+    projectPaginationMock.current = {
+      Recent: { hasNextPage: true, fetchNextPage: recentNextPage },
+      Mixed: { hasNextPage: true, fetchNextPage: mixedNextPage },
+    };
+    renderSidebar();
+    fireEvent.click(screen.getByRole("button", { name: "Recent" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mixed" }));
+
+    // The next page may hold more recent sessions, so the preview loads it.
+    const recent = folderSection("Recent");
+    expect(recent.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+    fireEvent.click(recent.getByRole("button", { name: "Load more" }));
+    expect(recentNextPage).toHaveBeenCalledTimes(1);
+
+    // An older loaded session means later pages are older still.
+    const mixed = folderSection("Mixed");
+    expect(mixed.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    fireEvent.click(mixed.getByRole("button", { name: "Show more" }));
+    expect(mixed.getByText("Mixed-3")).toBeInTheDocument();
+    fireEvent.click(mixed.getByRole("button", { name: "Load more" }));
+    expect(mixedNextPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps older sessions that are open, running, or awaiting approval in the preview", () => {
+    projectsMock.push("Alpha");
+    mockConversations([
+      ...[0, 1, 2].map((age, i) => projectConv(`Alpha-recent-${i}`, "Alpha", age)),
+      projectConv("Alpha-open", "Alpha", 10),
+      projectConv("Alpha-running", "Alpha", 11, { status: "running" }),
+      projectConv("Alpha-awaiting", "Alpha", 12, { pending_elicitations_count: 1 }),
+      projectConv("Alpha-idle", "Alpha", 13),
+    ]);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={["/c/Alpha-open"]}>
+              <Routes>
+                <Route path="/c/:conversationId" element={<Sidebar open onClose={vi.fn()} />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
+      </QueryClientProvider>,
+    );
+
+    // The open session auto-expands its folder.
+    const alpha = folderSection("Alpha");
+    expect(alpha.getByText("Alpha-open")).toBeInTheDocument();
+    expect(alpha.getByText("Alpha-running")).toBeInTheDocument();
+    expect(alpha.getByText("Alpha-awaiting")).toBeInTheDocument();
+    expect(alpha.queryByText("Alpha-idle")).not.toBeInTheDocument();
+  });
+
+  it("keeps selected older sessions actionable when showing less", () => {
+    projectsMock.push("Alpha");
+    mockConversations([projectConv("Alpha-0", "Alpha", 0)]);
+    // The folder's own pages hold older members the global window hasn't loaded.
+    projectSessionsMock.current.Alpha = Array.from({ length: 8 }, (_, i) =>
+      projectConv(`Alpha-${i}`, "Alpha", i * 2),
+    );
+    renderSidebar();
+    fireEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    const alpha = folderSection("Alpha");
+    fireEvent.click(alpha.getByRole("button", { name: "Show more" }));
+    openProjectsMenu();
+    fireEvent.click(screen.getByTestId("projects-select-sessions"));
+    fireEvent.click(alpha.getByRole("link", { name: "Alpha-7" }));
+    fireEvent.click(alpha.getByRole("button", { name: "Show less" }));
+
+    expect(alpha.getByRole("link", { name: "Alpha-7" })).toBeInTheDocument();
+    expect(alpha.queryByText("Alpha-6")).not.toBeInTheDocument();
+    expect(screen.getByTestId("bulk-archive")).toBeEnabled();
+  });
+
   it("groups sessions by their project label, separate from Sessions", () => {
     projectsMock.push("Customer X");
     mockConversations([
