@@ -99,6 +99,9 @@ class ImportSessionRequest(BaseModel):
     # the transcript came from and resumes there. Bound only alongside a
     # workspace (the workspace-required-for-host check constraint).
     host_id: str | None = None
+    # The harness had archived this session (e.g. ``codex archive``); the
+    # imported conversation is archived too instead of landing in the sidebar.
+    archived: bool = False
     items: list[ImportItemInput] = Field(min_length=1, max_length=_MAX_IMPORT_ITEMS)
 
     @field_validator("external_session_id")
@@ -258,9 +261,10 @@ async def _stream_local_sessions_from_host(
 
     Sends a recent or exact import frame and drains the per-request queue the
     tunnel fills: each ``host.import_local_session`` frame yields one session
-    dict (``{total, external_session_id, workspace, items, title, source}``); the
-    terminal ``host.import_local_done`` ends the stream. The caller persists each
-    session as it arrives, so a large batch never buffers in one frame.
+    dict (``{total, external_session_id, workspace, items, title, source,
+    archived}``); the terminal ``host.import_local_done`` ends the stream. The
+    caller persists each session as it arrives, so a large batch never buffers
+    in one frame.
 
     :raises OmnigentError: If the host connection drops, a frame times out, or
         the host reports a read failure.
@@ -351,6 +355,7 @@ def create_imports_router(
         native_title: str | None = None,
         project_id: str | None = None,
         host_id: str | None = None,
+        archived: bool = False,
     ) -> tuple[str, str | None]:
         """Create the conversation, append items, stamp import labels, grant owner.
 
@@ -362,8 +367,10 @@ def create_imports_router(
         session to the host that read the transcript (``/imports/local``), so
         resuming defaults to the machine the workspace lives on; bound only
         alongside a workspace (the ``ck_conversations_workspace_required_for_host``
-        check constraint). Caller handles the already-imported / force decision
-        first. Returns ``(conversation id, title)``.
+        check constraint). ``archived`` files the session under Archived
+        sessions when the harness had archived it. Caller handles the
+        already-imported / force decision first. Returns ``(conversation id,
+        title)``.
         """
         native_agent = native_coding_agent_for_harness(f"{source}-native")
         if native_agent is None:
@@ -429,6 +436,12 @@ def create_imports_router(
                 IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY: external_session_id,
             }
             await asyncio.to_thread(conversation_store.set_labels, conversation.id, labels)
+            if archived:
+                await asyncio.to_thread(
+                    conversation_store.update_conversation_with_changes,
+                    conversation.id,
+                    archived=True,
+                )
             if permission_store is not None and user_id is not None:
                 await asyncio.to_thread(permission_store.ensure_user, user_id)
                 await asyncio.to_thread(
@@ -490,6 +503,7 @@ def create_imports_router(
             native_title=body.title,
             project_id=body.project_id,
             host_id=body.host_id,
+            archived=body.archived,
         )
 
         response.status_code = 201
@@ -620,6 +634,7 @@ def create_imports_router(
                     user_id=user_id,
                     native_title=native_title if isinstance(native_title, str) else None,
                     host_id=body.host_id,
+                    archived=session.get("archived") is True,
                 )
             except OmnigentError as exc:
                 # A create that lost the dedup race collides on the deterministic

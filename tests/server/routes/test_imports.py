@@ -1026,3 +1026,117 @@ async def test_import_local_offline_host_is_conflict(db_uri: str) -> None:
         )
     assert res.status_code == 409
     assert res.json()["error"]["code"] == ErrorCode.CONFLICT
+
+
+async def test_local_import_archives_sessions_the_harness_had_archived(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host session flagged ``archived`` lands archived; one without the flag stays active."""
+    from fastapi import FastAPI
+
+    from omnigent.server.routes import imports as imports_module
+    from omnigent.stores.conversation_store import ARCHIVED_AT_LABEL_KEY
+
+    _seed_claude_agent(db_uri)
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+
+    def _session(external_session_id: str, title: str, **extra: object) -> dict[str, object]:
+        return {
+            "external_session_id": external_session_id,
+            "workspace": "/repo/on/host",
+            "items": [
+                {
+                    "type": "message",
+                    "response_id": "claude:turn-1",
+                    "data": {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "inspect TODO.md"}],
+                    },
+                }
+            ],
+            "title": title,
+            "source": "claude",
+            **extra,
+        }
+
+    async def _fake_stream(**_kwargs: object):
+        yield _session("claude-archived", "Archived thread", archived=True)
+        yield _session("claude-active", "Active thread")
+
+    monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
+
+    host_conn = SimpleNamespace(
+        host_id="host_0123456789abcdef0123456789abcdef", pending_import_local={}
+    )
+    host_registry = SimpleNamespace(get=lambda host_id: host_conn)
+    host_store = SimpleNamespace(get_host=lambda host_id: SimpleNamespace(user_id=None))
+
+    app = FastAPI()
+    app.include_router(
+        imports_module.create_imports_router(
+            conversation_store,
+            SqlAlchemyAgentStore(db_uri),
+            host_registry=host_registry,  # type: ignore[arg-type]
+            host_store=host_store,  # type: ignore[arg-type]
+        ),
+        prefix="/v1",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.post(
+            "/v1/imports/local",
+            json={
+                "host_id": "host_0123456789abcdef0123456789abcdef",
+                "source": "claude",
+                "limit": 5,
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["imported"] == 2
+    by_title = {ref["title"]: ref["session_id"] for ref in body["sessions"]}
+
+    archived = conversation_store.get_conversation(by_title["Archived thread"])
+    assert archived is not None
+    assert archived.archived is True
+    assert ARCHIVED_AT_LABEL_KEY in archived.labels
+
+    active = conversation_store.get_conversation(by_title["Active thread"])
+    assert active is not None
+    assert active.archived is False
+    assert ARCHIVED_AT_LABEL_KEY not in active.labels
+
+
+async def test_import_session_archives_when_requested(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """The CLI's ``archived`` flag files the imported session under Archived sessions."""
+    _seed_claude_agent(db_uri)
+    payload = {
+        "source": "claude",
+        "external_session_id": "claude-archived-1",
+        "archived": True,
+        "items": [
+            {
+                "type": "message",
+                "response_id": "claude:turn-1",
+                "data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "inspect TODO.md"}],
+                },
+            }
+        ],
+    }
+
+    created = await client.post("/v1/imports", json=payload)
+
+    assert created.status_code == 201
+    conversation = SqlAlchemyConversationStore(db_uri).get_conversation(
+        created.json()["session_id"]
+    )
+    assert conversation is not None
+    assert conversation.archived is True

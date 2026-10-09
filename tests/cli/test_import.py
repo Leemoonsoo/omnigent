@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+import pytest
 import respx
 from click.testing import CliRunner
 
@@ -15,6 +16,13 @@ from omnigent.cli import _CLICK_SUBCOMMANDS, cli
 from omnigent.session_import.models import SessionImportNotFoundError
 
 _BASE = "http://localhost:6767"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_harness_homes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI reads harness history under $HOME; ambient overrides must not redirect it."""
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "QWEN_HOME", "PI_CODING_AGENT_DIR"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _write_claude_transcript(
@@ -76,6 +84,7 @@ def test_import_command_loads_local_session_and_posts_normalized_items(tmp_path:
         "external_session_id": session_id,
         "workspace": "/repo",
         "title": None,
+        "archived": False,
         "force": False,
         "items": [
             {
