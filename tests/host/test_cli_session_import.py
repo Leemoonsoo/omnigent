@@ -24,9 +24,12 @@ def _patch_server(base_url: str = _BASE) -> Any:
     return patch("omnigent.cli._resolve_attach_server", return_value=base_url)
 
 
-def _import_labels(source: str) -> dict[str, str]:
-    """Labels an import of *source* carries: offline routing plus history rebuild."""
-    return {IMPORT_SOURCE_LABEL_KEY: source, FORK_CARRY_HISTORY_LABEL_KEY: "1"}
+def _import_labels(source: str, *, carry_history: bool = True) -> dict[str, str]:
+    """Labels an import of *source* carries: offline routing, plus history carry."""
+    labels = {IMPORT_SOURCE_LABEL_KEY: source}
+    if carry_history:
+        labels[FORK_CARRY_HISTORY_LABEL_KEY] = "1"
+    return labels
 
 
 def _write_export(path: Path, *, meta: dict[str, Any], items: list[dict[str, Any]]) -> None:
@@ -227,14 +230,22 @@ _USER_ITEM = {
 
 
 @pytest.mark.parametrize(
-    ("harness", "source"),
-    [("codex-native", "codex"), ("claude-native", "claude"), ("native-pi", "pi")],
+    ("harness", "source", "carry_history"),
+    [
+        ("codex-native", "codex", True),
+        ("claude-native", "claude", True),
+        ("native-pi", "pi", True),
+        ("qwen-native", "qwen", True),
+        ("opencode-native", "opencode", True),
+        ("kimi-native", "kimi", False),
+        ("kiro-native", "kiro", False),
+    ],
 )
 @respx.mock
 def test_session_import_labels_native_transcript_as_import(
-    tmp_path: Path, harness: str, source: str
+    tmp_path: Path, harness: str, source: str, carry_history: bool
 ) -> None:
-    """A native-harness export is created with the import and carry-history labels."""
+    """A native export is labeled as an import; carry-history only where forks carry it."""
     src = tmp_path / "s.jsonl"
     _write_export(
         src,
@@ -250,7 +261,7 @@ def test_session_import_labels_native_transcript_as_import(
 
     assert result.exit_code == 0, result.output
     body = json.loads(route.calls.last.request.content)
-    assert body["labels"] == _import_labels(source)
+    assert body["labels"] == _import_labels(source, carry_history=carry_history)
 
 
 @pytest.mark.parametrize("harness", ["claude-sdk", "cursor-native"])

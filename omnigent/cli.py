@@ -7137,9 +7137,9 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
 
     A session from a native harness with an import source is labeled as an
     import, so the unbound copy reads offline and the web UI offers to
-    reconnect it (a host picker for Claude, Codex, Pi, and OpenCode). Those
-    four harnesses rebuild their native transcript from the copied items on
-    first launch, so the resumed agent keeps the conversation.
+    reconnect it (a host picker for Claude, Codex, Pi, and OpenCode). Harnesses
+    that carry fork history (Claude, Codex, Pi, Qwen, and OpenCode) also keep
+    the conversation on first launch; Kimi and Kiro start fresh.
 
     \b
     Examples:
@@ -7151,6 +7151,8 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
 
     from omnigent.chat import _remote_headers
     from omnigent.db.utils import builtin_agent_id
+    from omnigent.harness_capabilities import ForkHistory
+    from omnigent.harness_plugins import harness_capabilities
     from omnigent.native.native_coding_agents import native_coding_agent_for_harness
     from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY, ImportSource
     from omnigent.stores.conversation_store import FORK_CARRY_HISTORY_LABEL_KEY
@@ -7205,12 +7207,14 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
     if native_agent is not None:
         fallback_agent_id = builtin_agent_id(native_agent.agent_name)
     # The source label makes the unbound copy read offline so the web UI offers
-    # to reconnect it; carry-history makes its first native launch rebuild the
-    # transcript from the copied items instead of starting a fresh session.
+    # to reconnect it; carry-history, for harnesses that can carry fork history,
+    # makes the first native launch reuse the copied items instead of starting fresh.
     labels: dict[str, str] = {}
     if native_agent is not None and native_agent.key in get_args(ImportSource):
         labels[IMPORT_SOURCE_LABEL_KEY] = native_agent.key
-        labels[FORK_CARRY_HISTORY_LABEL_KEY] = "1"
+        caps = harness_capabilities().get(native_agent.harness)
+        if caps is not None and caps.fork_history is not ForkHistory.NONE:
+            labels[FORK_CARRY_HISTORY_LABEL_KEY] = "1"
 
     cfg = _load_effective_config()
     base_url = _resolve_attach_server(server, cfg.get("server"))
