@@ -7135,8 +7135,9 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
     item authorship is re-attributed to the importing user (original
     ``created_by`` is not carried over).
 
-    A native-harness session is labeled as an import, so the web UI offers to
-    resume it on a chosen host.
+    A session from a native harness with an import source is labeled as an
+    import, so the unbound copy reads offline and the web UI offers to
+    reconnect it (a host picker for Claude, Codex, Pi, and OpenCode).
 
     \b
     Examples:
@@ -7201,7 +7202,7 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
     if native_agent is not None:
         fallback_agent_id = builtin_agent_id(native_agent.agent_name)
     # Without this label the server reports the unbound copy as reachable, so
-    # the web UI never offers a host to resume it on.
+    # the web UI never offers to reconnect it.
     labels: dict[str, str] = {}
     if native_agent is not None and native_agent.key in get_args(ImportSource):
         labels[IMPORT_SOURCE_LABEL_KEY] = native_agent.key

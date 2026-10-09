@@ -223,12 +223,7 @@ _USER_ITEM = {
 def test_session_import_labels_native_transcript_as_import(
     tmp_path: Path, harness: str, source: str
 ) -> None:
-    """A native-harness export is created with the import-source label.
-
-    The server reports an unbound session as offline only when this label is
-    present; without it the web UI shows "no host binding" and never offers a
-    host to resume on.
-    """
+    """A native-harness export is created with the import-source label."""
     src = tmp_path / "s.jsonl"
     _write_export(
         src,
