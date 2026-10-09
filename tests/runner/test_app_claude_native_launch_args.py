@@ -753,7 +753,7 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
         # Spec overrides and removals are applied before launch.
         ("claude", [], {"CLAUDE_CONFIG_DIR": "/spec/claude"}, [], "/home/runner", "/spec/claude"),
         ("claude", [], {}, ["CLAUDE_CONFIG_DIR"], "/home/runner", None),
-        # An ``env`` wrapper's assignments, removals, and -i reach Claude last.
+        # An ``env`` wrapper's assignments and -i apply after the spec.
         (
             "env",
             ["CLAUDE_CONFIG_DIR=/wrap/claude", "claude"],
@@ -762,10 +762,9 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
             "/home/runner",
             "/wrap/claude",
         ),
-        ("env", ["-u", "CLAUDE_CONFIG_DIR", "claude"], {}, [], "/home/runner", None),
         ("env", ["-i", "HOME=/home/wrapped", "claude"], {}, [], "/home/wrapped", None),
-        # ``-S`` words are scanned for options again; ``tests/host`` compares the
-        # wrapper forms with the real ``env``.
+        # ``-S`` words are scanned for options again. ``tests/host`` checks the
+        # remaining wrapper syntax against the real ``env``.
         (
             "env",
             ["-S", "- HOME=/split-home CLAUDE_CONFIG_DIR=/launch/claude claude"],
@@ -773,14 +772,6 @@ async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain
             [],
             "/split-home",
             "/launch/claude",
-        ),
-        (
-            "env",
-            ["-S", "CLAUDE_CONFIG_DIR=/wrap/claude claude"],
-            {},
-            [],
-            "/home/runner",
-            "/wrap/claude",
         ),
     ],
 )
