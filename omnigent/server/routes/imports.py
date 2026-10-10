@@ -336,17 +336,16 @@ def _anchor_compactions(items: list[NewConversationItem]) -> list[NewConversatio
     """Mint item ids and point each compaction's ``last_item_id`` at the item before it.
 
     Imported compactions predate any stored id, so without this a history loader
-    finds no anchor and falls back to loading the whole transcript.
+    finds no anchor. A leading compaction covers nothing stored, so it names itself.
     """
     anchored: list[NewConversationItem] = []
     for item in items:
-        update: dict[str, object] = {}
-        if item.stable_id is None:
-            update["stable_id"] = generate_item_id(item.type)
-        if isinstance(item.data, CompactionData) and anchored:
-            previous_id = anchored[-1].stable_id
-            update["data"] = item.data.model_copy(update={"last_item_id": previous_id})
-        anchored.append(item.model_copy(update=update) if update else item)
+        item_id = item.stable_id or generate_item_id(item.type)
+        update: dict[str, object] = {"stable_id": item_id}
+        if isinstance(item.data, CompactionData):
+            boundary_id = anchored[-1].stable_id if anchored else item_id
+            update["data"] = item.data.model_copy(update={"last_item_id": boundary_id})
+        anchored.append(item.model_copy(update=update))
     return anchored
 
 

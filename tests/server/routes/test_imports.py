@@ -1142,11 +1142,16 @@ async def test_import_session_archives_when_requested(
     assert conversation.archived is True
 
 
+@pytest.mark.parametrize("leading", [False, True], ids=["after-a-turn", "leading"])
 async def test_import_anchors_compactions_to_the_item_before_them(
     client: httpx.AsyncClient,
     db_uri: str,
+    leading: bool,
 ) -> None:
-    """An imported compaction's cursor names a stored item, so history loads from it."""
+    """An imported compaction's cursor names a stored item, so history loads from it.
+
+    A compaction imported first names itself, since nothing is stored before it.
+    """
     from omnigent.runtime.workflow import _load_initial_history
 
     _seed_claude_agent(db_uri)
@@ -1160,10 +1165,13 @@ async def test_import_anchors_compactions_to_the_item_before_them(
 
     payload = {
         "source": "claude",
-        "external_session_id": "claude-compacted-1",
+        "external_session_id": f"claude-compacted-{int(leading)}",
         "items": [
-            message("user", "before compaction"),
-            message("assistant", "answer before compaction"),
+            *(
+                []
+                if leading
+                else [message("user", "before compaction"), message("assistant", "answer")]
+            ),
             {
                 "type": "compaction",
                 "response_id": "claude:compaction",
@@ -1191,8 +1199,11 @@ async def test_import_anchors_compactions_to_the_item_before_them(
     store = SqlAlchemyConversationStore(db_uri)
     session_id = created.json()["session_id"]
     stored = store.list_items(session_id, limit=10, order="asc").data
-    assert stored[2].type == "compaction"
-    assert stored[2].data.last_item_id == stored[1].id
+    compaction_index = 0 if leading else 2
+    compaction = stored[compaction_index]
+    assert compaction.type == "compaction"
+    expected_boundary = compaction if leading else stored[compaction_index - 1]
+    assert compaction.data.last_item_id == expected_boundary.id
     loaded = _load_initial_history(store, session_id)
     assert loaded.last_compaction_created_at is not None
-    assert [item.id for item in loaded.items[-2:]] == [stored[3].id, stored[4].id]
+    assert [item.id for item in loaded.items[-2:]] == [item.id for item in stored[-2:]]
