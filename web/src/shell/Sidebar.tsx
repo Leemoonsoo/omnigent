@@ -1442,6 +1442,8 @@ function ProjectFolder({
   }, [query.data, windowConversations, pinnedSet, activeOverride, frozenSortKeys]);
   const [showAllSessions, setShowAllSessions] = useState(false);
   const preview = useMemo(() => {
+    // The cutoff is re-read when these rows or the selection change; an idle
+    // preview isn't re-filtered on a timer.
     const cutoff = Date.now() / 1000 - PROJECT_PREVIEW_RECENT_WINDOW_S;
     // Older rows stay in the preview while open, selected, running, or
     // awaiting approval, so hiding them never strands an action.
@@ -1451,14 +1453,17 @@ function ProjectFolder({
       const state = getSessionState(c);
       return state?.kind === "running" || state?.kind === "awaiting";
     });
-    // Keep paging while every loaded row is still recent, so a busy project's
-    // recent sessions aren't cut off at the first page.
+    // Keep paging until the folder has its minimum rows (pages also carry
+    // pinned sessions it hides) and while every loaded row is still recent.
     const oldestLoaded = watchedRows.at(-1);
-    return { rows, pagesRecent: oldestLoaded !== undefined && oldestLoaded.updated_at >= cutoff };
+    const keepPaging =
+      conversations.length < PROJECT_PREVIEW_MIN_SESSIONS ||
+      (oldestLoaded !== undefined && oldestLoaded.updated_at >= cutoff);
+    return { rows, keepPaging };
   }, [conversations, watchedRows, activeConversationId, selectionMode, selectedIds]);
   const visibleConversations = showAllSessions ? conversations : preview.rows;
   const hasHiddenSessions = preview.rows.length < conversations.length;
-  const previewPaginates = query.hasNextPage && preview.pagesRecent;
+  const previewPaginates = query.hasNextPage && preview.keepPaging;
   const errors = useSessionErrorStates(conversations);
   const startingConversationId = useChatStore((s) =>
     s.status === "streaming" || s.terminalPending ? s.conversationId : null,
@@ -2225,7 +2230,7 @@ function ConversationList({
     expandProject(activeProjectName);
   }, [activeId, activeProjectName, pinnedSet, expandProject]);
 
-  // Visible rows in render order (collapsed sections excluded) for the Cmd+↑/↓
+  // Visible rows in render order (collapsed sections excluded) for the Cmd/Ctrl+[ / ]
   // session hotkey. Titles must match the <ConversationSection> props below.
   const orderedConversationIds = useMemo(() => {
     const visible = (title: string, list: readonly Conversation[]) =>

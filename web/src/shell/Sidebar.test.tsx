@@ -13,7 +13,7 @@ import { sidebarConfig, type SidebarConfig } from "@/lib/sidebarConfig";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useEffect } from "react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { ALT_KEY, ARIA_MOD_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
@@ -44,7 +44,7 @@ const {
   conversationsRef,
   pinnedIdsRef,
   projectSessionsMock,
-  projectPaginationMock,
+  projectPagesMock,
   useHostsMock,
 } = vi.hoisted(() => ({
   projectsMock: [] as string[],
@@ -72,10 +72,9 @@ const {
   // serves exactly those rows instead of deriving from the global list — used to
   // prove a folder fetches its members independently of the global window.
   projectSessionsMock: { current: {} as Record<string, unknown[]> },
-  // Per-project pagination override: lets a test report older server pages.
-  projectPaginationMock: {
-    current: {} as Record<string, { hasNextPage: boolean; fetchNextPage: () => Promise<void> }>,
-  },
+  // Per-project server pages: the folder starts with the first and each
+  // fetchNextPage appends the next, like the real cursor-paginated query.
+  projectPagesMock: { current: {} as Record<string, unknown[][]> },
   useHostsMock: vi.fn(),
 }));
 
@@ -91,6 +90,7 @@ vi.mock("@/hooks/useHosts", () => ({
 // is the data source under test, so it's a controllable mock.
 vi.mock("@/hooks/useConversations", async () => {
   const { conversationHooksMock } = await import("@/test/sidebarMockHelpers");
+  const { useState } = await import("react");
   return {
     ...conversationHooksMock(),
     usePinnedConversations: () => {
@@ -116,25 +116,33 @@ vi.mock("@/hooks/useConversations", async () => {
         projectRowsRef.current ?? projectsMock.map((name: string) => ({ id: `p_${name}`, name })),
     }),
     useProjectSessions: (project: string, enabled: boolean) => {
+      const [loadedPages, setLoadedPages] = useState(1);
+      const serverPages = projectPagesMock.current[project];
       const override = projectSessionsMock.current[project];
-      const rows = !enabled
-        ? []
-        : (override ??
+      const pages = serverPages?.slice(0, loadedPages) ?? [
+        override ??
           conversationsRef.current.filter(
             (c) => (c.labels?.omni_project ?? null) === project && c.archived !== true,
-          ));
+          ),
+      ];
+      const hasNextPage = serverPages !== undefined && loadedPages < serverPages.length;
       return {
         data: enabled
           ? {
-              pages: [{ data: rows, first_id: null, last_id: null, has_more: false }],
-              pageParams: [undefined],
+              pages: pages.map((data, index) => ({
+                data,
+                first_id: null,
+                last_id: null,
+                has_more: index < pages.length - 1 || hasNextPage,
+              })),
+              pageParams: pages.map(() => undefined),
             }
           : undefined,
         isLoading: false,
         isError: false,
         error: null,
-        fetchNextPage: projectPaginationMock.current[project]?.fetchNextPage ?? vi.fn(),
-        hasNextPage: projectPaginationMock.current[project]?.hasNextPage ?? false,
+        fetchNextPage: async () => setLoadedPages((count) => count + 1),
+        hasNextPage: enabled && hasNextPage,
         isFetchingNextPage: false,
       };
     },
@@ -287,7 +295,7 @@ beforeEach(() => {
   fetchProjectSessionIdsMock.mockReset();
   fetchProjectSessionIdsMock.mockResolvedValue([]);
   projectSessionsMock.current = {};
-  projectPaginationMock.current = {};
+  projectPagesMock.current = {};
   pinnedIdsRef.current = [];
   // Default to a multi-user server so the tab-based tests see the tabs.
   isServerLocalMock.mockReturnValue(false);
@@ -2203,35 +2211,93 @@ describe("Sidebar project sections", () => {
     expect(alpha.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
   });
 
-  it("keeps paging while loaded sessions are recent and older pages wait for Show more", () => {
-    projectsMock.push("Recent", "Mixed");
-    mockConversations([
-      ...[0, 1, 2, 2.5].map((age, i) => projectConv(`Recent-${i}`, "Recent", age)),
-      ...[0, 1, 2, 5].map((age, i) => projectConv(`Mixed-${i}`, "Mixed", age)),
-    ]);
-    const recentNextPage = vi.fn().mockResolvedValue(undefined);
-    const mixedNextPage = vi.fn().mockResolvedValue(undefined);
-    projectPaginationMock.current = {
-      Recent: { hasNextPage: true, fetchNextPage: recentNextPage },
-      Mixed: { hasNextPage: true, fetchNextPage: mixedNextPage },
-    };
+  it("pages the preview through recent sessions and leaves older pages to Show more", async () => {
+    projectsMock.push("Alpha");
+    mockConversations([]);
+    projectPagesMock.current.Alpha = [
+      [0, 0.5, 1].map((age, i) => projectConv(`Alpha-p1-${i}`, "Alpha", age)),
+      [1.5, 2, 5].map((age, i) => projectConv(`Alpha-p2-${i}`, "Alpha", age)),
+      [6, 7].map((age, i) => projectConv(`Alpha-p3-${i}`, "Alpha", age)),
+    ];
     renderSidebar();
-    fireEvent.click(screen.getByRole("button", { name: "Recent" }));
-    fireEvent.click(screen.getByRole("button", { name: "Mixed" }));
+    fireEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    const alpha = folderSection("Alpha");
 
-    // The next page may hold more recent sessions, so the preview loads it.
-    const recent = folderSection("Recent");
-    expect(recent.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
-    fireEvent.click(recent.getByRole("button", { name: "Load more" }));
-    expect(recentNextPage).toHaveBeenCalledTimes(1);
+    // Every loaded session is recent, so the next page may hold more of them.
+    expect(alpha.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+    await act(async () => fireEvent.click(alpha.getByRole("button", { name: "Load more" })));
+    expect(alpha.getByText("Alpha-p2-1")).toBeInTheDocument();
+    expect(alpha.queryByText("Alpha-p2-2")).not.toBeInTheDocument();
 
-    // An older loaded session means later pages are older still.
-    const mixed = folderSection("Mixed");
-    expect(mixed.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
-    fireEvent.click(mixed.getByRole("button", { name: "Show more" }));
-    expect(mixed.getByText("Mixed-3")).toBeInTheDocument();
-    fireEvent.click(mixed.getByRole("button", { name: "Load more" }));
-    expect(mixedNextPage).toHaveBeenCalledTimes(1);
+    // An older session arrived, so later pages wait for Show more.
+    expect(alpha.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    fireEvent.click(alpha.getByRole("button", { name: "Show more" }));
+    expect(alpha.getByText("Alpha-p2-2")).toBeInTheDocument();
+    await act(async () => fireEvent.click(alpha.getByRole("button", { name: "Load more" })));
+    expect(alpha.getByText("Alpha-p3-1")).toBeInTheDocument();
+  });
+
+  it("keeps paging until the preview has three unpinned sessions", async () => {
+    projectsMock.push("Alpha");
+    const pinned = [5, 6, 7].map((age, i) => projectConv(`Alpha-pinned-${i}`, "Alpha", age));
+    mockConversations(pinned);
+    seedPins(pinned.map((c) => c.id));
+    // An old first page made mostly of pinned sessions, which the folder hides.
+    projectPagesMock.current.Alpha = [
+      [...pinned, projectConv("Alpha-old-0", "Alpha", 8)],
+      [9, 10].map((age, i) => projectConv(`Alpha-old-${i + 1}`, "Alpha", age)),
+      [projectConv("Alpha-old-3", "Alpha", 11)],
+    ];
+    renderSidebar();
+    fireEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    const alpha = folderSection("Alpha");
+
+    expect(alpha.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+    await act(async () => fireEvent.click(alpha.getByRole("button", { name: "Load more" })));
+    expect(alpha.getByText("Alpha-old-2")).toBeInTheDocument();
+    expect(alpha.queryByText("Alpha-pinned-0")).not.toBeInTheDocument();
+    // With three rows shown, the older third page waits for Show more.
+    expect(alpha.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    expect(alpha.getByRole("button", { name: "Show more" })).toBeInTheDocument();
+  });
+
+  it("steps the session hotkey past sessions hidden by the preview", async () => {
+    projectsMock.push("Alpha");
+    mockConversations([
+      ...[10, 11, 12, 13].map((age, i) => projectConv(`Alpha-${i}`, "Alpha", age)),
+      conv("conv_flat", "Claude Code", { updated_at: 1 }),
+    ]);
+    function LocationProbe() {
+      return <span data-testid="location">{useLocation().pathname}</span>;
+    }
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={["/c/Alpha-2"]}>
+              <Routes>
+                <Route
+                  path="/c/:conversationId"
+                  element={
+                    <>
+                      <Sidebar open onClose={vi.fn()} />
+                      <LocationProbe />
+                    </>
+                  }
+                />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
+      </QueryClientProvider>,
+    );
+    // Alpha-2 is the last row of the open folder's preview; Alpha-3 is hidden.
+    const alpha = folderSection("Alpha");
+    expect(alpha.queryByText("Alpha-3")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(document.body, { code: "BracketRight", ctrlKey: true });
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/c/conv_flat"));
   });
 
   it("keeps older sessions that are open, running, or awaiting approval in the preview", () => {
