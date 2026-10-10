@@ -4,13 +4,12 @@
 
 import type { ChildSessionInfo } from "@/hooks/useChildSessions";
 import {
+  ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER,
   CLAUDE_NATIVE_SUBAGENT_WRAPPER,
   CODEX_NATIVE_SUBAGENT_WRAPPER,
+  OPENCODE_NATIVE_SUBAGENT_WRAPPER,
   WRAPPER_LABEL_KEY,
 } from "@/lib/nativeCodingAgents";
-
-const OPENCODE_NATIVE_SUBAGENT_WRAPPER = "opencode-native-ui-subagent";
-export const ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER = "antigravity-native-ui-subagent";
 
 /**
  * Pick the primary label for a child-session row.
