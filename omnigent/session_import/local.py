@@ -236,12 +236,15 @@ def _codex_rollout_meta(path: Path) -> dict[str, object] | None:
 
 
 def _codex_thread_id_from_rollout(path: Path, meta: dict[str, object] | None) -> str | None:
-    """Thread id of a rollout; ``session_meta.id`` wins because the filename uuid can be stale."""
-    recorded = meta.get("id") if meta else None
-    if isinstance(recorded, str) and _is_codex_thread_id(recorded):
-        return recorded
+    """Thread id of a rollout: its filename's, as Codex and the loader resolve it.
+
+    ``session_meta.id`` is used only when the filename does not parse.
+    """
     ids = _codex_rollout_ids(path)
-    return ids[0] if ids is not None else None
+    if ids is not None:
+        return ids[0]
+    recorded = meta.get("id") if meta else None
+    return recorded if isinstance(recorded, str) and _is_codex_thread_id(recorded) else None
 
 
 def _codex_source_is_interactive(source: object) -> bool:

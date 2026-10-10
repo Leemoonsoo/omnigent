@@ -1976,30 +1976,61 @@ def test_list_recent_codex_sessions_includes_archived_and_deduplicates(
     assert recent == (first_id, second_id)
 
 
-def test_list_recent_codex_sessions_identifies_threads_by_session_meta(
+def test_list_recent_codex_sessions_lists_a_reverted_thread_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A thread's current rollout counts for the thread even if its filename names another uuid."""
+    """A reverted thread's ``<thread>_<rollout>`` file lists under the thread id, and loads.
+
+    Without a thread-store row the loader picks the newest file for that thread id, as Codex does.
+    """
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     other_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
+    rollout_id = "01a11f4f-af66-74e3-92a6-6e9c14bf68a2"
     sessions = tmp_path / "sessions" / "2026" / "10" / "02"
     stale = sessions / f"rollout-2026-10-02T09-00-00-{thread_id}.jsonl"
     other = sessions / f"rollout-2026-10-02T09-10-00-{other_id}.jsonl"
-    current = sessions / "rollout-2026-10-02T09-30-00-01a11f4f-af66-74e3-92a6-6e9c14bf68a2.jsonl"
-    for path, session_id, modified_at in (
-        (stale, thread_id, 1),
-        (other, other_id, 2),
-        (current, thread_id, 3),
+    current = sessions / f"rollout-2026-10-02T09-30-00-{thread_id}_{rollout_id}.jsonl"
+    for path, session_id, answer, modified_at in (
+        (stale, thread_id, "stale answer", 1),
+        (other, other_id, "other answer", 2),
+        (current, thread_id, "current answer", 3),
     ):
-        _write_codex_turns(path, session_id, [("question", "answer")])
+        _write_codex_turns(path, session_id, [("question", answer)])
         os.utime(path, (modified_at, modified_at))
 
     recent = list_recent_local_session_ids("codex", limit=10)
 
-    # The current file's own uuid never surfaces as a separate session.
+    # The current file's rollout id never surfaces as a separate session.
     assert recent == (thread_id, other_id)
+    assert _codex_item_texts(load_codex_session(thread_id, codex_home=tmp_path)) == [
+        "question",
+        "current answer",
+    ]
+
+
+def test_list_recent_codex_sessions_uses_the_id_the_loader_resolves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollout whose filename uuid differs from ``session_meta.id`` lists under the former."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    filename_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T09-00-00-{filename_id}.jsonl",
+        "019f680e-3edc-7fa3-9d50-1c4be395fa27",
+        [("question", "answer")],
+    )
+
+    recent = list_recent_local_session_ids("codex", limit=10)
+
+    assert recent == (filename_id,)
+    assert _codex_item_texts(load_codex_session(filename_id, codex_home=tmp_path)) == [
+        "question",
+        "answer",
+    ]
 
 
 def test_load_qwen_session_normalizes_recorded_messages(tmp_path: Path) -> None:
