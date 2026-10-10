@@ -2261,6 +2261,25 @@ describe("Sidebar project sections", () => {
     expect(alpha.getByRole("button", { name: "Show more" })).toBeInTheDocument();
   });
 
+  it("keeps Show less available while the full list waits for its next page", () => {
+    projectsMock.push("Alpha");
+    mockConversations([]);
+    projectPagesMock.current.Alpha = [
+      [5, 6, 7].map((age, i) => projectConv(`Alpha-${i}`, "Alpha", age)),
+      [projectConv("Alpha-3", "Alpha", 8)],
+    ];
+    renderSidebar();
+    fireEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    const alpha = folderSection("Alpha");
+
+    // Every loaded row is in the preview, but an older page exists.
+    fireEvent.click(alpha.getByRole("button", { name: "Show more" }));
+    expect(alpha.getByRole("button", { name: "Load more" })).toBeInTheDocument();
+    fireEvent.click(alpha.getByRole("button", { name: "Show less" }));
+    expect(alpha.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    expect(alpha.getByRole("button", { name: "Show more" })).toBeInTheDocument();
+  });
+
   it("steps the session hotkey past sessions hidden by the preview", async () => {
     projectsMock.push("Alpha");
     mockConversations([

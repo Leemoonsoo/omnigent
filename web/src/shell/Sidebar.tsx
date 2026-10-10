@@ -1621,8 +1621,9 @@ function ProjectFolder({
                   indent
                 />
               )}
-              {(hasHiddenSessions ||
-                (!showAllSessions && query.hasNextPage && !previewPaginates)) && (
+              {(showAllSessions ||
+                hasHiddenSessions ||
+                (query.hasNextPage && !previewPaginates)) && (
                 // Indented like the rows so the label lines up with their titles.
                 <div className="pl-6">
                   <button
