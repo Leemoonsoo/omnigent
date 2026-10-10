@@ -4164,6 +4164,71 @@ async def test_side_chat_retry_relaunches_exited_source_runner(
     ]
 
 
+async def test_side_chat_message_source_refusal_persists_error_turn(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused source relaunch consumes the side chat's message with the reason.
+
+    The refusal comes from the source's host, but the side chat is the session
+    being messaged: its transcript must carry the same actionable error item
+    the source's own send produces, instead of the generic unavailable error
+    keyed to the side chat's old runner binding.
+    """
+    comm, runners, source, side_chat_id = await _side_chat_with_exited_source_runner(
+        client, app, db_uri, monkeypatch, "claude-native"
+    )
+    refusal_text = (
+        "harness 'claude-native' is not configured on host 'laptop' — "
+        "run `omnigent setup` on that machine"
+    )
+    responder = asyncio.create_task(
+        _serve_one_launch(
+            comm,
+            launch_status="failed",
+            launch_error=refusal_text,
+            launch_error_code="harness_not_configured",
+        )
+    )
+    try:
+        response = await _post_hello(client, side_chat_id)
+        await asyncio.wait_for(responder, timeout=budget(5.0))
+    finally:
+        responder.cancel()
+        await runners.client.aclose()
+
+    assert response.status_code == 202, (
+        f"expected the message to be consumed, got {response.status_code}: {response.text}"
+    )
+    items = await client.get(f"/v1/sessions/{side_chat_id}/items")
+    assert items.status_code == 200, items.text
+    data = items.json()["data"]
+    user_texts = [
+        part.get("text", "")
+        for item in data
+        if item.get("type") == "message"
+        for part in item.get("content", [])
+    ]
+    assert "hello" in user_texts, f"user message should be persisted, got {user_texts!r}"
+    error_items = [item for item in data if item.get("type") == "error"]
+    assert len(error_items) == 1, f"expected one refusal error item, got {error_items!r}"
+    assert error_items[0]["code"] == "harness_not_configured", error_items[0]
+    assert refusal_text in error_items[0]["message"], error_items[0]
+    # The refusal binds the attempted runner to the source (the same
+    # remediation-friendly rebinding the source's own refused relaunch does);
+    # the side chat keeps its old binding to follow the source's next relaunch.
+    store = SqlAlchemyConversationStore(db_uri)
+    source_after = store.get_conversation(source["id"])
+    side_after = store.get_conversation(side_chat_id)
+    assert source_after is not None and side_after is not None
+    assert source_after.host_id == _HOST_ID
+    assert source_after.runner_id is not None
+    assert source_after.runner_id != source["runner_id"]
+    assert side_after.runner_id == source["runner_id"]
+
+
 async def test_side_chat_message_rebinds_to_already_relaunched_source_runner(
     client: httpx.AsyncClient,
     app: FastAPI,

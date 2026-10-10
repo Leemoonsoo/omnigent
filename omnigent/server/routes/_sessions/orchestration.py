@@ -4699,16 +4699,10 @@ async def _recover_side_chat_runner_via_source(
 
     A side chat has no host of its own; its runner belongs to the source
     session. This brings that runner back with :func:`ensure_runner_connected`
-    (relaunching it on the source's host when needed) and rebinds the side chat
-    to it. Binding updates are compare-and-swap guarded, so a concurrent
-    recovery's newer side-chat binding wins, and the source's row is revalidated
-    each attempt so a source-only runner change is followed rather than
-    overwritten with a superseded snapshot.
-
-    The caller must initialize the side chat on the returned runner — the
-    source's runner has never seen this side chat. Recovery requires edit
-    access to the source, since the caller could relaunch the same runner by
-    messaging the source directly.
+    (relaunching it on the source's host when needed), revalidates the source,
+    and rebinds the side chat atomically so concurrent rebindings are
+    preserved. The caller must initialize the side chat on the returned
+    runner; recovery requires edit access to the source.
     """
     source_id = _side_chat_source_id(side_chat)
     if source_id is None:
@@ -4757,14 +4751,27 @@ async def _recover_side_chat_runner_via_source(
             continue
         if source.runner_id != side_chat.runner_id:
             try:
-                # Compare-and-swap: a concurrent rebind of the side chat wins,
-                # and the store returns its row either way.
-                side_chat = await asyncio.to_thread(
-                    conversation_store.replace_runner_id,
-                    side_chat.id,
-                    source.runner_id,
-                    expected_runner_id=side_chat.runner_id,
-                )
+                if side_chat.runner_id is None:
+                    # Absent-only bind: a concurrent recovery wins the
+                    # NULL → runner transition instead of being overwritten.
+                    await asyncio.to_thread(
+                        conversation_store.set_runner_id, side_chat.id, source.runner_id
+                    )
+                    refreshed = await asyncio.to_thread(
+                        conversation_store.get_conversation, side_chat.id
+                    )
+                    if refreshed is None:
+                        return None, side_chat
+                    side_chat = refreshed
+                else:
+                    # Compare-and-swap: a concurrent rebind of the side chat
+                    # wins, and the store returns its row either way.
+                    side_chat = await asyncio.to_thread(
+                        conversation_store.replace_runner_id,
+                        side_chat.id,
+                        source.runner_id,
+                        expected_runner_id=side_chat.runner_id,
+                    )
             except ConversationNotFoundError:
                 return None, side_chat
             if side_chat.runner_id != source.runner_id:

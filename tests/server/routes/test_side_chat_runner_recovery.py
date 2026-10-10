@@ -13,10 +13,12 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER, LEVEL_READ
 from omnigent.server.routes import sessions
 from omnigent.server.routes._sessions import orchestration
+from omnigent.server.routes.sessions import routes_events
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.conversation_store import SIDE_CHAT_LABEL_KEY, SIDE_CHAT_SOURCE_LABEL_KEY
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from tests.server.helpers import create_test_agent
 
 _HOST_ID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 _OWNER = "alice@example.com"
@@ -124,40 +126,87 @@ async def test_side_chat_binding_unchanged_when_source_runner_unavailable(
     assert saved is not None and saved.runner_id == "runner-exited"
 
 
+class _AdvancingSource:
+    """Stage ``ensure_runner_connected`` with a stale snapshot, then the advanced row.
+
+    The first call returns a snapshot pinned to *stale_runner*, as if taken
+    before a concurrent recovery advanced the source; later calls return the
+    advanced row, as they would after revalidation retries against the fresh
+    source binding.
+    """
+
+    def __init__(self, advanced: str, stale_runner: str) -> None:
+        self.advanced = advanced
+        self.stale_runner = stale_runner
+        self.calls = 0
+        self.stale_client = object()
+        self.advanced_client = object()
+
+    async def __call__(self, *, conv: Conversation, **_kwargs: object):
+        self.calls += 1
+        if self.calls == 1:
+            return self.stale_client, dataclasses.replace(conv, runner_id=self.stale_runner)
+        return self.advanced_client, dataclasses.replace(conv, runner_id=self.advanced)
+
+
+@pytest.mark.parametrize(
+    "initial_binding", ["initially-bound", "initially-unbound"], ids=["bound", "unbound"]
+)
 async def test_side_chat_recovery_preserves_concurrent_rebind(
-    db_uri: str, monkeypatch: pytest.MonkeyPatch
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, initial_binding: str
 ) -> None:
     """A concurrent recovery's newer binding survives a stale source snapshot.
 
-    Regression for the lost update: recovery returns a stale snapshot bound to
-    runner B while a concurrent recovery has already moved the source and the
-    side chat to C. Source revalidation plus the compare-and-swap rebind must
-    leave the side chat on C instead of overwriting it back to B.
+    Regression for the lost update: recovery snapshots the side chat on B (or
+    unbound) while a concurrent recovery moves the source and the side chat to
+    C. The compare-and-swap rebind for a bound side chat, and the absent-only
+    bind for a previously unbound one, must both leave the side chat on C
+    instead of overwriting it back to B.
     """
     store = SqlAlchemyConversationStore(db_uri)
     source, side = _source_and_side_chat(store, db_uri)
     stale_side = dataclasses.replace(side, runner_id="runner-stale-b")
     advanced = "runner-live-c"
-    store.replace_runner_id(source.id, advanced)
-    store.replace_runner_id(side.id, advanced)
+    if initial_binding == "initially-bound":
+        # The concurrent recovery finished before this one snapshotted anything.
+        stale_runner = "runner-stale-b"
+        staged = _AdvancingSource(advanced=advanced, stale_runner=stale_runner)
+        store.replace_runner_id(source.id, advanced)
+        store.replace_runner_id(side.id, advanced)
+        expected_ensure_calls = 2  # revalidation catches the advance and retries
+    else:
+        # The side chat is unbound when recovery starts; the concurrent
+        # recovery lands between this recovery's source validation and its
+        # bind, so only the absent-only write stands between C and a stale B.
+        # The staged snapshot matches the stored source so validation passes
+        # before the race.
+        stale_runner = "runner-replacement"
+        staged = _AdvancingSource(advanced=advanced, stale_runner=stale_runner)
+        store.clear_runner_id(side.id)
+        stale_side = dataclasses.replace(side, runner_id=None)
+        real_set = store.set_runner_id
 
-    client_b, client_c = object(), object()
-    ensure_calls = 0
+        def _racing_set(conversation_id: str, runner_id: str) -> bool:
+            if (
+                conversation_id == side.id
+                and store.get_conversation(source.id).runner_id != advanced
+            ):
+                store.replace_runner_id(source.id, advanced)
+                store.replace_runner_id(side.id, advanced)
+            return real_set(conversation_id, runner_id)
 
-    async def _ensure(*, conv: Conversation, **_kwargs: object):
-        nonlocal ensure_calls
-        ensure_calls += 1
-        if ensure_calls == 1:
-            return client_b, dataclasses.replace(conv, runner_id="runner-stale-b")
-        return client_c, dataclasses.replace(conv, runner_id=advanced)
+        monkeypatch.setattr(store, "set_runner_id", _racing_set)
+        expected_ensure_calls = 1  # validation already passed; the race is at the write
 
-    monkeypatch.setattr(orchestration, "ensure_runner_connected", _ensure)
-    monkeypatch.setattr(sessions, "_get_runner_client", AsyncMock(return_value=client_c))
+    monkeypatch.setattr(orchestration, "ensure_runner_connected", staged)
+    monkeypatch.setattr(
+        sessions, "_get_runner_client", AsyncMock(return_value=staged.advanced_client)
+    )
 
     client, recovered = await _recover(store, stale_side)
 
-    assert client is client_c
-    assert ensure_calls == 2
+    assert client is staged.advanced_client
+    assert staged.calls == expected_ensure_calls
     assert recovered.runner_id == advanced
     saved = store.get_conversation(side.id)
     assert saved is not None and saved.runner_id == advanced
@@ -178,27 +227,91 @@ async def test_side_chat_recovery_follows_source_only_advancement(
     advanced = "runner-live-c"
     store.replace_runner_id(source.id, advanced)
     store.replace_runner_id(side.id, "runner-stale-b")
+    staged = _AdvancingSource(advanced=advanced, stale_runner="runner-stale-b")
 
-    client_b, client_c = object(), object()
-    ensure_calls = 0
-
-    async def _ensure(*, conv: Conversation, **_kwargs: object):
-        nonlocal ensure_calls
-        ensure_calls += 1
-        if ensure_calls == 1:
-            return client_b, dataclasses.replace(conv, runner_id="runner-stale-b")
-        return client_c, dataclasses.replace(conv, runner_id=advanced)
-
-    monkeypatch.setattr(orchestration, "ensure_runner_connected", _ensure)
-    monkeypatch.setattr(sessions, "_get_runner_client", AsyncMock(return_value=client_c))
+    monkeypatch.setattr(orchestration, "ensure_runner_connected", staged)
+    monkeypatch.setattr(
+        sessions, "_get_runner_client", AsyncMock(return_value=staged.advanced_client)
+    )
 
     client, recovered = await _recover(store, stale_side)
 
-    assert client is client_c
-    assert ensure_calls == 2
+    assert client is staged.advanced_client
+    assert staged.calls == 2
     assert recovered.runner_id == advanced
     saved = store.get_conversation(side.id)
     assert saved is not None and saved.runner_id == advanced
+
+
+async def test_side_chat_recovery_gates_on_source_edit_access_at_the_routes(
+    auth_client: httpx.AsyncClient,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route-level recovery requires edit access to the source, not just the side chat.
+
+    Protects ``user_id``/``permission_store`` propagation through the message
+    and Resume entry points: a caller who can edit the side chat but not its
+    source gets the plain unavailable error with no recovery attempt, while
+    the source's owner reaches recovery through the same routes.
+    """
+    store = SqlAlchemyConversationStore(db_uri)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    agent = await create_test_agent(client, name="side-chat-source-edit-gate")
+    source = store.create_conversation(agent_id=agent["id"])
+    store.set_runner_id(source.id, "runner-shared")
+    side = store.fork_conversation(
+        source.id,
+        extra_labels={SIDE_CHAT_LABEL_KEY: "1", SIDE_CHAT_SOURCE_LABEL_KEY: source.id},
+    )
+    store.set_runner_id(side.id, "runner-shared")
+    for user in (_OWNER, _OTHER):
+        permissions.ensure_user(user)
+    permissions.grant(_OWNER, source.id, LEVEL_OWNER)
+    permissions.grant(_OWNER, side.id, LEVEL_OWNER)
+    permissions.grant(_OTHER, side.id, LEVEL_EDIT)
+
+    async def _ensure(*, session_id: str, conv: Conversation, **_kwargs: object):
+        return None, conv
+
+    ensure = AsyncMock(side_effect=_ensure)
+    # The helper resolves its import through orchestration; the Resume path
+    # holds its own binding in routes_events. Patch both to spy on every call.
+    monkeypatch.setattr(orchestration, "ensure_runner_connected", ensure)
+    monkeypatch.setattr(routes_events, "ensure_runner_connected", ensure)
+    monkeypatch.setattr(sessions, "_get_runner_client", AsyncMock(return_value=None))
+
+    message = {
+        "type": "message",
+        "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    }
+
+    denied = await auth_client.post(
+        f"/v1/sessions/{side.id}/events",
+        json=message,
+        headers={"X-Forwarded-Email": _OTHER},
+    )
+    assert denied.status_code == 503, denied.text
+    ensure.assert_not_awaited()
+
+    denied_resume = await auth_client.post(
+        f"/v1/sessions/{side.id}/events",
+        json={"type": "retry_session", "data": {}},
+        headers={"X-Forwarded-Email": _OTHER},
+    )
+    assert denied_resume.status_code == 503, denied_resume.text
+    # Resume resolves the side chat's own binding first; the source is never
+    # touched when access is denied.
+    assert [c.kwargs["session_id"] for c in ensure.await_args_list] == [side.id]
+
+    allowed = await auth_client.post(
+        f"/v1/sessions/{side.id}/events",
+        json=message,
+        headers={"X-Forwarded-Email": _OWNER},
+    )
+    assert allowed.status_code == 503, allowed.text
+    assert [c.kwargs["session_id"] for c in ensure.await_args_list] == [side.id, source.id]
 
 
 async def test_side_chat_recovery_redirects_when_source_host_is_on_another_replica(

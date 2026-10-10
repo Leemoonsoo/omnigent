@@ -42,6 +42,9 @@ from omnigent.entities.conversation import (
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harnesses.codex_native.side_chat import is_side_chat_child
 from omnigent.host.frames import (
+    HARNESS_NOT_CONFIGURED_ERROR_CODE as _HARNESS_NOT_CONFIGURED_ERROR_CODE,
+)
+from omnigent.host.frames import (
     WORKSPACE_MISSING_ERROR_CODE as _WORKSPACE_MISSING_ERROR_CODE,
 )
 from omnigent.host.frames import (
@@ -2384,14 +2387,41 @@ def register_events_routes(
                 _runner_needs_session_init = _is_native_terminal_session(conv)
         if runner_client is None:
             # A side chat shares its source's runner and has no host of its own.
-            runner_client, conv = await _recover_side_chat_runner_via_source(
-                conv,
-                app_state=request.app.state,
-                conversation_store=conversation_store,
-                runner_router=runner_router,
-                user_id=user_id,
-                permission_store=permission_store,
-            )
+            # A categorical relaunch refusal for the source consumes the
+            # message with the actionable reason, exactly like the session's
+            # own host-bound relaunch below.
+            try:
+                runner_client, conv = await _recover_side_chat_runner_via_source(
+                    conv,
+                    app_state=request.app.state,
+                    conversation_store=conversation_store,
+                    runner_router=runner_router,
+                    user_id=user_id,
+                    permission_store=permission_store,
+                    raise_host_refusal=True,
+                )
+            except OmnigentError as exc:
+                if exc.code not in (
+                    ErrorCode.HARNESS_NOT_CONFIGURED,
+                    ErrorCode.WORKSPACE_MISSING,
+                ):
+                    raise
+                refusal_code = (
+                    _HARNESS_NOT_CONFIGURED_ERROR_CODE
+                    if exc.code == ErrorCode.HARNESS_NOT_CONFIGURED
+                    else _WORKSPACE_MISSING_ERROR_CODE
+                )
+                item_id = await _persist_host_launch_failure_turn(
+                    session_id,
+                    conv,
+                    body,
+                    conversation_store,
+                    str(exc),
+                    runner_router,
+                    created_by=created_by,
+                    host_error_code=refusal_code,
+                )
+                return {"queued": True, "item_id": item_id}
             if runner_client is not None:
                 # The source's runner has never initialized this side chat.
                 _runner_needs_session_init = True
