@@ -1668,6 +1668,15 @@ describe("ElicitationCard — prompts mirrored from a sub-agent", () => {
     expect(within(requester).getByRole("link")).toHaveAttribute("href", "/c/conv_child");
   });
 
+  it("treats an empty label as missing", () => {
+    // WHY: label fields fall through with ``??``, so an empty summary would
+    // otherwise render an empty, invisible link.
+    renderCard(elicitationItem(), { conv_parent: [childSession({ task_summary: "" })] });
+    const requester = screen.getByTestId("approval-card-requester");
+    expect(requester).toHaveTextContent("Requested by a sub-agent");
+    expect(within(requester).getByRole("link")).toHaveTextContent("sub-agent");
+  });
+
   it.each([
     { name: "no target", targetSessionId: null },
     { name: "the viewed session as target", targetSessionId: "conv_parent" },

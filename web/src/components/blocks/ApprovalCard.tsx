@@ -128,7 +128,7 @@ export interface SubagentRequester {
 function SubagentRequesterLine({ sessionId, ancestorSessionId }: SubagentRequester) {
   const child = useDescendantSession(ancestorSessionId, sessionId);
   const search = sessionNavigationSearch(useLocation().search);
-  const label = child ? childPrimaryLabel(child) : null;
+  const label = (child && childPrimaryLabel(child)) || null;
   const link = (
     <Link
       to={{ pathname: `/c/${sessionId}`, search }}

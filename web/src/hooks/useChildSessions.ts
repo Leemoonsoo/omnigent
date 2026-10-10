@@ -146,6 +146,7 @@ export function findCachedDescendant(
   targetId: string,
   maxDepth: number,
 ): ChildSessionInfo | null {
+  const visited = new Set([rootId]);
   let frontier = [rootId];
   for (let depth = 0; depth < maxDepth && frontier.length > 0; depth++) {
     const next: string[] = [];
@@ -154,6 +155,8 @@ export function findCachedDescendant(
       if (!children) continue;
       for (const child of children) {
         if (child.id === targetId) return child;
+        if (visited.has(child.id)) continue;
+        visited.add(child.id);
         next.push(child.id);
       }
     }
@@ -287,7 +290,7 @@ export function useDescendantSession(
   const subscribe = useCallback(
     (onChange: () => void) =>
       queryClient.getQueryCache().subscribe((event) => {
-        if (isChildSessionsQueryKey(event.query.queryKey)) onChange();
+        if (event.type === "updated" && isChildSessionsQueryKey(event.query.queryKey)) onChange();
       }),
     [queryClient],
   );
