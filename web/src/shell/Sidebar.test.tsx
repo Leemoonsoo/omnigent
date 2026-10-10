@@ -90,7 +90,7 @@ vi.mock("@/hooks/useHosts", () => ({
 // is the data source under test, so it's a controllable mock.
 vi.mock("@/hooks/useConversations", async () => {
   const { conversationHooksMock } = await import("@/test/sidebarMockHelpers");
-  const { useState } = await import("react");
+  const { useRef, useState } = await import("react");
   return {
     ...conversationHooksMock(),
     usePinnedConversations: () => {
@@ -117,6 +117,9 @@ vi.mock("@/hooks/useConversations", async () => {
     }),
     useProjectSessions: (project: string, enabled: boolean) => {
       const [loadedPages, setLoadedPages] = useState(1);
+      // Like the real query cache, a folder keeps its pages after collapsing.
+      const fetched = useRef(false);
+      if (enabled) fetched.current = true;
       const serverPages = projectPagesMock.current[project];
       const override = projectSessionsMock.current[project];
       const pages = serverPages?.slice(0, loadedPages) ?? [
@@ -127,7 +130,7 @@ vi.mock("@/hooks/useConversations", async () => {
       ];
       const hasNextPage = serverPages !== undefined && loadedPages < serverPages.length;
       return {
-        data: enabled
+        data: fetched.current
           ? {
               pages: pages.map((data, index) => ({
                 data,
@@ -2369,6 +2372,13 @@ describe("Sidebar project sections", () => {
 
     expect(alpha.getByRole("link", { name: "Alpha-7" })).toBeInTheDocument();
     expect(alpha.queryByText("Alpha-6")).not.toBeInTheDocument();
+    expect(screen.getByTestId("bulk-archive")).toBeEnabled();
+
+    // Collapsing the folder keeps the selection and its bulk action.
+    const header = screen.getByRole("button", { name: "Alpha" });
+    fireEvent.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
     expect(screen.getByTestId("bulk-archive")).toBeEnabled();
   });
 

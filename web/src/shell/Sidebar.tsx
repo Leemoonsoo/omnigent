@@ -1355,6 +1355,26 @@ type ProjectHeaderDrag = ReturnType<typeof useSortable>;
 const PROJECT_PREVIEW_RECENT_WINDOW_S = 3 * 24 * 60 * 60;
 const PROJECT_PREVIEW_MIN_SESSIONS = 3;
 
+/** Set a folder's reported rows, keeping the same map when its ids are
+    unchanged so a background refetch with the same rows doesn't re-render. */
+function withFolderRows(
+  prev: Map<string, Conversation[]>,
+  name: string,
+  rows: Conversation[],
+): Map<string, Conversation[]> {
+  const existing = prev.get(name);
+  if (
+    existing &&
+    existing.length === rows.length &&
+    existing.every((c, i) => c.id === rows[i]?.id)
+  ) {
+    return prev;
+  }
+  const next = new Map(prev);
+  next.set(name, rows);
+  return next;
+}
+
 /**
  * One project folder. Fetches its own sessions server-side (`?project=`) so it
  * shows ALL its members regardless of how far the global sidebar list has been
@@ -1422,12 +1442,16 @@ function ProjectFolder({
   selectedIds: Set<string>;
   onToggleSelected: (conversationId: string, shiftKey?: boolean) => void;
   onProjectAssigned?: (projectName: string) => void;
-  /** Report this folder's own loaded (rendered) sessions to the parent. The
+  /** Report this folder's own loaded sessions and the ones it displays. The
       folder paginates independently of the global window, so bulk-selection in
-      the projects scope must resolve selected rows against these — not the
-      global list — or an out-of-window member would silently drop from the
-      action. */
-  onConversationsLoaded?: (name: string, conversations: Conversation[]) => void;
+      the projects scope must resolve selected rows against the loaded ones —
+      not the global list — or an out-of-window member would silently drop from
+      the action. Navigation follows the displayed ones. */
+  onConversationsLoaded?: (
+    name: string,
+    conversations: Conversation[],
+    displayed: Conversation[],
+  ) => void;
 }) {
   const query = useProjectSessions(name, expanded);
   const { registerFolder } = useSidebarData();
@@ -1485,12 +1509,12 @@ function ProjectFolder({
   );
   const marker = projectMarkerState(conversations, errors, startingConversationId);
 
-  // Publish the folder's rendered rows upward so projects-scope bulk selection
-  // and the shift-select range resolve them (the parent sources its action set
-  // from these, not the global paginated window).
+  // Publish the folder's rows upward: projects-scope bulk selection resolves
+  // the loaded ones (not the global paginated window), and the shift-select
+  // range and session hotkey follow the displayed ones.
   useEffect(() => {
-    onConversationsLoaded?.(name, expanded ? visibleConversations : []);
-  }, [name, expanded, visibleConversations, onConversationsLoaded]);
+    onConversationsLoaded?.(name, conversations, visibleConversations);
+  }, [name, conversations, visibleConversations, onConversationsLoaded]);
 
   // While the first page loads, show a "Loading…" footer instead of the "No
   // chats" empty state (which would otherwise flash before rows arrive).
@@ -2157,37 +2181,28 @@ function ConversationList({
     });
   }, []);
 
-  // Sessions each expanded ProjectFolder has actually rendered, keyed by
-  // project name. A folder paginates independently of the global window, so its
-  // rows can include members the global list hasn't loaded; projects-scope
-  // selection must resolve against these to avoid silently dropping an
-  // out-of-window row from a bulk action. Folders report via
-  // `onConversationsLoaded`; collapsed folders report `[]`.
+  // Sessions each ProjectFolder has loaded, keyed by project name. A folder
+  // paginates independently of the global window, so its rows can include
+  // members the global list hasn't loaded; projects-scope selection must
+  // resolve against these to avoid silently dropping an out-of-window row from
+  // a bulk action, even after its folder collapses. `folderDisplayedRows` holds
+  // the subset each folder shows, for the shift-select range and session hotkey.
+  // Folders report both via `onConversationsLoaded`.
   const [folderConversations, setFolderConversations] = useState<Map<string, Conversation[]>>(
     () => new Map(),
   );
+  const [folderDisplayedRows, setFolderDisplayedRows] = useState<Map<string, Conversation[]>>(
+    () => new Map(),
+  );
   const handleFolderConversationsLoaded = useCallback(
-    (name: string, conversations: Conversation[]) => {
-      setFolderConversations((prev) => {
-        const existing = prev.get(name);
-        // Skip the update when the id set is unchanged, so a background refetch
-        // that returns the same rows doesn't churn state (and re-render).
-        if (
-          existing &&
-          existing.length === conversations.length &&
-          existing.every((c, i) => c.id === conversations[i]?.id)
-        ) {
-          return prev;
-        }
-        const next = new Map(prev);
-        next.set(name, conversations);
-        return next;
-      });
+    (name: string, conversations: Conversation[], displayed: Conversation[]) => {
+      setFolderConversations((prev) => withFolderRows(prev, name, conversations));
+      setFolderDisplayedRows((prev) => withFolderRows(prev, name, displayed));
     },
     [],
   );
 
-  // The projects-scope selection pool: the folders' own rendered rows (the
+  // The projects-scope selection pool: the folders' own loaded rows (the
   // authoritative, possibly-out-of-window set) unioned with the global-derived
   // membership as a fallback for folders that haven't reported yet. Deduped by
   // id. This backs the bulk-action bar, the shift-select range, and the
@@ -2263,23 +2278,23 @@ function ConversationList({
     return [
       ...visible("Pinned", sections.pinned),
       ...sections.projectGroups.flatMap((g) =>
-        projectVisible(g.name, folderConversations.get(g.name) ?? g.conversations),
+        projectVisible(g.name, folderDisplayedRows.get(g.name) ?? g.conversations),
       ),
       ...visible("Chats", sections.sessions),
     ].map((c) => c.id);
-  }, [sections, effectiveCollapsedSections, expandedProjects, folderConversations]);
+  }, [sections, effectiveCollapsedSections, expandedProjects, folderDisplayedRows]);
   // Getter for the shift-select range, built on demand (at click time). Scopes
   // to whichever section is selectable: the flat Sessions list, or the sessions
   // across expanded project folders (in render order). For projects scope the
-  // range uses each folder's own reported rows — the same source the folder
-  // renders — so a shift target the global window hasn't loaded still resolves.
+  // range uses each folder's displayed rows — the same rows the folder renders —
+  // so a shift target the global window hasn't loaded still resolves.
   // Rows outside the active scope have no checkboxes, so they never enter a range.
   getVisibleIdsRef.current = () => {
     if (selectionScope === "projects") {
       if (effectiveCollapsedSections.includes("Projects")) return [];
       return sections.projectGroups.flatMap((g) => {
         if (!expandedProjects.includes(g.name)) return [];
-        const rows = folderConversations.get(g.name) ?? g.conversations;
+        const rows = folderDisplayedRows.get(g.name) ?? g.conversations;
         return rows.map((c) => c.id);
       });
     }
