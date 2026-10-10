@@ -67,6 +67,7 @@ import {
   useScopedConversationId,
 } from "@/components/chat/conversationScope";
 import { AskUserQuestionForm, type AskUserQuestionAnswers } from "./AskUserQuestionForm";
+import { ElicitationMessage } from "./ElicitationMessage";
 import {
   type ElicitationAnswers,
   ElicitationSchemaForm,
@@ -645,7 +646,7 @@ export function ApprovalCard({
                 )}
               </>
             ) : showGatingMessage ? (
-              <span>{message}</span>
+              <ElicitationMessage message={message} />
             ) : null}
             {submittedAnswers !== null && (
               <ul className="flex flex-col gap-0.5">
@@ -741,7 +742,7 @@ export function ApprovalCard({
           </>
         ) : (
           <>
-            <span>{message}</span>
+            <ElicitationMessage message={message} />
             {formattedPreview && (
               <pre className="max-h-64 overflow-y-auto rounded bg-muted px-2 py-1 font-mono text-sm whitespace-pre-wrap break-words">
                 {formattedPreview}
