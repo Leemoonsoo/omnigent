@@ -124,6 +124,83 @@ async def test_side_chat_binding_unchanged_when_source_runner_unavailable(
     assert saved is not None and saved.runner_id == "runner-exited"
 
 
+async def test_side_chat_recovery_preserves_concurrent_rebind(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent recovery's newer binding survives a stale source snapshot.
+
+    Regression for the lost update: recovery returns a stale snapshot bound to
+    runner B while a concurrent recovery has already moved the source and the
+    side chat to C. Source revalidation plus the compare-and-swap rebind must
+    leave the side chat on C instead of overwriting it back to B.
+    """
+    store = SqlAlchemyConversationStore(db_uri)
+    source, side = _source_and_side_chat(store, db_uri)
+    stale_side = dataclasses.replace(side, runner_id="runner-stale-b")
+    advanced = "runner-live-c"
+    store.replace_runner_id(source.id, advanced)
+    store.replace_runner_id(side.id, advanced)
+
+    client_b, client_c = object(), object()
+    ensure_calls = 0
+
+    async def _ensure(*, conv: Conversation, **_kwargs: object):
+        nonlocal ensure_calls
+        ensure_calls += 1
+        if ensure_calls == 1:
+            return client_b, dataclasses.replace(conv, runner_id="runner-stale-b")
+        return client_c, dataclasses.replace(conv, runner_id=advanced)
+
+    monkeypatch.setattr(orchestration, "ensure_runner_connected", _ensure)
+    monkeypatch.setattr(sessions, "_get_runner_client", AsyncMock(return_value=client_c))
+
+    client, recovered = await _recover(store, stale_side)
+
+    assert client is client_c
+    assert ensure_calls == 2
+    assert recovered.runner_id == advanced
+    saved = store.get_conversation(side.id)
+    assert saved is not None and saved.runner_id == advanced
+
+
+async def test_side_chat_recovery_follows_source_only_advancement(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source that moved while the side chat lagged behind is followed, not trusted.
+
+    The source advanced to C after recovery snapshotted it on B, and the side
+    chat still holds B. Recovery must notice the fresh source binding and move
+    the side chat to C rather than rebinding it to the superseded B.
+    """
+    store = SqlAlchemyConversationStore(db_uri)
+    source, side = _source_and_side_chat(store, db_uri)
+    stale_side = dataclasses.replace(side, runner_id="runner-stale-b")
+    advanced = "runner-live-c"
+    store.replace_runner_id(source.id, advanced)
+    store.replace_runner_id(side.id, "runner-stale-b")
+
+    client_b, client_c = object(), object()
+    ensure_calls = 0
+
+    async def _ensure(*, conv: Conversation, **_kwargs: object):
+        nonlocal ensure_calls
+        ensure_calls += 1
+        if ensure_calls == 1:
+            return client_b, dataclasses.replace(conv, runner_id="runner-stale-b")
+        return client_c, dataclasses.replace(conv, runner_id=advanced)
+
+    monkeypatch.setattr(orchestration, "ensure_runner_connected", _ensure)
+    monkeypatch.setattr(sessions, "_get_runner_client", AsyncMock(return_value=client_c))
+
+    client, recovered = await _recover(store, stale_side)
+
+    assert client is client_c
+    assert ensure_calls == 2
+    assert recovered.runner_id == advanced
+    saved = store.get_conversation(side.id)
+    assert saved is not None and saved.runner_id == advanced
+
+
 async def test_side_chat_recovery_redirects_when_source_host_is_on_another_replica(
     db_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
