@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -1580,8 +1580,11 @@ describe("ElicitationCard — prompts mirrored from a sub-agent", () => {
     };
   }
 
-  function renderCard(item: ElicitationItem, cache: Record<string, ChildSessionInfo[]>) {
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  function renderCard(
+    item: ElicitationItem,
+    cache: Record<string, ChildSessionInfo[]>,
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+  ) {
     for (const [parentId, children] of Object.entries(cache)) {
       queryClient.setQueryData(childSessionsQueryKey(parentId), children);
     }
@@ -1629,6 +1632,29 @@ describe("ElicitationCard — prompts mirrored from a sub-agent", () => {
       conv_child: [
         childSession({ id: "conv_grandchild", task_summary: "Run the migration tests" }),
       ],
+    });
+    expect(screen.getByTestId("approval-card-requester")).toHaveTextContent(
+      "Requested by sub-agent Run the migration tests",
+    );
+  });
+
+  it("names a deeper descendant once its parent's list is cached after mount", () => {
+    // WHY: deeper lists are only read from the cache; a card mounted before
+    // the Agents rail loads them must still pick up the label.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderCard(
+      elicitationItem({ targetSessionId: "conv_grandchild" }),
+      { conv_parent: [childSession()] },
+      queryClient,
+    );
+    expect(screen.getByTestId("approval-card-requester")).toHaveTextContent(
+      "Requested by a sub-agent",
+    );
+
+    act(() => {
+      queryClient.setQueryData(childSessionsQueryKey("conv_child"), [
+        childSession({ id: "conv_grandchild", task_summary: "Run the migration tests" }),
+      ]);
     });
     expect(screen.getByTestId("approval-card-requester")).toHaveTextContent(
       "Requested by sub-agent Run the migration tests",

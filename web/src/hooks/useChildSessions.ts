@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useCallback, useSyncExternalStore } from "react";
 import { authenticatedFetch } from "@/lib/identity";
 import { setSessionParent } from "@/lib/sessionHost";
 import { isTempConvId } from "@/lib/tempConversationId";
@@ -265,7 +266,7 @@ export function useChildSessions(
  *
  * Direct children come from ``useChildSessions`` (fetched when not yet
  * cached); deeper descendants are read from lists the Agents rail has
- * already cached.
+ * cached. Re-renders when any cached child-session list changes.
  *
  * @param ancestorId - Session whose tree to search, e.g. ``"conv_root"``;
  *   ``null`` disables the lookup.
@@ -277,10 +278,19 @@ export function useDescendantSession(
   targetId: string,
 ): ChildSessionInfo | null {
   const queryClient = useQueryClient();
-  const { children } = useChildSessions(ancestorId);
-  if (ancestorId === null) return null;
-  return (
-    children.find((child) => child.id === targetId) ??
-    findCachedDescendant(queryClient, ancestorId, targetId, MAX_TREE_DEPTH)
+  useChildSessions(ancestorId);
+  const subscribe = useCallback(
+    (onChange: () => void) =>
+      queryClient.getQueryCache().subscribe((event) => {
+        if (event.query.queryKey[2] === "child_sessions") onChange();
+      }),
+    [queryClient],
+  );
+  // Cached rows keep their identity until their list changes, so the
+  // snapshot is stable between unrelated cache events.
+  return useSyncExternalStore(subscribe, () =>
+    ancestorId === null
+      ? null
+      : findCachedDescendant(queryClient, ancestorId, targetId, MAX_TREE_DEPTH),
   );
 }
