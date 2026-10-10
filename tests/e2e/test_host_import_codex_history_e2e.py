@@ -1,4 +1,7 @@
-"""E2E: a real host daemon imports the whole history of Codex threads it reads from disk."""
+"""E2E: a real host daemon imports full Codex threads and their archive state.
+
+Fork and revert lineage is covered by the loader tests in tests/test_session_import.py.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +23,6 @@ pytestmark = pytest.mark.timeout(300)
 
 _CWD = "/repo"
 _HOST_ENV_STRIP = ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "QWEN_HOME", "PI_CODING_AGENT_DIR")
-_PARENT_TURNS = 10
 _BIG_MESSAGE_COUNT = 425
 
 
@@ -31,58 +33,18 @@ def _rollout(thread_id: str, **meta: object) -> CodexRollout:
 
 @dataclass(frozen=True)
 class _Seeded:
-    reverted: str
-    metadata_only_fork: str
     compacted: str
     archived: str
 
 
 def _seed_codex_home(home: Path) -> _Seeded:
-    """Write a ``~/.codex`` holding the thread shapes an import must read in full."""
+    """Write a ``~/.codex`` holding a large compacted thread and an archived one."""
     codex = home / ".codex"
     sessions = codex / "sessions" / "2026" / "10" / "02"
     rows: list[tuple[str, str, str, int]] = []
 
-    def name(thread_id: str, stamp: str, rollout_id: str | None = None) -> str:
-        ids = thread_id if rollout_id is None else f"{thread_id}_{rollout_id}"
-        return f"rollout-2026-10-02T{stamp}-{ids}.jsonl"
-
-    # A thread reverted to its second turn: the thread store names the new
-    # rollout, whose history_base points back into the original one.
-    reverted = str(uuid.uuid4())
-    original = _rollout(reverted)
-    for index in (1, 2, 3):
-        original.turn(
-            index, f"reverted thread question {index}", f"reverted thread answer {index}"
-        )
-    original.write(sessions / name(reverted, "09-00-00"))
-    revert_point = 1 + 3 * 2
-    current = _rollout(
-        reverted,
-        history_base={"thread_id": reverted, "end_ordinal_exclusive": revert_point},
-    )
-    current.turn(3, "reverted thread question after revert", "reverted thread final answer")
-    current_path = sessions / name(reverted, "09-30-00", str(uuid.uuid4()))
-    current.write(current_path)
-    rows.append((reverted, "reverted thread question 1", str(current_path), 0))
-
-    # A fork that has not taken a turn yet holds only metadata.
-    parent = str(uuid.uuid4())
-    parent_rollout = _rollout(parent)
-    for index in range(1, _PARENT_TURNS + 1):
-        parent_rollout.turn(index, f"fork parent question {index}", f"fork parent answer {index}")
-    parent_path = sessions / name(parent, "10-00-00")
-    parent_rollout.write(parent_path)
-    rows.append((parent, "fork parent question 1", str(parent_path), 0))
-    fork = str(uuid.uuid4())
-    fork_rollout = _rollout(
-        fork,
-        history_base={"thread_id": parent, "end_ordinal_exclusive": parent_rollout.next_ordinal},
-    )
-    fork_rollout.append("event_msg", {"type": "thread_settings_applied", "thread_id": fork})
-    fork_path = sessions / name(fork, "10-30-00")
-    fork_rollout.write(fork_path)
-    rows.append((fork, "", str(fork_path), 0))
+    def name(thread_id: str, stamp: str) -> str:
+        return f"rollout-2026-10-02T{stamp}-{thread_id}.jsonl"
 
     # Above the 2 MiB threshold, with compactions after messages 100, 200 and 310.
     compacted = str(uuid.uuid4())
@@ -126,7 +88,7 @@ def _seed_codex_home(home: Path) -> _Seeded:
         con.commit()
     finally:
         con.close()
-    return _Seeded(reverted, fork, compacted, archived)
+    return _Seeded(compacted, archived)
 
 
 @dataclass(frozen=True)
@@ -202,34 +164,6 @@ def _message_texts(items: list[dict[str, object]]) -> list[str]:
         for block in item.get("content") or []
         if isinstance(block, dict) and isinstance(block.get("text"), str)
     ]
-
-
-def test_import_keeps_history_from_before_a_revert(
-    http_client: httpx.Client, import_host: _ImportHost
-) -> None:
-    """The thread store's current rollout plus the original rollout up to the revert point."""
-    session_id = _import(http_client, import_host, import_host.seeded.reverted)
-
-    assert _message_texts(_items(http_client, session_id)) == [
-        "reverted thread question 1",
-        "reverted thread answer 1",
-        "reverted thread question 2",
-        "reverted thread answer 2",
-        "reverted thread question after revert",
-        "reverted thread final answer",
-    ]
-
-
-def test_import_follows_history_base_for_metadata_only_fork(
-    http_client: httpx.Client, import_host: _ImportHost
-) -> None:
-    """A fork that holds only metadata imports the history it inherits."""
-    session_id = _import(http_client, import_host, import_host.seeded.metadata_only_fork)
-
-    texts = _message_texts(_items(http_client, session_id))
-    assert texts[0] == "fork parent question 1"
-    assert texts[-1] == f"fork parent answer {_PARENT_TURNS}"
-    assert len(texts) == 2 * _PARENT_TURNS
 
 
 def test_import_keeps_every_message_of_a_compacted_thread(

@@ -48,11 +48,14 @@ trimming only ever drops records the agent has already summarized away.
 
 ## Importing Codex rollouts
 
-`load_codex_session` imports the whole transcript regardless of size. Every
-`response_item` stays a visible message, and each `compacted` record becomes a
-`compaction` item whose `compacted_messages` carry that record's
-`replacement_history` — the same item a live codex-native session persists when
-Codex compacts in the terminal. The imported session therefore shows the history
-the user could still read in Codex, while a cold resume rebuilds the rollout from
-the last compaction item and so starts with the same context Codex itself would
-hold. A `compacted` record with no usable `replacement_history` is skipped.
+`load_codex_session` imports the whole transcript, whatever its byte size. The
+import API still caps a session at 100,000 normalized items (`_MAX_IMPORT_ITEMS`
+in `omnigent/server/routes/imports.py`), and a Codex thread above that cap is
+rejected rather than trimmed. Every `response_item` stays a visible message, and
+each `compacted` record becomes a `compaction` item whose `compacted_messages`
+carry that record's `replacement_history` — the same item a live codex-native
+session persists when Codex compacts in the terminal. The imported session
+therefore shows the history the user could still read in Codex, while a cold
+resume rebuilds the rollout from the last compaction item and so starts with the
+same context Codex itself would hold. A `compacted` record with no usable
+`replacement_history` is skipped.
