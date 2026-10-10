@@ -16,9 +16,9 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from omnigent.db.utils import builtin_agent_id
+from omnigent.db.utils import builtin_agent_id, generate_item_id
 from omnigent.db.workspace_cache import WorkspaceScopedCache
-from omnigent.entities import NewConversationItem, parse_item_data
+from omnigent.entities import CompactionData, NewConversationItem, parse_item_data
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import HostImportLocalByIdFrame, HostImportLocalFrame, encode_host_frame
 from omnigent.native.native_coding_agents import native_coding_agent_for_harness
@@ -332,6 +332,24 @@ async def _stream_local_sessions_from_host(
         host_conn.pending_import_local.pop(request_id, None)
 
 
+def _anchor_compactions(items: list[NewConversationItem]) -> list[NewConversationItem]:
+    """Mint item ids and point each compaction's ``last_item_id`` at the item before it.
+
+    Imported compactions predate any stored id, so without this a history loader
+    finds no anchor and falls back to loading the whole transcript.
+    """
+    anchored: list[NewConversationItem] = []
+    for item in items:
+        update: dict[str, object] = {}
+        if item.stable_id is None:
+            update["stable_id"] = generate_item_id(item.type)
+        if isinstance(item.data, CompactionData) and anchored:
+            previous_id = anchored[-1].stable_id
+            update["data"] = item.data.model_copy(update={"last_item_id": previous_id})
+        anchored.append(item.model_copy(update=update) if update else item)
+    return anchored
+
+
 def create_imports_router(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
@@ -429,7 +447,9 @@ def create_imports_router(
                 conversation.id,
                 external_session_id,
             )
-            await asyncio.to_thread(conversation_store.append, conversation.id, items)
+            await asyncio.to_thread(
+                conversation_store.append, conversation.id, _anchor_compactions(items)
+            )
             labels = {
                 **native_agent.presentation_labels,
                 IMPORT_SOURCE_LABEL_KEY: source,

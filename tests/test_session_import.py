@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -26,7 +25,12 @@ from omnigent.session_import.local import (
     load_qwen_session,
 )
 from omnigent.session_import.models import LocalSessionImport, SessionImportNotFoundError
-from tests._helpers.codex_rollout import CodexRollout, codex_message
+from tests._helpers.codex_rollout import (
+    CodexRollout,
+    CodexThreadRow,
+    codex_message,
+    write_codex_thread_store,
+)
 
 
 def test_import_adapters_use_stable_forwarder_parser_contracts(tmp_path: Path) -> None:
@@ -1323,38 +1327,12 @@ def _write_codex_threads_db(
     archived: bool = False,
     legacy_schema: bool = False,
 ) -> None:
-    """Write a codex ``state_5.sqlite`` holding one thread's row.
-
-    ``legacy_schema`` writes an older ``threads`` table without ``rollout_path``/``archived``.
-    """
-    con = sqlite3.connect(tmp_path / "state_5.sqlite")
-    try:
-        if legacy_schema:
-            con.execute("CREATE TABLE threads (id TEXT, title TEXT, first_user_message TEXT)")
-            con.execute(
-                "INSERT INTO threads (id, title, first_user_message) VALUES (?, ?, ?)",
-                (session_id, title, first_user_message),
-            )
-            con.commit()
-            return
-        con.execute(
-            "CREATE TABLE threads "
-            "(id TEXT, title TEXT, first_user_message TEXT, rollout_path TEXT, archived INTEGER)"
-        )
-        con.execute(
-            "INSERT INTO threads (id, title, first_user_message, rollout_path, archived) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                session_id,
-                title,
-                first_user_message,
-                str(rollout_path) if rollout_path else None,
-                1 if archived else 0,
-            ),
-        )
-        con.commit()
-    finally:
-        con.close()
+    """Write a codex ``state_5.sqlite`` holding one thread's row."""
+    write_codex_thread_store(
+        tmp_path,
+        [CodexThreadRow(session_id, title, first_user_message, rollout_path, archived)],
+        legacy_schema=legacy_schema,
+    )
 
 
 def _write_codex_turns(
@@ -1412,20 +1390,33 @@ def test_load_codex_session_reads_rollout_named_by_threads_rollout_path(
     assert sorted(path.name for path in tmp_path.iterdir()) == [home_name]
 
 
-def test_load_codex_session_follows_history_base_of_forked_thread(tmp_path: Path) -> None:
+@pytest.mark.parametrize("base_has_ordinals", [True, False], ids=["paginated", "legacy-base"])
+def test_load_codex_session_follows_history_base_of_forked_thread(
+    tmp_path: Path, base_has_ordinals: bool
+) -> None:
     """A fork child inherits the parent records before ``history_base.end_ordinal_exclusive``.
 
     The base turn that starts at the cutoff is excluded. ``end_byte_offset`` only lets Codex
     check that the base file still holds the prefix, so its value here is deliberately unrelated.
+    A base written without ``ordinal`` fields is cut at the same line position.
     """
     parent_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     child_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
     sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    parent = sessions / f"rollout-2026-10-02T10-00-00-{parent_id}.jsonl"
     _write_codex_turns(
-        sessions / f"rollout-2026-10-02T10-00-00-{parent_id}.jsonl",
+        parent,
         parent_id,
         [("parent question 1", "parent answer 1"), ("after the fork", "after the fork")],
     )
+    if not base_has_ordinals:
+        records = [json.loads(line) for line in parent.read_text().splitlines()]
+        parent.write_text(
+            "".join(
+                json.dumps({k: v for k, v in r.items() if k != "ordinal"}) + "\n" for r in records
+            ),
+            encoding="utf-8",
+        )
     cutoff = _codex_turn_end(0, 1)
     _write_codex_turns(
         sessions / f"rollout-2026-10-02T10-30-00-{child_id}.jsonl",
@@ -2022,6 +2013,12 @@ def test_list_recent_codex_sessions_uses_the_id_the_loader_resolves(
         sessions / f"rollout-2026-10-02T09-00-00-{filename_id}.jsonl",
         "019f680e-3edc-7fa3-9d50-1c4be395fa27",
         [("question", "answer")],
+    )
+    # Without a thread id in its name the loader cannot find it, so it is not listed.
+    _write_codex_turns(
+        sessions / "rollout-oddname.jsonl",
+        "01a11f4f-af66-74e3-92a6-6e9c14bf68a2",
+        [("unlisted question", "unlisted answer")],
     )
 
     recent = list_recent_local_session_ids("codex", limit=10)

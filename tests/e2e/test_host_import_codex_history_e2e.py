@@ -6,7 +6,6 @@ Fork and revert lineage is covered by the loader tests in tests/test_session_imp
 from __future__ import annotations
 
 import signal
-import sqlite3
 import subprocess
 import uuid
 from collections.abc import Iterator
@@ -16,7 +15,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests._helpers.codex_rollout import CodexRollout, codex_message
+from tests._helpers.codex_rollout import (
+    CodexRollout,
+    CodexThreadRow,
+    codex_message,
+    write_codex_thread_store,
+)
 from tests.e2e.test_host_e2e import _spawn_host_daemon, _wait_for_host_online
 
 pytestmark = pytest.mark.timeout(300)
@@ -41,7 +45,7 @@ def _seed_codex_home(home: Path) -> _Seeded:
     """Write a ``~/.codex`` holding a large compacted thread and an archived one."""
     codex = home / ".codex"
     sessions = codex / "sessions" / "2026" / "10" / "02"
-    rows: list[tuple[str, str, str, int]] = []
+    rows: list[CodexThreadRow] = []
 
     def name(thread_id: str, stamp: str) -> str:
         return f"rollout-2026-10-02T{stamp}-{thread_id}.jsonl"
@@ -65,7 +69,8 @@ def _seed_codex_home(home: Path) -> _Seeded:
             )
     big_path = sessions / name(compacted, "11-00-00")
     big.write(big_path)
-    rows.append((compacted, "compacted thread message 1", str(big_path), 0))
+    title = "compacted thread message 1"
+    rows.append(CodexThreadRow(compacted, title, title, big_path))
 
     # `codex archive` moves the rollout under archived_sessions/ and sets threads.archived.
     archived = str(uuid.uuid4())
@@ -73,21 +78,10 @@ def _seed_codex_home(home: Path) -> _Seeded:
     archived_rollout.turn(1, "archived thread question", "archived thread answer")
     archived_path = codex / "archived_sessions" / name(archived, "12-00-00")
     archived_rollout.write(archived_path)
-    rows.append((archived, "archived thread question", str(archived_path), 1))
+    title = "archived thread question"
+    rows.append(CodexThreadRow(archived, title, title, archived_path, archived=True))
 
-    con = sqlite3.connect(codex / "state_5.sqlite")
-    try:
-        con.execute(
-            "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, first_user_message TEXT, "
-            "rollout_path TEXT, archived INTEGER)"
-        )
-        con.executemany(
-            "INSERT INTO threads VALUES (?, ?, ?, ?, ?)",
-            [(thread, title, title, path, flag) for thread, title, path, flag in rows],
-        )
-        con.commit()
-    finally:
-        con.close()
+    write_codex_thread_store(codex, rows)
     return _Seeded(compacted, archived)
 
 

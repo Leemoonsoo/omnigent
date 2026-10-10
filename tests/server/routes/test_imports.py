@@ -1140,3 +1140,59 @@ async def test_import_session_archives_when_requested(
     )
     assert conversation is not None
     assert conversation.archived is True
+
+
+async def test_import_anchors_compactions_to_the_item_before_them(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """An imported compaction's cursor names a stored item, so history loads from it."""
+    from omnigent.runtime.workflow import _load_initial_history
+
+    _seed_claude_agent(db_uri)
+
+    def message(role: str, text: str) -> dict[str, object]:
+        content_type = "input_text" if role == "user" else "output_text"
+        data: dict[str, object] = {"role": role, "content": [{"type": content_type, "text": text}]}
+        if role == "assistant":
+            data["agent"] = "claude-native-ui"
+        return {"type": "message", "response_id": "claude:turn", "data": data}
+
+    payload = {
+        "source": "claude",
+        "external_session_id": "claude-compacted-1",
+        "items": [
+            message("user", "before compaction"),
+            message("assistant", "answer before compaction"),
+            {
+                "type": "compaction",
+                "response_id": "claude:compaction",
+                "data": {
+                    "summary": "summary of the first turn",
+                    "last_item_id": "import:compaction",
+                    "token_count": 0,
+                    "compacted_messages": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "summary"}],
+                        }
+                    ],
+                },
+            },
+            message("user", "after compaction"),
+            message("assistant", "answer after compaction"),
+        ],
+    }
+
+    created = await client.post("/v1/imports", json=payload)
+
+    assert created.status_code == 201, created.text
+    store = SqlAlchemyConversationStore(db_uri)
+    session_id = created.json()["session_id"]
+    stored = store.list_items(session_id, limit=10, order="asc").data
+    assert stored[2].type == "compaction"
+    assert stored[2].data.last_item_id == stored[1].id
+    loaded = _load_initial_history(store, session_id)
+    assert loaded.last_compaction_created_at is not None
+    assert [item.id for item in loaded.items[-2:]] == [stored[3].id, stored[4].id]

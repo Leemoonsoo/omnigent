@@ -235,18 +235,6 @@ def _codex_rollout_meta(path: Path) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _codex_thread_id_from_rollout(path: Path, meta: dict[str, object] | None) -> str | None:
-    """Thread id of a rollout: its filename's, as Codex and the loader resolve it.
-
-    ``session_meta.id`` is used only when the filename does not parse.
-    """
-    ids = _codex_rollout_ids(path)
-    if ids is not None:
-        return ids[0]
-    recorded = meta.get("id") if meta else None
-    return recorded if isinstance(recorded, str) and _is_codex_thread_id(recorded) else None
-
-
 def _codex_source_is_interactive(source: object) -> bool:
     """Whether a Codex session source is one the interactive picker shows.
 
@@ -362,9 +350,11 @@ def _recent_local_sessions_with_recency(
         candidates = []
         for path in rollouts:
             meta = _codex_rollout_meta(path)
-            session_id = _codex_thread_id_from_rollout(path, meta)
-            if session_id is None:
+            # Only rollouts the loader can resolve by filename; Codex names every one.
+            ids = _codex_rollout_ids(path)
+            if ids is None:
                 continue
+            session_id = ids[0]
             # Skip non-interactive runs (exec / mcp / sub-agent / internal)
             # that Codex itself hides.
             if not _codex_source_is_interactive(meta.get("source") if meta else None):
@@ -863,7 +853,7 @@ def _codex_compaction_item(payload: dict[str, object]) -> NewConversationItem | 
             if isinstance(summary, str) and summary.strip()
             else _CODEX_COMPACTION_FALLBACK_SUMMARY
         ),
-        # Imported boundaries predate any store item id.
+        # Placeholder; the import route anchors it to the item stored before it.
         "last_item_id": "codex:compaction",
         "token_count": 0,
         "compacted_messages": messages,
