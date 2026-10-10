@@ -97,6 +97,8 @@ def test_project_session_preview(
                 persisted.raise_for_status()
                 assert persisted.json()["project_id"] == project_id
         finally:
-            for session_id in session_ids:
-                client.delete(f"/v1/sessions/{session_id}").raise_for_status()
-            client.delete(f"/v1/projects/{project_id}").raise_for_status()
+            # Attempt every deletion before reporting any that failed.
+            responses = [client.delete(f"/v1/sessions/{sid}") for sid in session_ids]
+            responses.append(client.delete(f"/v1/projects/{project_id}"))
+            failed = [f"{r.request.url.path}: {r.status_code}" for r in responses if r.is_error]
+            assert not failed, f"cleanup failed: {failed}"

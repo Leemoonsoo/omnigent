@@ -45,6 +45,7 @@ const {
   pinnedIdsRef,
   projectSessionsMock,
   projectPagesMock,
+  bulkArchiveSpy,
   useHostsMock,
 } = vi.hoisted(() => ({
   projectsMock: [] as string[],
@@ -75,6 +76,7 @@ const {
   // Per-project server pages: the folder starts with the first and each
   // fetchNextPage appends the next, like the real cursor-paginated query.
   projectPagesMock: { current: {} as Record<string, unknown[][]> },
+  bulkArchiveSpy: vi.fn(),
   useHostsMock: vi.fn(),
 }));
 
@@ -93,6 +95,11 @@ vi.mock("@/hooks/useConversations", async () => {
   const { useRef, useState } = await import("react");
   return {
     ...conversationHooksMock(),
+    useBulkArchiveConversations: () => ({
+      mutate: bulkArchiveSpy,
+      isPending: false,
+      isError: false,
+    }),
     usePinnedConversations: () => {
       const idSet = new Set(pinnedIdsRef.current);
       return {
@@ -299,6 +306,7 @@ beforeEach(() => {
   fetchProjectSessionIdsMock.mockResolvedValue([]);
   projectSessionsMock.current = {};
   projectPagesMock.current = {};
+  bulkArchiveSpy.mockReset();
   pinnedIdsRef.current = [];
   // Default to a multi-user server so the tab-based tests see the tabs.
   isServerLocalMock.mockReturnValue(false);
@@ -2379,7 +2387,9 @@ describe("Sidebar project sections", () => {
     fireEvent.click(header);
     expect(header).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("1 selected")).toBeInTheDocument();
-    expect(screen.getByTestId("bulk-archive")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("bulk-archive"));
+    expect(bulkArchiveSpy).toHaveBeenCalledTimes(1);
+    expect([...bulkArchiveSpy.mock.calls[0][0].ids]).toEqual(["Alpha-7"]);
   });
 
   it("groups sessions by their project label, separate from Sessions", () => {

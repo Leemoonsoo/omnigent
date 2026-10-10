@@ -1442,11 +1442,8 @@ function ProjectFolder({
   selectedIds: Set<string>;
   onToggleSelected: (conversationId: string, shiftKey?: boolean) => void;
   onProjectAssigned?: (projectName: string) => void;
-  /** Report this folder's own loaded sessions and the ones it displays. The
-      folder paginates independently of the global window, so bulk-selection in
-      the projects scope must resolve selected rows against the loaded ones —
-      not the global list — or an out-of-window member would silently drop from
-      the action. Navigation follows the displayed ones. */
+  /** Report the folder's loaded rows (for bulk actions, which may target rows
+      outside the global window) and its displayed rows (for navigation). */
   onConversationsLoaded?: (
     name: string,
     conversations: Conversation[],
@@ -1509,9 +1506,7 @@ function ProjectFolder({
   );
   const marker = projectMarkerState(conversations, errors, startingConversationId);
 
-  // Publish the folder's rows upward: projects-scope bulk selection resolves
-  // the loaded ones (not the global paginated window), and the shift-select
-  // range and session hotkey follow the displayed ones.
+  // Keep loaded rows for bulk actions and displayed rows for navigation.
   useEffect(() => {
     onConversationsLoaded?.(name, conversations, visibleConversations);
   }, [name, conversations, visibleConversations, onConversationsLoaded]);
@@ -2181,13 +2176,8 @@ function ConversationList({
     });
   }, []);
 
-  // Sessions each ProjectFolder has loaded, keyed by project name. A folder
-  // paginates independently of the global window, so its rows can include
-  // members the global list hasn't loaded; projects-scope selection must
-  // resolve against these to avoid silently dropping an out-of-window row from
-  // a bulk action, even after its folder collapses. `folderDisplayedRows` holds
-  // the subset each folder shows, for the shift-select range and session hotkey.
-  // Folders report both via `onConversationsLoaded`.
+  // Per-project folder rows: loaded rows for bulk actions (they can be outside
+  // the global window), displayed rows for navigation and range selection.
   const [folderConversations, setFolderConversations] = useState<Map<string, Conversation[]>>(
     () => new Map(),
   );
