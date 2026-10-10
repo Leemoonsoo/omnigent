@@ -53,12 +53,12 @@ import { cn } from "@/lib/utils";
 const SubagentsGraphView = lazy(() =>
   import("./SubagentsGraphView").then((m) => ({ default: m.SubagentsGraphView })),
 );
-import { nativeCodingAgentForWrapper, WRAPPER_LABEL_KEY } from "@/lib/nativeCodingAgents";
 import {
-  ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER,
-  childPrimaryLabel,
   CODEX_NATIVE_SUBAGENT_WRAPPER,
-} from "./subagentLabel";
+  nativeCodingAgentForWrapper,
+  WRAPPER_LABEL_KEY,
+} from "@/lib/nativeCodingAgents";
+import { ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER, childPrimaryLabel } from "./subagentLabel";
 import { childStatus, type AgentActivity, type AgentStatus } from "./subagentStatus";
 import { AddAgentDialog } from "./AddAgentDialog";
 

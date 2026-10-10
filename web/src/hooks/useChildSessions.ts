@@ -99,6 +99,11 @@ export function childSessionsQueryKey(conversationId: string): readonly unknown[
   return ["conversation", conversationId, "child_sessions"];
 }
 
+/** True for any key built by ``childSessionsQueryKey``. */
+function isChildSessionsQueryKey(key: readonly unknown[]): boolean {
+  return key.length === 3 && key[0] === "conversation" && key[2] === "child_sessions";
+}
+
 /**
  * Walk the cached child-session lists to test whether ``targetId`` is
  * a known descendant of ``rootId``.
@@ -282,7 +287,7 @@ export function useDescendantSession(
   const subscribe = useCallback(
     (onChange: () => void) =>
       queryClient.getQueryCache().subscribe((event) => {
-        if (event.query.queryKey[2] === "child_sessions") onChange();
+        if (isChildSessionsQueryKey(event.query.queryKey)) onChange();
       }),
     [queryClient],
   );
