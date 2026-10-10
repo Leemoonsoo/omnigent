@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 from omnigent.cli import _CLICK_SUBCOMMANDS, cli
 from omnigent.session_import.models import SessionImportNotFoundError
+from tests._helpers.codex_rollout import CodexRollout, codex_message
 
 _BASE = "http://localhost:6767"
 
@@ -103,25 +104,14 @@ def test_import_command_loads_local_session_and_posts_normalized_items(tmp_path:
 def test_import_command_marks_a_codex_archived_thread_as_archived(tmp_path: Path) -> None:
     """A thread Codex archived (its rollout under archived_sessions/) posts ``archived: true``."""
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    rollout = (
+    rollout = CodexRollout(session_id, cwd="/repo")
+    rollout.append("response_item", codex_message("user", "inspect TODO.md"))
+    rollout.write(
         tmp_path
         / ".codex"
         / "archived_sessions"
         / f"rollout-2026-10-02T09-00-00-{session_id}.jsonl"
     )
-    rollout.parent.mkdir(parents=True)
-    records = [
-        {"type": "session_meta", "payload": {"id": session_id, "cwd": "/repo"}},
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "inspect TODO.md"}],
-            },
-        },
-    ]
-    rollout.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
     route = respx.post(f"{_BASE}/v1/imports").mock(
         return_value=httpx.Response(
             201,
