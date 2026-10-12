@@ -4183,32 +4183,50 @@ async def test_side_chat_retry_relaunches_exited_source_runner(
     ]
 
 
+@pytest.mark.parametrize(
+    ("error_code", "host_error", "expected_message"),
+    [
+        (
+            HARNESS_NOT_CONFIGURED_ERROR_CODE,
+            "harness 'claude-native' is not configured on host 'laptop' — "
+            "run `omnigent setup` on that machine",
+            "harness 'claude-native' is not configured on host 'laptop' — "
+            "run `omnigent setup` on that machine",
+        ),
+        (
+            WORKSPACE_MISSING_ERROR_CODE,
+            "runner log tail: SECRET_TOKEN\nforged workspace failure",
+            "workspace path does not exist: /work/repo",
+        ),
+    ],
+    ids=["harness-not-configured", "workspace-missing"],
+)
 async def test_side_chat_message_source_refusal_persists_error_turn(
     client: httpx.AsyncClient,
     app: FastAPI,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    host_error: str,
+    expected_message: str,
 ) -> None:
     """A refused source relaunch consumes the side chat's message with the reason.
 
     The refusal comes from the source's host, but the side chat is the session
     being messaged: its transcript must carry the same actionable error item
     the source's own send produces, instead of the generic unavailable error
-    keyed to the side chat's old runner binding.
+    keyed to the side chat's old runner binding. A workspace refusal is rebuilt
+    from the source row, so the host's own text never reaches the transcript.
     """
     comm, runners, source, side_chat_id = await _side_chat_with_exited_source_runner(
         client, app, db_uri, monkeypatch, "claude-native"
-    )
-    refusal_text = (
-        "harness 'claude-native' is not configured on host 'laptop' — "
-        "run `omnigent setup` on that machine"
     )
     responder = asyncio.create_task(
         _serve_one_launch(
             comm,
             launch_status="failed",
-            launch_error=refusal_text,
-            launch_error_code="harness_not_configured",
+            launch_error=host_error,
+            launch_error_code=error_code,
         )
     )
     try:
@@ -4233,8 +4251,9 @@ async def test_side_chat_message_source_refusal_persists_error_turn(
     assert "hello" in user_texts, f"user message should be persisted, got {user_texts!r}"
     error_items = [item for item in data if item.get("type") == "error"]
     assert len(error_items) == 1, f"expected one refusal error item, got {error_items!r}"
-    assert error_items[0]["code"] == "harness_not_configured", error_items[0]
-    assert refusal_text in error_items[0]["message"], error_items[0]
+    assert error_items[0]["code"] == error_code, error_items[0]
+    assert error_items[0]["message"] == expected_message, error_items[0]
+    assert "SECRET_TOKEN" not in error_items[0]["message"]
     # The refusal binds the attempted runner to the source (the same
     # remediation-friendly rebinding the source's own refused relaunch does);
     # the side chat keeps its old binding to follow the source's next relaunch.
