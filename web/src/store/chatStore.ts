@@ -4868,16 +4868,8 @@ async function reconcileActiveSessionStatus(
   }
   set((s) => {
     const patch = reconnectStatusPatch(session, s, stateBeforeFetch.mcpStartupLaunch);
-    // A snapshot that settles the open turn stands in for its missed terminal
-    // edge, spinner cleanup included. (A reconnect already dropped the open
-    // turn's spinner with its other ephemeral blocks.)
-    const open = s.activeResponse;
-    const next = patch.activeResponse;
-    const settled =
-      open?.state === "streaming" && next != null && next.state !== "streaming"
-        ? withoutSettledCompactionSpinners(s.blocks, open.responseId)
-        : null;
-    return settled === null ? patch : { ...patch, blocks: settled };
+    const blocks = snapshotCompactionSpinners(s.blocks, s.activeResponse, patch.activeResponse);
+    return blocks === null ? patch : { ...patch, blocks };
   });
   if (session.usageIncluded === false) void hydrateSessionUsage(id);
   const ignored = nativePreviewTombstonesByController.get(controller);
@@ -5316,6 +5308,8 @@ async function reconcileOnReconnect(
       preGapElicitations.autoResolved,
     );
     if (reconciled !== null) nextBlocks = reconciled;
+    nextBlocks =
+      snapshotCompactionSpinners(nextBlocks, s.activeResponse, patch.activeResponse) ?? nextBlocks;
     if (nextBlocks !== s.blocks) patch.blocks = nextBlocks;
     return patch;
   });
@@ -6069,16 +6063,8 @@ export function adoptTrailingUnattributedBlocks(
 }
 
 /**
- * Hand every "Compacting…" spinner still on screen to a turn that is starting.
- *
- * Compaction progress events carry no response id, so the reducer stamps a
- * spinner with whichever turn it last saw. The runner publishes `/compact`
- * progress just before it dispatches the turn that compacts, which stamps that
- * spinner with the previous turn; and a spinner whose terminal compaction event
- * was lost belongs to a turn that already ended. Adopting both into the
- * starting turn keeps a live spinner on screen and lets
- * {@link withoutSettledCompactionSpinners} retire it when this turn settles,
- * should no terminal compaction event arrive first.
+ * Assign visible "Compacting…" spinners to the starting turn, because
+ * compaction progress can arrive before the turn that compacts is dispatched.
  *
  * @returns the rewritten blocks, or `null` when nothing needed adopting.
  */
@@ -6106,6 +6092,32 @@ export function withoutSettledCompactionSpinners(
   const owned = (b: AnyBlock) => b.type === "compaction_loading" && b.ctx.responseId === responseId;
   if (!blocks.some(owned)) return null;
   return blocks.filter((b) => !owned(b));
+}
+
+/**
+ * Apply the turn transition a status snapshot makes to the "Compacting…"
+ * spinners, as the live edge it stands in for would: settling the open turn
+ * retires its spinners, and revealing a newly running turn hands them to it.
+ *
+ * @param before The conversation's `activeResponse` before the snapshot.
+ * @param after The snapshot patch's `activeResponse`; `undefined` when the
+ *   snapshot left it unchanged.
+ * @returns the rewritten blocks, or `null` when nothing changes.
+ */
+function snapshotCompactionSpinners(
+  blocks: AnyBlock[],
+  before: ActiveResponse | null,
+  after: ActiveResponse | null | undefined,
+): AnyBlock[] | null {
+  if (after == null) return null;
+  if (after.state === "streaming") {
+    return after.responseId !== before?.responseId
+      ? adoptCompactionSpinners(blocks, after.responseId)
+      : null;
+  }
+  return before?.state === "streaming"
+    ? withoutSettledCompactionSpinners(blocks, before.responseId)
+    : null;
 }
 
 // How long after a terminal edge a delta still belongs to the finished
@@ -6447,11 +6459,9 @@ export async function pumpStreamEvents(
         if (active !== null && active.responseId !== endedId) {
           continue;
         }
-        // A repeated terminal for an already-settled turn must not take a
+        // A terminal for an already-settled (or stopped) turn must not take a
         // spinner published after it (an idle `/compact` is stamped with it).
-        const settlesTurn =
-          endedId !== "" &&
-          (active === null || active.state === "streaming" || active.state === "cancelled");
+        const settlesTurn = endedId !== "" && (active === null || active.state === "streaming");
         // If the active response was already marked cancelled by an
         // earlier `session.interrupted`, keep that. Session events
         // are the authoritative source for user-initiated terminals.
@@ -7404,9 +7414,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         if (event.status === "idle" || event.status === "failed" || event.status === "waiting") {
           if (event.responseId !== undefined && s.activeResponse?.responseId === event.responseId) {
             patch.status = "idle";
-            if (s.activeResponse.state === "streaming" || s.activeResponse.state === "cancelled") {
-              settledResponseId = event.responseId;
-            }
+            if (s.activeResponse.state === "streaming") settledResponseId = event.responseId;
             if (s.activeResponse.state !== "cancelled") {
               patch.activeResponse = {
                 responseId: event.responseId,
@@ -7807,6 +7815,13 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         });
       }
       finalizeCurrentActive("cancelled", event.responseId, sourceConversationId);
+      // Stopping the turn stops its compaction, and the idle that follows a
+      // native stop may name no turn, so the stop itself retires the spinner.
+      applyToConversation((s) => {
+        const stopped = s.activeResponse?.responseId;
+        const blocks = stopped ? withoutSettledCompactionSpinners(s.blocks, stopped) : null;
+        return blocks === null ? {} : { blocks };
+      });
       return;
     case "session_created":
       // A side chat the user asked for (via `/side`, the `+` tray, or the rail's

@@ -75,7 +75,6 @@ def test_compaction_indicator_clears_when_its_turn_settles(
     _post_compaction_status(base_url, session_id)
     indicator = page.locator(_INDICATOR)
     expect(indicator).to_be_visible(timeout=10_000)
-    page.wait_for_timeout(3_000)
 
     _post_event(base_url, session_id, "external_session_status", {"status": "idle", **turn})
     expect(indicator).to_have_count(0, timeout=10_000)

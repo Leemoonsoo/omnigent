@@ -13247,54 +13247,145 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
-  it("clears the open turn's compaction spinner when a status snapshot settles the turn", async () => {
-    seedSession("conv_spinner_gap", []);
+  /**
+   * Pump a conversation whose "Compacting…" spinner is owned by `owner`, and
+   * whose status snapshot is `snapshot` (the idle seed when omitted).
+   */
+  async function startSpinnerSnapshotPump(
+    id: string,
+    owner: string,
+    state: Partial<ConversationState>,
+    snapshot?: Record<string, unknown>,
+  ) {
+    seedSession(id, []);
     const sink = pushableStream();
+    let snapshotFetches = 0;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url === "/v1/sessions/conv_spinner_gap/stream") {
+      if (url === `/v1/sessions/${id}/stream`) {
         init?.signal?.addEventListener("abort", () =>
           sink.error(new DOMException("aborted", "AbortError")),
         );
         return mockResponse(null, { bodyStream: sink.stream });
       }
+      if (url.startsWith(`/v1/sessions/${id}?`) && (init?.method ?? "GET") === "GET") {
+        snapshotFetches += 1;
+        if (snapshot) return mockResponse(snapshot);
+      }
       return defaultFetchHandler(input, init);
     });
     const controller = new AbortController();
-    const bound = bindConversationForTest("conv_spinner_gap", {
+    const bound = bindConversationForTest(id, {
       abortController: controller,
-      sessionStatus: "running",
-      status: "streaming",
-      activeResponse: { responseId: "resp_live", state: "streaming", error: null },
+      ...state,
       blocks: [
         {
           type: "compaction_loading",
-          ctx: {
-            agent: null,
-            depth: 0,
-            turn: 0,
-            timestamp: 0,
-            responseId: "resp_live",
-            itemId: null,
-          },
+          ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId: owner, itemId: null },
         },
       ],
     });
-
-    const loop = startStreamPump("conv_spinner_gap", controller, bound.set, bound.get);
+    const loop = startStreamPump(id, controller, bound.set, bound.get);
     await drainAsync();
+    return {
+      sink,
+      bound,
+      snapshotFetches: () => snapshotFetches,
+      spinnerIds: () =>
+        bound
+          .get()
+          .blocks.filter((b) => b.type === "compaction_loading")
+          .map((b) => b.ctx.responseId),
+      stop: async () => {
+        controller.abort();
+        await drainAsync(2);
+        await loop;
+      },
+    };
+  }
+
+  it("clears the open turn's compaction spinner when a status snapshot settles the turn", async () => {
+    const pump = await startSpinnerSnapshotPump("conv_spinner_gap", "resp_live", {
+      sessionStatus: "running",
+      status: "streaming",
+      activeResponse: { responseId: "resp_live", state: "streaming", error: null },
+    });
 
     // Heartbeats keep the stream open while both the compaction terminal
     // and the turn's idle edge are missing.
-    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await advanceWithHeartbeats(pump.sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
     await drainAsync();
 
-    expect(bound.get().activeResponse?.state).toBe("completed");
-    expect(bound.get().blocks.some((b) => b.type === "compaction_loading")).toBe(false);
+    expect(pump.bound.get().activeResponse?.state).toBe("completed");
+    expect(pump.spinnerIds()).toEqual([]);
 
-    controller.abort();
-    await drainAsync(2);
-    await loop;
+    await pump.stop();
+  });
+
+  it("keeps a spinner shown after a stopped turn when a status snapshot arrives", async () => {
+    const pump = await startSpinnerSnapshotPump("conv_spinner_stopped", "resp_stopped", {
+      sessionStatus: "idle",
+      status: "idle",
+      activeResponse: {
+        responseId: "resp_stopped",
+        state: "cancelled",
+        error: null,
+        completedAt: Date.now(),
+      },
+    });
+
+    await advanceWithHeartbeats(pump.sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+
+    expect(pump.snapshotFetches()).toBeGreaterThan(0);
+    expect(pump.spinnerIds()).toEqual(["resp_stopped"]);
+
+    await pump.stop();
+  });
+
+  it("hands spinners to a running turn a status snapshot reveals", async () => {
+    // The live `running` edge naming the new turn was missed; the snapshot
+    // reopens it, and the turn's own terminal edge must then take the spinner.
+    const pump = await startSpinnerSnapshotPump(
+      "conv_spinner_reopen",
+      "resp_prev",
+      {
+        sessionStatus: "idle",
+        status: "idle",
+        activeResponse: {
+          responseId: "resp_prev",
+          state: "completed",
+          error: null,
+          completedAt: Date.now(),
+        },
+      },
+      {
+        id: "conv_spinner_reopen",
+        agent_id: "agent_xyz",
+        status: "running",
+        active_response_id: "resp_new",
+        created_at: 0,
+        items: [],
+        labels: {},
+      },
+    );
+
+    await advanceWithHeartbeats(pump.sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+    expect(pump.bound.get().activeResponse?.responseId).toBe("resp_new");
+    expect(pump.spinnerIds()).toEqual(["resp_new"]);
+
+    pump.sink.push(
+      sse("session.status", {
+        conversation_id: "conv_spinner_reopen",
+        status: "idle",
+        response_id: "resp_new",
+      }),
+    );
+    await drainAsync();
+    expect(pump.spinnerIds()).toEqual([]);
+
+    await pump.stop();
   });
 
   it("keeps a live status event that arrives during snapshot reconciliation", async () => {
@@ -17900,21 +17991,44 @@ describe("chatStore — compaction spinner follows its turn", () => {
     expect(spinnerIds()).toEqual([]);
   });
 
-  it("clears an interrupted turn's spinner when the terminal edge names that turn", () => {
+  it("clears a turn's spinner when the turn is stopped", () => {
     useChatStore.setState({
       conversationId: "conv_native",
-      activeResponse: { responseId: "codex_turn_1", state: "cancelled", error: null },
-      blocks: [spinner("codex_turn_1")],
+      activeResponse: { responseId: "claude_turn_1", state: "streaming", error: null },
+      blocks: [spinner("claude_turn_1")],
     });
 
+    handleSessionEvent({
+      type: "session_interrupted",
+      requestedAt: 0,
+      responseId: "claude_turn_1",
+    });
+
+    expect(spinnerIds()).toEqual([]);
+    expect(useChatStore.getState().activeResponse?.state).toBe("cancelled");
+  });
+
+  it("keeps a spinner shown after a stop through the stopped turn's terminal edges", () => {
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: {
+        responseId: "claude_turn_1",
+        state: "cancelled",
+        error: null,
+        completedAt: Date.now(),
+      },
+      blocks: [spinner("claude_turn_1")],
+    });
+
+    handleSessionEvent({ type: "session_status", conversationId: "conv_native", status: "idle" });
     handleSessionEvent({
       type: "session_status",
       conversationId: "conv_native",
       status: "idle",
-      responseId: "codex_turn_1",
+      responseId: "claude_turn_1",
     });
 
-    expect(spinnerIds()).toEqual([]);
+    expect(spinnerIds()).toEqual(["claude_turn_1"]);
   });
 
   it("keeps a spinner that started after the turn settled", () => {
