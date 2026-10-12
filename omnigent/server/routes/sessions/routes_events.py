@@ -238,6 +238,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _heal_subagent_runner_binding_via_parent,
     _is_native_terminal_session,
     _mark_dispatch_in_flight,
+    _may_edit_side_chat_source,
     _maybe_relaunch_managed_sandbox,
     _maybe_wake_stale_resumable_managed_sandbox,
     _native_pane_harness,
@@ -252,6 +253,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _recover_side_chat_runner_via_source,
     _resolve_elicitation,
     _runner_live_on_another_replica_from_conversations,
+    _side_chat_source_id,
     _stop_host_runner_intentionally,
     _wait_for_host_bound_runner_client,
     _wait_for_host_reconnect,
@@ -309,7 +311,10 @@ from omnigent.util.session_lifecycle import (
 _retry_recovery_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )
-_retry_recovery_tasks: WorkspaceScopedCache[str, asyncio.Task[dict[str, bool | str]]] = (
+# One shared Resume attempt per (session, caller's source access); see
+# _retry_session_single_flight.
+_RetryFlight = tuple[str, bool | None]
+_retry_recovery_tasks: WorkspaceScopedCache[_RetryFlight, asyncio.Task[dict[str, bool | str]]] = (
     WorkspaceScopedCache()
 )
 
@@ -414,12 +419,12 @@ def _retry_recovery_lock(session_id: str) -> asyncio.Lock:
 
 
 def _evict_retry_recovery_task(
-    session_id: str,
+    flight: _RetryFlight,
     completed_task: asyncio.Task[dict[str, bool | str]],
 ) -> None:
     """Evict a settled retry task without disturbing a newer attempt."""
-    if _retry_recovery_tasks.get(session_id) is completed_task:
-        _retry_recovery_tasks.pop(session_id, None)
+    if _retry_recovery_tasks.get(flight) is completed_task:
+        _retry_recovery_tasks.pop(flight, None)
     if not completed_task.cancelled():
         completed_task.exception()
 
@@ -549,8 +554,8 @@ async def _recover_retry_session(
     session_id: str,
     conversation_store: ConversationStore,
     runner_router: RunnerRouter | None,
-    user_id: str | None = None,
-    permission_store: PermissionStore | None = None,
+    user_id: str | None,
+    permission_store: PermissionStore | None,
 ) -> dict[str, bool | str]:
     """Recover runner/terminal readiness without creating transcript input."""
     conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
@@ -643,15 +648,32 @@ async def _retry_session_single_flight(
     *,
     request: Request,
     session_id: str,
+    conversation: Conversation | None,
     conversation_store: ConversationStore,
     runner_router: RunnerRouter | None,
-    user_id: str | None = None,
-    permission_store: PermissionStore | None = None,
+    user_id: str | None,
+    permission_store: PermissionStore | None,
 ) -> dict[str, bool | str]:
-    """Share one in-flight recovery attempt across concurrent callers."""
+    """Share one in-flight recovery attempt across concurrent callers.
+
+    A side chat's recovery relaunches its source only for callers who may edit
+    that source, so callers with and without that access never share an attempt.
+    """
+    source_id = _side_chat_source_id(conversation) if conversation is not None else None
+    source_access = (
+        None
+        if source_id is None or permission_store is None
+        else await _may_edit_side_chat_source(
+            source_id,
+            conversation_store=conversation_store,
+            user_id=user_id,
+            permission_store=permission_store,
+        )
+    )
+    flight: _RetryFlight = (session_id, source_access)
     lock = _retry_recovery_lock(session_id)
     async with lock:
-        task = _retry_recovery_tasks.get(session_id)
+        task = _retry_recovery_tasks.get(flight)
         if task is None:
             task = asyncio.create_task(
                 _recover_retry_session(
@@ -663,9 +685,9 @@ async def _retry_session_single_flight(
                     permission_store=permission_store,
                 )
             )
-            _retry_recovery_tasks[session_id] = task
+            _retry_recovery_tasks[flight] = task
             task.add_done_callback(
-                lambda completed_task: _evict_retry_recovery_task(session_id, completed_task)
+                lambda completed_task: _evict_retry_recovery_task(flight, completed_task)
             )
     return await asyncio.shield(task)
 
@@ -1150,6 +1172,7 @@ def register_events_routes(
             return await _retry_session_single_flight(
                 request=cast("Request", request),
                 session_id=session_id,
+                conversation=conv,
                 conversation_store=conversation_store,
                 runner_router=runner_router,
                 user_id=user_id,
@@ -2410,10 +2433,9 @@ def register_events_routes(
                 # holds the child's state — no re-initialization needed.
                 _runner_needs_session_init = _is_native_terminal_session(conv)
         if runner_client is None:
-            # A side chat shares its source's runner and has no host of its own.
-            # A categorical relaunch refusal for the source consumes the
-            # message with the actionable reason, exactly like the session's
-            # own host-bound relaunch below.
+            # Side chats share the source's runner and have no host. A categorical
+            # source relaunch refusal consumes the message with its actionable
+            # reason, like the host-bound relaunch below.
             try:
                 runner_client, conv = await _recover_side_chat_runner_via_source(
                     conv,

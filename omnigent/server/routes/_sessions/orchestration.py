@@ -4684,6 +4684,32 @@ def _side_chat_source_id(conv: Conversation) -> str | None:
 _SIDE_CHAT_RECOVERY_ATTEMPTS = 3
 
 
+async def _may_edit_side_chat_source(
+    source_id: str,
+    *,
+    conversation_store: ConversationStore,
+    user_id: str | None,
+    permission_store: PermissionStore | None,
+    source: Conversation | None = None,
+) -> bool:
+    """Return whether the caller may relaunch a side chat's source runner.
+
+    Recovery restarts the source's runner, so it needs the same edit access a
+    message to the source would. Always ``True`` when auth is off.
+    """
+    if permission_store is None:
+        return True
+    return await asyncio.to_thread(
+        check_session_access,
+        user_id,
+        source_id,
+        LEVEL_EDIT,
+        permission_store,
+        conversation_store,
+        source,
+    )
+
+
 async def _recover_side_chat_runner_via_source(
     side_chat: Conversation,
     *,
@@ -4710,26 +4736,25 @@ async def _recover_side_chat_runner_via_source(
     source = await asyncio.to_thread(conversation_store.get_conversation, source_id)
     if source is None:
         return None, side_chat
-    if permission_store is not None and not await asyncio.to_thread(
-        check_session_access,
-        user_id,
+    if not await _may_edit_side_chat_source(
         source_id,
-        LEVEL_EDIT,
-        permission_store,
-        conversation_store,
-        source,
+        conversation_store=conversation_store,
+        user_id=user_id,
+        permission_store=permission_store,
+        source=source,
     ):
         return None, side_chat
-    if (
-        runner_router is not None
-        and source.host_id is not None
-        and await asyncio.to_thread(runner_router.host_is_on_another_replica, source.host_id)
-    ):
-        raise OmnigentError(
-            "side chat runner is connected to another server replica",
-            code=ErrorCode.WRONG_REPLICA,
-        )
     for _ in range(_SIDE_CHAT_RECOVERY_ATTEMPTS):
+        # Checked per attempt: a retry's fresh source row can name another host.
+        if (
+            runner_router is not None
+            and source.host_id is not None
+            and await asyncio.to_thread(runner_router.host_is_on_another_replica, source.host_id)
+        ):
+            raise OmnigentError(
+                "side chat runner is connected to another server replica",
+                code=ErrorCode.WRONG_REPLICA,
+            )
         source_client, source = await ensure_runner_connected(
             session_id=source_id,
             conv=source,
@@ -4795,6 +4820,13 @@ async def _recover_side_chat_runner_via_source(
             await _get_runner_client(side_chat.id, runner_router, conversation=side_chat),
             side_chat,
         )
+    _logger.warning(
+        "Side chat %s recovery gave up after %d attempts; source %s kept changing runners",
+        side_chat.id,
+        _SIDE_CHAT_RECOVERY_ATTEMPTS,
+        source_id,
+        extra={"session_id": side_chat.id},
+    )
     return None, side_chat
 
 

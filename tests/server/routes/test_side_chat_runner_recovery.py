@@ -1,7 +1,9 @@
 """Side chats recover their shared runner through their source session."""
 
+import asyncio
 import dataclasses
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -18,6 +20,7 @@ from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.conversation_store import SIDE_CHAT_LABEL_KEY, SIDE_CHAT_SOURCE_LABEL_KEY
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from tests.budgets import budget
 from tests.server.helpers import create_test_agent
 
 _HOST_ID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
@@ -175,11 +178,9 @@ async def test_side_chat_recovery_preserves_concurrent_rebind(
         store.replace_runner_id(side.id, advanced)
         expected_ensure_calls = 2  # revalidation catches the advance and retries
     else:
-        # The side chat is unbound when recovery starts; the concurrent
-        # recovery lands between this recovery's source validation and its
-        # bind, so only the absent-only write stands between C and a stale B.
-        # The staged snapshot matches the stored source so validation passes
-        # before the race.
+        # Unbound side chat: the concurrent recovery lands between source
+        # validation and the bind, so only the absent-only write keeps C from
+        # being overwritten by stale B.
         stale_runner = "runner-replacement"
         staged = _AdvancingSource(advanced=advanced, stale_runner=stale_runner)
         store.clear_runner_id(side.id)
@@ -187,10 +188,9 @@ async def test_side_chat_recovery_preserves_concurrent_rebind(
         real_set = store.set_runner_id
 
         def _racing_set(conversation_id: str, runner_id: str) -> bool:
-            if (
-                conversation_id == side.id
-                and store.get_conversation(source.id).runner_id != advanced
-            ):
+            current_source = store.get_conversation(source.id)
+            assert current_source is not None
+            if conversation_id == side.id and current_source.runner_id != advanced:
                 store.replace_runner_id(source.id, advanced)
                 store.replace_runner_id(side.id, advanced)
             return real_set(conversation_id, runner_id)
@@ -312,6 +312,98 @@ async def test_side_chat_recovery_gates_on_source_edit_access_at_the_routes(
     )
     assert allowed.status_code == 503, allowed.text
     assert [c.kwargs["session_id"] for c in ensure.await_args_list] == [side.id, source.id]
+
+
+async def test_resume_single_flight_separates_callers_by_source_access(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent Resume callers share recovery only with callers of equal source access.
+
+    A caller who cannot edit the source starts recovery first and is held open.
+    An authorized caller arriving meanwhile gets its own attempt instead of the
+    denied caller's 503, and a later authorized caller shares that attempt.
+    """
+    store = SqlAlchemyConversationStore(db_uri)
+    source, side = _source_and_side_chat(store, db_uri)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    for user in (_OWNER, _OTHER):
+        permissions.ensure_user(user)
+    permissions.grant(_OWNER, source.id, LEVEL_OWNER)
+    permissions.grant(_OWNER, side.id, LEVEL_OWNER)
+    permissions.grant(_OTHER, side.id, LEVEL_EDIT)
+
+    denied_started, release_denied = asyncio.Event(), asyncio.Event()
+    authorized_started, release_authorized = asyncio.Event(), asyncio.Event()
+    joiner_checked = asyncio.Event()
+    recoveries: list[str | None] = []
+    owner_checks = 0
+    real_access = routes_events._may_edit_side_chat_source
+
+    async def _access_spy(source_id: str, **kwargs: Any) -> bool:
+        nonlocal owner_checks
+        allowed = await real_access(source_id, **kwargs)
+        if kwargs["user_id"] == _OWNER:
+            owner_checks += 1
+            if owner_checks == 2:
+                joiner_checked.set()
+        return allowed
+
+    async def _recover(*, user_id: str | None, **_kwargs: Any) -> dict[str, bool | str]:
+        recoveries.append(user_id)
+        if user_id == _OTHER:
+            denied_started.set()
+            await release_denied.wait()
+            raise OmnigentError(
+                "No runner is available to recover this session.",
+                code=ErrorCode.RUNNER_UNAVAILABLE,
+            )
+        authorized_started.set()
+        await release_authorized.wait()
+        return {"queued": False, "recovered": True, "recovery": "runner_relaunched"}
+
+    monkeypatch.setattr(routes_events, "_may_edit_side_chat_source", _access_spy)
+    monkeypatch.setattr(routes_events, "_recover_retry_session", _recover)
+
+    def _resume(user_id: str) -> asyncio.Task[dict[str, bool | str]]:
+        return asyncio.create_task(
+            routes_events._retry_session_single_flight(
+                request=None,
+                session_id=side.id,
+                conversation=side,
+                conversation_store=store,
+                runner_router=None,
+                user_id=user_id,
+                permission_store=permissions,
+            )
+        )
+
+    async def _within_budget(event: asyncio.Event, what: str) -> None:
+        try:
+            await asyncio.wait_for(event.wait(), timeout=budget(5.0))
+        except TimeoutError:
+            pytest.fail(f"{what} never started its own recovery attempt")
+
+    tasks: list[asyncio.Task[dict[str, bool | str]]] = []
+    try:
+        tasks.append(denied := _resume(_OTHER))
+        await _within_budget(denied_started, "the denied caller")
+        tasks.append(authorized := _resume(_OWNER))
+        await _within_budget(authorized_started, "the authorized caller")
+        tasks.append(joiner := _resume(_OWNER))
+        # The spy fires after the joiner's access check; it then joins without yielding.
+        await _within_budget(joiner_checked, "the second authorized caller")
+        release_authorized.set()
+        assert (await authorized)["recovery"] == "runner_relaunched"
+        assert (await joiner)["recovery"] == "runner_relaunched"
+        release_denied.set()
+        with pytest.raises(OmnigentError) as raised:
+            await denied
+        assert raised.value.code == ErrorCode.RUNNER_UNAVAILABLE
+    finally:
+        release_authorized.set()
+        release_denied.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert recoveries == [_OTHER, _OWNER]
 
 
 async def test_side_chat_recovery_redirects_when_source_host_is_on_another_replica(

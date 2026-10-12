@@ -3611,14 +3611,18 @@ async def test_retry_session_single_flight_evicts_after_only_waiter_cancelled(
         return second_result
 
     monkeypatch.setattr(routes_events, "_recover_retry_session", _recover)
-    routes_events._retry_recovery_tasks.pop(session_id, None)
+    flight = (session_id, None)
+    routes_events._retry_recovery_tasks.pop(flight, None)
 
     waiter = asyncio.create_task(
         routes_events._retry_session_single_flight(
             request=None,
             session_id=session_id,
+            conversation=None,
             conversation_store=None,
             runner_router=None,
+            user_id=None,
+            permission_store=None,
         )
     )
     await first_started.wait()
@@ -3629,17 +3633,20 @@ async def test_retry_session_single_flight_evicts_after_only_waiter_cancelled(
     finish_first.set()
     await first_settled.wait()
     for _ in range(10):
-        if session_id not in routes_events._retry_recovery_tasks:
+        if flight not in routes_events._retry_recovery_tasks:
             break
         await asyncio.sleep(0)
 
-    assert session_id not in routes_events._retry_recovery_tasks
+    assert flight not in routes_events._retry_recovery_tasks
     assert (
         await routes_events._retry_session_single_flight(
             request=None,
             session_id=session_id,
+            conversation=None,
             conversation_store=None,
             runner_router=None,
+            user_id=None,
+            permission_store=None,
         )
         == second_result
     )
