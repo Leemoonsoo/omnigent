@@ -4728,7 +4728,8 @@ async def _recover_side_chat_runner_via_source(
     (relaunching it on the source's host when needed), revalidates the source,
     and rebinds the side chat atomically so concurrent rebindings are
     preserved. The caller must initialize the side chat on the returned
-    runner; recovery requires edit access to the source.
+    runner. Recovery requires edit access to the source and, like an explicit
+    runner attach, ownership of the runner the side chat would use.
     """
     source_id = _side_chat_source_id(side_chat)
     if source_id is None:
@@ -4774,6 +4775,16 @@ async def _recover_side_chat_runner_via_source(
         if live_source.runner_id != source.runner_id:
             source = live_source
             continue
+        if user_id is not None and runner_router is not None:
+            runner_owner = runner_router.runner_owner(source.runner_id)
+            if runner_owner is not None and runner_owner != user_id:
+                _logger.info(
+                    "Side chat %s not recovered: source runner %s has another owner",
+                    side_chat.id,
+                    source.runner_id,
+                    extra={"session_id": side_chat.id},
+                )
+                return None, side_chat
         if source.runner_id != side_chat.runner_id:
             try:
                 if side_chat.runner_id is None:

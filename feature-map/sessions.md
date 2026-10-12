@@ -471,7 +471,9 @@ plain `uv run pytest`, which starts a private server for the test.
 - Starting a side chat after its parent stopped relaunches the parent. The new
   chat shares that replacement runner and stops with the parent again.
 - A side chat has no host of its own. When its shared runner is gone, recovery
-  goes through the parent and requires edit access to the parent.
+  goes through the parent. It requires edit access to the parent and, as for
+  attaching a runner, ownership of the parent's runner. Another editor's side
+  chat stays unbound.
 - Ask in side chat reuses only a visible, writable tab belonging to the current
   parent. Hidden, ended, and currently starting tabs are ineligible; another
   selection opens a new unsent tab. Ended chats do not offer Reply.

@@ -314,54 +314,40 @@ async def test_side_chat_recovery_gates_on_source_edit_access_at_the_routes(
     assert [c.kwargs["session_id"] for c in ensure.await_args_list] == [side.id, source.id]
 
 
-async def test_resume_single_flight_separates_callers_by_source_access(
+async def test_resume_single_flight_is_shared_only_within_one_caller(
     db_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Concurrent Resume callers share recovery only with callers of equal source access.
+    """Concurrent Resume calls on a side chat share an attempt only within one caller.
 
-    A caller who cannot edit the source starts recovery first and is held open.
-    An authorized caller arriving meanwhile gets its own attempt instead of the
-    denied caller's 503, and a later authorized caller shares that attempt.
+    Both callers may edit the source, but only one owns its runner. The other
+    editor starts recovery first and is held open; the runner owner arriving
+    meanwhile gets its own attempt instead of the editor's 503, and the owner's
+    second request shares that attempt.
     """
     store = SqlAlchemyConversationStore(db_uri)
     source, side = _source_and_side_chat(store, db_uri)
     permissions = SqlAlchemyPermissionStore(db_uri)
     for user in (_OWNER, _OTHER):
         permissions.ensure_user(user)
+        permissions.grant(user, side.id, LEVEL_OWNER)
     permissions.grant(_OWNER, source.id, LEVEL_OWNER)
-    permissions.grant(_OWNER, side.id, LEVEL_OWNER)
-    permissions.grant(_OTHER, side.id, LEVEL_EDIT)
+    permissions.grant(_OTHER, source.id, LEVEL_EDIT)
 
-    denied_started, release_denied = asyncio.Event(), asyncio.Event()
-    authorized_started, release_authorized = asyncio.Event(), asyncio.Event()
-    joiner_checked = asyncio.Event()
+    started = {_OWNER: asyncio.Event(), _OTHER: asyncio.Event()}
+    release = {_OWNER: asyncio.Event(), _OTHER: asyncio.Event()}
     recoveries: list[str | None] = []
-    owner_checks = 0
-    real_access = routes_events._may_edit_side_chat_source
 
-    async def _access_spy(source_id: str, **kwargs: Any) -> bool:
-        nonlocal owner_checks
-        allowed = await real_access(source_id, **kwargs)
-        if kwargs["user_id"] == _OWNER:
-            owner_checks += 1
-            if owner_checks == 2:
-                joiner_checked.set()
-        return allowed
-
-    async def _recover(*, user_id: str | None, **_kwargs: Any) -> dict[str, bool | str]:
+    async def _recover(*, user_id: str, **_kwargs: Any) -> dict[str, bool | str]:
         recoveries.append(user_id)
+        started[user_id].set()
+        await release[user_id].wait()
         if user_id == _OTHER:
-            denied_started.set()
-            await release_denied.wait()
             raise OmnigentError(
                 "No runner is available to recover this session.",
                 code=ErrorCode.RUNNER_UNAVAILABLE,
             )
-        authorized_started.set()
-        await release_authorized.wait()
         return {"queued": False, "recovered": True, "recovery": "runner_relaunched"}
 
-    monkeypatch.setattr(routes_events, "_may_edit_side_chat_source", _access_spy)
     monkeypatch.setattr(routes_events, "_recover_retry_session", _recover)
 
     def _resume(user_id: str) -> asyncio.Task[dict[str, bool | str]]:
@@ -385,25 +371,74 @@ async def test_resume_single_flight_separates_callers_by_source_access(
 
     tasks: list[asyncio.Task[dict[str, bool | str]]] = []
     try:
-        tasks.append(denied := _resume(_OTHER))
-        await _within_budget(denied_started, "the denied caller")
-        tasks.append(authorized := _resume(_OWNER))
-        await _within_budget(authorized_started, "the authorized caller")
+        tasks.append(editor := _resume(_OTHER))
+        await _within_budget(started[_OTHER], "the non-owner editor")
+        tasks.append(owner := _resume(_OWNER))
+        await _within_budget(started[_OWNER], "the runner owner")
         tasks.append(joiner := _resume(_OWNER))
-        # The spy fires after the joiner's access check; it then joins without yielding.
-        await _within_budget(joiner_checked, "the second authorized caller")
-        release_authorized.set()
-        assert (await authorized)["recovery"] == "runner_relaunched"
+        # The joiner has no awaits before joining, so a few loop turns let it join.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        release[_OWNER].set()
+        assert (await owner)["recovery"] == "runner_relaunched"
         assert (await joiner)["recovery"] == "runner_relaunched"
-        release_denied.set()
+        release[_OTHER].set()
         with pytest.raises(OmnigentError) as raised:
-            await denied
+            await editor
         assert raised.value.code == ErrorCode.RUNNER_UNAVAILABLE
     finally:
-        release_authorized.set()
-        release_denied.set()
+        for event in release.values():
+            event.set()
         await asyncio.gather(*tasks, return_exceptions=True)
     assert recoveries == [_OTHER, _OWNER]
+
+
+@pytest.mark.parametrize(
+    ("caller", "recovers"), [(_OWNER, True), (_OTHER, False)], ids=["runner-owner", "other-editor"]
+)
+async def test_side_chat_recovery_requires_ownership_of_source_runner(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, caller: str, recovers: bool
+) -> None:
+    """Recovery binds a side chat only to a runner its caller owns, like an explicit attach.
+
+    Both callers may edit the source, but its live runner belongs to one of
+    them. The other editor's unbound side chat stays unbound.
+    """
+    store = SqlAlchemyConversationStore(db_uri)
+    source, side = _source_and_side_chat(store, db_uri)
+    store.clear_runner_id(side.id)
+    unbound = store.get_conversation(side.id)
+    assert unbound is not None and unbound.runner_id is None
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    for user in (_OWNER, _OTHER):
+        permissions.ensure_user(user)
+    permissions.grant(_OWNER, source.id, LEVEL_OWNER)
+    permissions.grant(_OTHER, source.id, LEVEL_EDIT)
+    permissions.grant(caller, side.id, LEVEL_OWNER)
+    router = Mock()
+    router.host_is_on_another_replica.return_value = False
+    router.runner_owner.return_value = _OWNER
+    runner_client = object()
+    monkeypatch.setattr(
+        orchestration, "ensure_runner_connected", AsyncMock(return_value=(runner_client, source))
+    )
+    get_client = AsyncMock(return_value=runner_client)
+    monkeypatch.setattr(sessions, "_get_runner_client", get_client)
+
+    client, recovered = await _recover(
+        store, unbound, user_id=caller, permission_store=permissions, runner_router=router
+    )
+
+    router.runner_owner.assert_called_with("runner-replacement")
+    saved = store.get_conversation(side.id)
+    assert saved is not None
+    if recovers:
+        assert client is runner_client
+        assert saved.runner_id == "runner-replacement"
+    else:
+        assert client is None and recovered is unbound
+        assert saved.runner_id is None
+        get_client.assert_not_awaited()
 
 
 async def test_side_chat_recovery_redirects_when_source_host_is_on_another_replica(

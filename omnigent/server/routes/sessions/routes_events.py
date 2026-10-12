@@ -238,7 +238,6 @@ from omnigent.server.routes._sessions.orchestration import (
     _heal_subagent_runner_binding_via_parent,
     _is_native_terminal_session,
     _mark_dispatch_in_flight,
-    _may_edit_side_chat_source,
     _maybe_relaunch_managed_sandbox,
     _maybe_wake_stale_resumable_managed_sandbox,
     _native_pane_harness,
@@ -311,9 +310,9 @@ from omnigent.util.session_lifecycle import (
 _retry_recovery_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )
-# One shared Resume attempt per (session, caller's source access); see
+# One shared Resume attempt per session, split by caller for side chats; see
 # _retry_session_single_flight.
-_RetryFlight = tuple[str, bool | None]
+_RetryFlight = tuple[str, str | None]
 _retry_recovery_tasks: WorkspaceScopedCache[_RetryFlight, asyncio.Task[dict[str, bool | str]]] = (
     WorkspaceScopedCache()
 )
@@ -656,21 +655,12 @@ async def _retry_session_single_flight(
 ) -> dict[str, bool | str]:
     """Share one in-flight recovery attempt across concurrent callers.
 
-    A side chat's recovery relaunches its source only for callers who may edit
-    that source, so callers with and without that access never share an attempt.
+    A side chat's recovery depends on the caller's access to its source and
+    ownership of the source's runner, so it is shared only by one caller's
+    concurrent requests.
     """
-    source_id = _side_chat_source_id(conversation) if conversation is not None else None
-    source_access = (
-        None
-        if source_id is None or permission_store is None
-        else await _may_edit_side_chat_source(
-            source_id,
-            conversation_store=conversation_store,
-            user_id=user_id,
-            permission_store=permission_store,
-        )
-    )
-    flight: _RetryFlight = (session_id, source_access)
+    is_side_chat = conversation is not None and _side_chat_source_id(conversation) is not None
+    flight: _RetryFlight = (session_id, user_id if is_side_chat else None)
     lock = _retry_recovery_lock(session_id)
     async with lock:
         task = _retry_recovery_tasks.get(flight)
