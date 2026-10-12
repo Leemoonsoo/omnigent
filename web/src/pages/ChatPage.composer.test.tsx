@@ -824,6 +824,29 @@ describe("Composer native goal state", () => {
 
     await waitFor(() => expect(mockGetGoal).toHaveBeenCalledWith("conv_goal"));
   });
+
+  it("re-reads the goal when a turn starts and ends", async () => {
+    const mockGetGoal = vi.mocked(getGoal);
+    mockGetGoal.mockClear().mockResolvedValue({ goal: null });
+    useChatStore.setState({ conversationId: "conv_goal" });
+    const props = { showGoalControl: true, runnerOnline: true };
+
+    const { rerender } = renderWithTooltips(
+      <Composer {...composerProps({ ...props, isWorking: false })} />,
+    );
+    await waitFor(() => expect(mockGetGoal).toHaveBeenCalledTimes(1));
+
+    const rerenderWorking = (isWorking: boolean) =>
+      rerender(
+        <TooltipProvider>
+          <Composer {...composerProps({ ...props, isWorking })} />
+        </TooltipProvider>,
+      );
+    rerenderWorking(true);
+    await waitFor(() => expect(mockGetGoal).toHaveBeenCalledTimes(2));
+    rerenderWorking(false);
+    await waitFor(() => expect(mockGetGoal).toHaveBeenCalledTimes(3));
+  });
 });
 
 describe("Composer typed /goal", () => {
@@ -901,6 +924,19 @@ describe("Composer typed /goal", () => {
       expect(screen.queryByTestId(dialogFieldFor(session))).toBeNull();
     },
   );
+
+  it("lets a multi-word skill starting with goal outrank the /goal built-in", () => {
+    // Same precedence as every built-in ("/Help Desk summarize" runs the skill),
+    // so a "goal fix" skill stays reachable in a Goal-enabled session.
+    setComposerState({ skills: [{ name: "goal fix", description: "Fix toward a goal" }] });
+    const { onSend, onSendSlashCommand } = renderGoalSession("polly-codex");
+
+    fireEvent.change(textarea(), { target: { value: "/goal fix CI" } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+
+    expect(onSendSlashCommand).toHaveBeenCalledExactlyOnceWith("goal fix", "CI");
+    expect(onSend).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["/goal", ""],
