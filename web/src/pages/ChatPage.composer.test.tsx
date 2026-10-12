@@ -902,6 +902,26 @@ describe("Composer typed /goal", () => {
     },
   );
 
+  it.each([
+    ["/goal", ""],
+    ["/goal Fix CI", "Fix CI"],
+  ])("runs a session skill named goal without goal control (%s)", (text, args) => {
+    const onSend = vi.fn();
+    const onSendSlashCommand = vi.fn();
+    setComposerState({
+      conversationId: "conv_plain",
+      skills: [{ name: "goal", description: "Track a goal" }],
+    });
+    render(<Composer {...composerProps({ onSend, onSendSlashCommand })} />);
+
+    fireEvent.change(textarea(), { target: { value: `${text} ` } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+
+    expect(onSendSlashCommand).toHaveBeenCalledExactlyOnceWith("goal", args);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Unknown command/)).toBeNull();
+  });
+
   it("does not suggest /goal when the session has no goal control", () => {
     useChatStore.setState({ conversationId: "conv_plain" });
     render(<Composer {...composerProps()} />);

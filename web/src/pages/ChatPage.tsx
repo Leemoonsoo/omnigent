@@ -3307,7 +3307,9 @@ function ComposerImpl(
       // "/goal <objective>" falls through to plaintext, the same message the
       // command-backed Goal dialog sends; the harness sets the goal from it.
       // Bare "/goal" has nothing to set, so open the Goal dialog instead.
-      const goalCommand = cmd === "/goal" && cmd in slashCommands;
+      // Gate on the Goal capability, not map membership: without it, "/goal"
+      // can still be a session skill named "goal".
+      const goalCommand = cmd === "/goal" && showGoalCommand;
       if (goalCommand && !arg) {
         dirtyRef.current = true;
         setValue("");
@@ -3318,11 +3320,12 @@ function ComposerImpl(
       // /btw is a built-in for menu/autocomplete purposes only — it is NOT
       // executed locally. It must reach the vendor TUI as plaintext so Claude
       // Code opens its side chat and the forwarder relays the answer to the
-      // web overlay; fall through to the plaintext send path below.
+      // web overlay; fall through to the plaintext send path below. /goal is
+      // handled above or, as a skill, below.
       if (
         cmd !== "/btw" &&
         cmd !== "/side" &&
-        !goalCommand &&
+        cmd !== "/goal" &&
         cmd in BUILTIN_SLASH_COMMANDS &&
         cmd in slashCommands
       ) {

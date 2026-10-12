@@ -16,7 +16,8 @@ interface UseGoalStateResult {
  * @param enabled - ``false`` clears the snapshot without reading.
  * @param turnActive - Whether a turn is running. Each change re-reads the
  *   goal: a typed ``/goal`` sets it when its turn starts, and the harness can
- *   complete or limit it during a turn.
+ *   complete or limit it during a turn. The turn-start read can finish before
+ *   the harness stores a typed goal, so the goal may only appear at turn end.
  * @returns The goal snapshot and a setter for dialog-driven updates.
  */
 export function useGoalState(

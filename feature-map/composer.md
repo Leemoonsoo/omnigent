@@ -153,6 +153,11 @@ Tests under `tests/browser_ui/` stub every backend call and need no instance:
   `tests/browser_ui/chat/test_slash_menu.py::test_slash_menu_tracks_real_focus_and_wrapping_keyboard_navigation`
 - **`goal-command`:** no browser-level coverage; the `Composer typed /goal`
   web unit tests in `web/src/pages/ChatPage.composer.test.tsx` cover it.
+  Manually, in a Codex session: type `/go`. The menu lists `/goal` under
+  Commands; the first Enter fills `/goal `, and a second Enter opens the Goal
+  dialog with the composer cleared. Then send `/goal <objective>`. Codex starts
+  working on the objective, and by the time the turn ends the goal marker shows
+  in the composer's workspace bar without a reload; it can appear earlier.
 - **`attachments`:**
   `tests/browser_ui/chat/test_composer_attachments.py::test_attach_supported_files_and_remove`,
   `tests/browser_ui/chat/test_composer_attachments.py::test_file_dropped_on_the_transcript_attaches`,

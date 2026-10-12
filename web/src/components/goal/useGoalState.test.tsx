@@ -71,6 +71,27 @@ describe("useGoalState", () => {
     expect(mockGetGoal).toHaveBeenCalledTimes(3);
   });
 
+  it("shows a typed goal at turn end when the turn-start read was too early", async () => {
+    // The turn-start read can reach the runner before it stores the goal.
+    mockGetGoal
+      .mockResolvedValueOnce({ goal: null })
+      .mockResolvedValueOnce({ goal: null })
+      .mockResolvedValueOnce({ goal: GOAL });
+
+    const { result, rerender } = renderHook(
+      ({ turnActive }) => useGoalState("conv", true, turnActive),
+      { initialProps: { turnActive: false } },
+    );
+    await waitFor(() => expect(mockGetGoal).toHaveBeenCalledTimes(1));
+
+    rerender({ turnActive: true });
+    await waitFor(() => expect(mockGetGoal).toHaveBeenCalledTimes(2));
+    expect(result.current.goal).toBeNull();
+
+    rerender({ turnActive: false });
+    await waitFor(() => expect(result.current.goal).toEqual(GOAL));
+  });
+
   it("reloads the goal when a session becomes reachable again", async () => {
     mockGetGoal.mockResolvedValueOnce({ goal: GOAL });
 
