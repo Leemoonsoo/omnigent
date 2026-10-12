@@ -27,6 +27,10 @@ and steers messages while the agent is busy.
 - `permission-mode`: the harness's native approval modes; the current mode is
   marked and the choice persists.
 - `slash-menu`: typing `/` opens commands and skills with keyboard navigation.
+- `goal-command`: where **+ → Goal** is available (Codex sessions, and Polly
+  on Claude SDK or Codex), `/goal` is listed under Commands. `/goal <objective>`
+  sends the objective for the harness to set as the goal; a bare `/goal` opens
+  the Goal dialog, as **+ → Goal** does.
 - `attachments`: attach button, paste, and drop onto the transcript; chips can
   be removed. State: unsupported file type rejected without losing the message.
 - `send-shortcut`: Enter or Mod+Enter, chosen in settings; only one gesture sends.
@@ -60,6 +64,8 @@ and steers messages while the agent is busy.
   return to Chat.
 - Type `/` in the message box; attach files with the button, by paste, or by
   dropping them on the transcript.
+- In a Codex or Polly session, type `/goal <objective>` or a bare `/goal`, or
+  choose **+ → Goal**.
 - Send while the agent is working to queue a message, then steer it.
 
 **Desktop browser pointer** (open a session in the desktop app):
@@ -145,6 +151,8 @@ Tests under `tests/browser_ui/` stub every backend call and need no instance:
   `tests/e2e_ui/chat/test_claude_model_picker.py::test_claude_native_permission_mode_switch_persists`
 - **`slash-menu`:**
   `tests/browser_ui/chat/test_slash_menu.py::test_slash_menu_tracks_real_focus_and_wrapping_keyboard_navigation`
+- **`goal-command`:** no browser-level coverage; the `Composer typed /goal`
+  web unit tests in `web/src/pages/ChatPage.composer.test.tsx` cover it.
 - **`attachments`:**
   `tests/browser_ui/chat/test_composer_attachments.py::test_attach_supported_files_and_remove`,
   `tests/browser_ui/chat/test_composer_attachments.py::test_file_dropped_on_the_transcript_attaches`,
