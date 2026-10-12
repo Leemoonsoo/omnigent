@@ -4866,7 +4866,19 @@ async function reconcileActiveSessionStatus(
   ) {
     return;
   }
-  set((s) => reconnectStatusPatch(session, s, stateBeforeFetch.mcpStartupLaunch));
+  set((s) => {
+    const patch = reconnectStatusPatch(session, s, stateBeforeFetch.mcpStartupLaunch);
+    // A snapshot that settles the open turn stands in for its missed terminal
+    // edge, spinner cleanup included. (A reconnect already dropped the open
+    // turn's spinner with its other ephemeral blocks.)
+    const open = s.activeResponse;
+    const next = patch.activeResponse;
+    const settled =
+      open?.state === "streaming" && next != null && next.state !== "streaming"
+        ? withoutSettledCompactionSpinners(s.blocks, open.responseId)
+        : null;
+    return settled === null ? patch : { ...patch, blocks: settled };
+  });
   if (session.usageIncluded === false) void hydrateSessionUsage(id);
   const ignored = nativePreviewTombstonesByController.get(controller);
   if (
@@ -6056,6 +6068,46 @@ export function adoptTrailingUnattributedBlocks(
   return next;
 }
 
+/**
+ * Hand every "Compacting…" spinner still on screen to a turn that is starting.
+ *
+ * Compaction progress events carry no response id, so the reducer stamps a
+ * spinner with whichever turn it last saw. The runner publishes `/compact`
+ * progress just before it dispatches the turn that compacts, which stamps that
+ * spinner with the previous turn; and a spinner whose terminal compaction event
+ * was lost belongs to a turn that already ended. Adopting both into the
+ * starting turn keeps a live spinner on screen and lets
+ * {@link withoutSettledCompactionSpinners} retire it when this turn settles,
+ * should no terminal compaction event arrive first.
+ *
+ * @returns the rewritten blocks, or `null` when nothing needed adopting.
+ */
+export function adoptCompactionSpinners(blocks: AnyBlock[], responseId: string): AnyBlock[] | null {
+  const foreign = (b: AnyBlock) =>
+    b.type === "compaction_loading" && b.ctx.responseId !== responseId;
+  if (!blocks.some(foreign)) return null;
+  return blocks.map((b) => (foreign(b) ? { ...b, ctx: { ...b.ctx, responseId } } : b));
+}
+
+/**
+ * Drop the "Compacting…" spinners owned by a turn that just settled.
+ *
+ * The terminal `compaction.completed` / `compaction.failed` event is the only
+ * thing that otherwise removes a spinner, and the stream never replays it. A
+ * compaction ends within the turn that owns its spinner, so one still present
+ * when that turn settles lost its terminal event and would count up forever.
+ *
+ * @returns the remaining blocks, or `null` when the turn owned no spinner.
+ */
+export function withoutSettledCompactionSpinners(
+  blocks: AnyBlock[],
+  responseId: string,
+): AnyBlock[] | null {
+  const owned = (b: AnyBlock) => b.type === "compaction_loading" && b.ctx.responseId === responseId;
+  if (!blocks.some(owned)) return null;
+  return blocks.filter((b) => !owned(b));
+}
+
 // How long after a terminal edge a delta still belongs to the finished
 // turn. A scheduled wake (cron / wakeup fires at 60s minimum) streams
 // its FIRST deltas ahead of the transcript batch that names the new
@@ -6235,6 +6287,8 @@ export async function pumpStreamEvents(
           activeResponse: { responseId: block.responseId, state: "streaming", error: null },
           status: "streaming",
         });
+        const adopted = adoptCompactionSpinners(get().blocks, block.responseId);
+        if (adopted !== null) set({ blocks: adopted });
         continue;
       }
 
@@ -6393,6 +6447,11 @@ export async function pumpStreamEvents(
         if (active !== null && active.responseId !== endedId) {
           continue;
         }
+        // A repeated terminal for an already-settled turn must not take a
+        // spinner published after it (an idle `/compact` is stamped with it).
+        const settlesTurn =
+          endedId !== "" &&
+          (active === null || active.state === "streaming" || active.state === "cancelled");
         // If the active response was already marked cancelled by an
         // earlier `session.interrupted`, keep that. Session events
         // are the authoritative source for user-initiated terminals.
@@ -6409,12 +6468,16 @@ export async function pumpStreamEvents(
         // had their preview replaced when their `text_done` committed, so
         // this is usually a no-op.
         get().blocks.forEach((candidate) => ignoreLivePreview(candidate, ignoredMessages));
-        set((s) => ({
-          status: "idle",
-          blocks: s.blocks.some(isLiveProvisionalBlock)
+        set((s) => {
+          const blocks = s.blocks.some(isLiveProvisionalBlock)
             ? s.blocks.filter((b) => !isLiveProvisionalBlock(b))
-            : s.blocks,
-        }));
+            : s.blocks;
+          return {
+            status: "idle",
+            blocks:
+              (settlesTurn ? withoutSettledCompactionSpinners(blocks, endedId) : null) ?? blocks,
+          };
+        });
         const convId = get().conversationId;
         if (convId) {
           queryClient?.invalidateQueries({ queryKey: sessionItemsQueryKey(convId) });
@@ -7319,10 +7382,15 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
           // Blocks the reducer emitted before this edge named the turn
           // (codex opens reasoning ~2s earlier) carry no response id, so
           // they'd group into their own bubble beside the turn's own.
-          // Attribute them to the turn they belong to.
-          const adopted = adoptTrailingUnattributedBlocks(s.blocks, event.responseId);
-          if (adopted !== null) patch.blocks = adopted;
+          // Attribute them to the turn they belong to. The turn also takes
+          // over any "Compacting…" spinner still on screen.
+          const attributed =
+            adoptTrailingUnattributedBlocks(s.blocks, event.responseId) ?? s.blocks;
+          const adopted = adoptCompactionSpinners(attributed, event.responseId) ?? attributed;
+          if (adopted !== s.blocks) patch.blocks = adopted;
         }
+        // The open turn this edge settles, whose spinner goes with it.
+        let settledResponseId: string | null = null;
         // `waiting` is a TURN-END edge (the turn already finished; only
         // background work — background shells / sub-agents — outlives it). It
         // must finalize the local send lifecycle exactly like `idle`, NOT keep
@@ -7336,6 +7404,9 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         if (event.status === "idle" || event.status === "failed" || event.status === "waiting") {
           if (event.responseId !== undefined && s.activeResponse?.responseId === event.responseId) {
             patch.status = "idle";
+            if (s.activeResponse.state === "streaming" || s.activeResponse.state === "cancelled") {
+              settledResponseId = event.responseId;
+            }
             if (s.activeResponse.state !== "cancelled") {
               patch.activeResponse = {
                 responseId: event.responseId,
@@ -7356,6 +7427,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
             // no longer publish status. A `cancelled` turn is preserved as-is.
             patch.status = "idle";
             if (s.activeResponse?.state === "streaming") {
+              settledResponseId = s.activeResponse.responseId;
               patch.activeResponse = {
                 ...s.activeResponse,
                 state: event.status === "failed" ? "failed" : "completed",
@@ -7438,6 +7510,13 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
               ...structuredErrorFields(statusError, statusAgentName),
             } satisfies ErrorBlock,
           ];
+        }
+        if (settledResponseId !== null) {
+          const settled = withoutSettledCompactionSpinners(
+            patch.blocks ?? s.blocks,
+            settledResponseId,
+          );
+          if (settled !== null) patch.blocks = settled;
         }
         // A `runner_disconnected` card is an observation ("can't reach the
         // runner"), not a turn result: any live status edge from the runner

@@ -13247,6 +13247,56 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
+  it("clears the open turn's compaction spinner when a status snapshot settles the turn", async () => {
+    seedSession("conv_spinner_gap", []);
+    const sink = pushableStream();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/v1/sessions/conv_spinner_gap/stream") {
+        init?.signal?.addEventListener("abort", () =>
+          sink.error(new DOMException("aborted", "AbortError")),
+        );
+        return mockResponse(null, { bodyStream: sink.stream });
+      }
+      return defaultFetchHandler(input, init);
+    });
+    const controller = new AbortController();
+    const bound = bindConversationForTest("conv_spinner_gap", {
+      abortController: controller,
+      sessionStatus: "running",
+      status: "streaming",
+      activeResponse: { responseId: "resp_live", state: "streaming", error: null },
+      blocks: [
+        {
+          type: "compaction_loading",
+          ctx: {
+            agent: null,
+            depth: 0,
+            turn: 0,
+            timestamp: 0,
+            responseId: "resp_live",
+            itemId: null,
+          },
+        },
+      ],
+    });
+
+    const loop = startStreamPump("conv_spinner_gap", controller, bound.set, bound.get);
+    await drainAsync();
+
+    // Heartbeats keep the stream open while both the compaction terminal
+    // and the turn's idle edge are missing.
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+
+    expect(bound.get().activeResponse?.state).toBe("completed");
+    expect(bound.get().blocks.some((b) => b.type === "compaction_loading")).toBe(false);
+
+    controller.abort();
+    await drainAsync(2);
+    await loop;
+  });
+
   it("keeps a live status event that arrives during snapshot reconciliation", async () => {
     seedSession("conv_status_race", []);
     const sink = pushableStream();
@@ -17706,6 +17756,219 @@ describe("chatStore — attributing pre-turn blocks to the turn", () => {
 
     const rids = useChatStore.getState().blocks.map((b) => b.ctx.responseId);
     expect(rids).toEqual(["", "codex_prev", "codex_now"]);
+  });
+});
+
+describe("chatStore — compaction spinner follows its turn", () => {
+  // Only a terminal compaction event otherwise clears the "Compacting…"
+  // spinner, and the stream never replays one. The spinner belongs to the
+  // turn it ran in, or to the turn that starts after it, and goes when that
+  // turn settles.
+  const setState = useChatStore.setState as unknown as Parameters<typeof pumpStreamEvents>[3];
+  const getState = useChatStore.getState as unknown as Parameters<typeof pumpStreamEvents>[4];
+
+  const spinner = (responseId: string): AnyBlock => ({
+    type: "compaction_loading",
+    ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId, itemId: null },
+  });
+
+  const spinnerIds = () =>
+    useChatStore
+      .getState()
+      .blocks.filter((b) => b.type === "compaction_loading")
+      .map((b) => b.ctx.responseId);
+
+  const bubbleKinds = () => {
+    const s = useChatStore.getState();
+    return buildBubbles(s.blocks, s.activeResponse).map((b) => b.kind);
+  };
+
+  function startPump(conversationId: string) {
+    useChatStore.setState({ conversationId, blocks: [], activeResponse: null, status: "idle" });
+    const sink = pushableStream();
+    const controller = new AbortController();
+    void pumpStreamEvents(conversationId, sink.stream, controller, setState, getState, {
+      schedule: (flush) => flush(),
+      cancel: () => {},
+    });
+    return { sink, controller };
+  }
+
+  const turnEvent = (type: string, id: string) =>
+    sse(type, {
+      id,
+      status: type === "response.completed" ? "completed" : "in_progress",
+      output: [],
+    });
+
+  it("keeps a /compact spinner published before its turn until compaction completes", async () => {
+    // The runner announces an idle `/compact` before it dispatches the turn
+    // that compacts, so the spinner carries the previous turn's id when the
+    // compact turn starts under a new one.
+    const { sink, controller } = startPump("conv_compact_preturn");
+    sink.push(turnEvent("response.created", "resp_prev"));
+    sink.push(turnEvent("response.completed", "resp_prev"));
+    sink.push(sse("response.compaction.in_progress", {}));
+    sink.push(turnEvent("response.in_progress", "resp_compact"));
+    await tick();
+
+    expect(spinnerIds()).toEqual(["resp_compact"]);
+    expect(bubbleKinds()).toContain("compaction_loading");
+
+    sink.push(sse("response.compaction.completed", {}));
+    await tick();
+    expect(bubbleKinds()).toContain("compaction");
+    expect(bubbleKinds()).not.toContain("compaction_loading");
+
+    sink.push(turnEvent("response.completed", "resp_compact"));
+    await tick();
+    expect(spinnerIds()).toEqual([]);
+
+    controller.abort();
+  });
+
+  it("clears a pre-turn spinner when its compact turn settles without a terminal event", async () => {
+    const { sink, controller } = startPump("conv_compact_dropped");
+    sink.push(turnEvent("response.created", "resp_prev"));
+    sink.push(turnEvent("response.completed", "resp_prev"));
+    sink.push(sse("response.compaction.in_progress", {}));
+    sink.push(turnEvent("response.in_progress", "resp_compact"));
+    sink.push(turnEvent("response.completed", "resp_compact"));
+    await tick();
+
+    expect(spinnerIds()).toEqual([]);
+    expect(bubbleKinds()).not.toContain("compaction_loading");
+
+    controller.abort();
+  });
+
+  it("clears a spinner when the turn it ran in settles without a terminal event", async () => {
+    const { sink, controller } = startPump("conv_turn_dropped");
+    sink.push(turnEvent("response.created", "resp_turn"));
+    sink.push(sse("response.compaction.in_progress", {}));
+    await tick();
+    expect(spinnerIds()).toEqual(["resp_turn"]);
+
+    sink.push(turnEvent("response.completed", "resp_turn"));
+    await tick();
+    expect(spinnerIds()).toEqual([]);
+    expect(useChatStore.getState().activeResponse?.state).toBe("completed");
+
+    controller.abort();
+  });
+
+  it("keeps a spinner published after its turn settled when that terminal repeats", async () => {
+    const { sink, controller } = startPump("conv_turn_repeat");
+    sink.push(turnEvent("response.created", "resp_done"));
+    sink.push(turnEvent("response.completed", "resp_done"));
+    sink.push(sse("response.compaction.in_progress", {}));
+    sink.push(turnEvent("response.completed", "resp_done"));
+    await tick();
+
+    expect(spinnerIds()).toEqual(["resp_done"]);
+
+    controller.abort();
+  });
+
+  it("clears a native turn's spinner on the status edge that settles the turn", () => {
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: { responseId: "codex_turn_1", state: "streaming", error: null },
+      blocks: [spinner("codex_turn_1")],
+    });
+
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_native",
+      status: "idle",
+      responseId: "codex_turn_1",
+    });
+
+    expect(spinnerIds()).toEqual([]);
+    expect(useChatStore.getState().activeResponse?.state).toBe("completed");
+  });
+
+  it("clears it on a bare terminal edge that finalizes the streaming turn", () => {
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: { responseId: "codex_turn_1", state: "streaming", error: null },
+      blocks: [spinner("codex_turn_1")],
+    });
+
+    handleSessionEvent({ type: "session_status", conversationId: "conv_native", status: "idle" });
+
+    expect(spinnerIds()).toEqual([]);
+  });
+
+  it("clears an interrupted turn's spinner when the terminal edge names that turn", () => {
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: { responseId: "codex_turn_1", state: "cancelled", error: null },
+      blocks: [spinner("codex_turn_1")],
+    });
+
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_native",
+      status: "idle",
+      responseId: "codex_turn_1",
+    });
+
+    expect(spinnerIds()).toEqual([]);
+  });
+
+  it("keeps a spinner that started after the turn settled", () => {
+    // A claude-native `/compact` compacts without a turn of its own, so the
+    // spinner carries the finished turn's id and later edges must spare it.
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: {
+        responseId: "claude_turn_1",
+        state: "completed",
+        error: null,
+        completedAt: Date.now(),
+      },
+      blocks: [spinner("claude_turn_1")],
+    });
+
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_native",
+      status: "waiting",
+      responseId: "claude_turn_1",
+    });
+    handleSessionEvent({ type: "session_status", conversationId: "conv_native", status: "idle" });
+
+    expect(spinnerIds()).toEqual(["claude_turn_1"]);
+  });
+
+  it("hands a leftover spinner to the next turn, which clears it when it settles", () => {
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: {
+        responseId: "claude_turn_1",
+        state: "completed",
+        error: null,
+        completedAt: Date.now(),
+      },
+      blocks: [spinner("claude_turn_1")],
+    });
+
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_native",
+      status: "running",
+      responseId: "claude_turn_2",
+    });
+    expect(spinnerIds()).toEqual(["claude_turn_2"]);
+
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_native",
+      status: "idle",
+      responseId: "claude_turn_2",
+    });
+    expect(spinnerIds()).toEqual([]);
   });
 });
 
