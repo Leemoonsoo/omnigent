@@ -6076,12 +6076,8 @@ export function adoptCompactionSpinners(blocks: AnyBlock[], responseId: string):
 }
 
 /**
- * Drop the "Compacting…" spinners owned by a turn that just settled.
- *
- * The terminal `compaction.completed` / `compaction.failed` event is the only
- * thing that otherwise removes a spinner, and the stream never replays it. A
- * compaction ends within the turn that owns its spinner, so one still present
- * when that turn settles lost its terminal event and would count up forever.
+ * Remove "Compacting…" spinners owned by the just-settled turn; a lost
+ * compaction terminal is not replayed.
  *
  * @returns the remaining blocks, or `null` when the turn owned no spinner.
  */
@@ -6195,25 +6191,34 @@ export async function pumpStreamEvents(
   // Ignore the rest of messages whose previews are stale or already replaced
   // by authoritative items, so late transport delivery cannot recreate them.
   const events = tapLiveDeltas(
-    tapSessionEvents(rawEvents, id, (elicitationId) => {
-      // A fast native approval can resolve in the few milliseconds between
-      // the reducer yielding its card and the next animation-frame flush.
-      // `handleSessionEvent` can only update committed blocks, so settle the
-      // buffered copy here instead of dropping that resolved edge.
-      const at = buffer.findIndex(
-        (block) =>
-          block.type === "elicitation" &&
-          block.elicitationId === elicitationId &&
-          block.status === "pending",
-      );
-      if (at === -1) return;
-      const target = buffer[at] as ElicitationBlock;
-      buffer[at] = {
-        ...target,
-        status: "responded",
-        response: { action: "auto_resolved" },
-      };
-    }),
+    tapSessionEvents(
+      rawEvents,
+      id,
+      (elicitationId) => {
+        // A fast native approval can resolve in the few milliseconds between
+        // the reducer yielding its card and the next animation-frame flush.
+        // `handleSessionEvent` can only update committed blocks, so settle the
+        // buffered copy here instead of dropping that resolved edge.
+        const at = buffer.findIndex(
+          (block) =>
+            block.type === "elicitation" &&
+            block.elicitationId === elicitationId &&
+            block.status === "pending",
+        );
+        if (at === -1) return;
+        const target = buffer[at] as ElicitationBlock;
+        buffer[at] = {
+          ...target,
+          status: "responded",
+          response: { action: "auto_resolved" },
+        };
+      },
+      () => {
+        // Commit what the turn emitted before its ending edge applies, so
+        // that edge's cleanup (e.g. its "Compacting…" spinner) sees it.
+        flush();
+      },
+    ),
     id,
     ignoredMessages,
     set,
@@ -8156,10 +8161,18 @@ async function* tapSessionEvents(
   events: AsyncIterable<StreamEvent>,
   conversationId: string,
   onElicitationResolved?: (elicitationId: string) => void,
+  beforeTurnEnd?: () => void,
 ): AsyncIterable<StreamEvent> {
   for await (const event of events) {
     if (!isConversationDisposed(conversationId)) {
       streamEventRevisions.set(conversationId, (streamEventRevisions.get(conversationId) ?? 0) + 1);
+    }
+    if (
+      event.type === "session_interrupted" ||
+      (event.type === "session_status" &&
+        (event.status === "idle" || event.status === "failed" || event.status === "waiting"))
+    ) {
+      beforeTurnEnd?.();
     }
     handleSessionEvent(event, conversationId);
     if (event.type === "elicitation_resolved") {

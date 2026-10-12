@@ -17961,34 +17961,78 @@ describe("chatStore — compaction spinner follows its turn", () => {
     controller.abort();
   });
 
-  it("clears a native turn's spinner on the status edge that settles the turn", () => {
+  it.each([
+    { edge: "a named idle", status: "idle", named: true },
+    { edge: "a bare idle", status: "idle", named: false },
+    { edge: "a named waiting", status: "waiting", named: true },
+  ] as const)(
+    "clears a native turn's spinner on $edge that settles the turn",
+    ({ status, named }) => {
+      useChatStore.setState({
+        conversationId: "conv_native",
+        activeResponse: { responseId: "codex_turn_1", state: "streaming", error: null },
+        blocks: [spinner("codex_turn_1")],
+      });
+
+      handleSessionEvent({
+        type: "session_status",
+        conversationId: "conv_native",
+        status,
+        ...(named ? { responseId: "codex_turn_1" } : {}),
+      });
+
+      expect(spinnerIds()).toEqual([]);
+      expect(useChatStore.getState().activeResponse?.state).toBe("completed");
+    },
+  );
+
+  it("clears a spinner still awaiting its frame flush when the turn's idle edge lands first", async () => {
     useChatStore.setState({
-      conversationId: "conv_native",
-      activeResponse: { responseId: "codex_turn_1", state: "streaming", error: null },
-      blocks: [spinner("codex_turn_1")],
+      conversationId: "conv_native_frame",
+      blocks: [],
+      activeResponse: null,
+    });
+    const sink = pushableStream();
+    const controller = new AbortController();
+    let pendingFlush: (() => void) | null = null;
+    void pumpStreamEvents("conv_native_frame", sink.stream, controller, setState, getState, {
+      schedule: (flush) => {
+        pendingFlush = flush;
+      },
+      cancel: () => {
+        pendingFlush = null;
+      },
     });
 
-    handleSessionEvent({
-      type: "session_status",
-      conversationId: "conv_native",
-      status: "idle",
-      responseId: "codex_turn_1",
-    });
+    const status = (value: string) =>
+      sse("session.status", {
+        conversation_id: "conv_native_frame",
+        status: value,
+        response_id: "codex_turn_1",
+      });
+    sink.push(status("running"));
+    // The turn's first content paints at once; the spinner after it waits
+    // for the next frame, and the idle edge arrives before that frame.
+    sink.push(
+      sse("response.output_item.done", {
+        item: {
+          type: "message",
+          role: "assistant",
+          id: "msg_frame",
+          response_id: "codex_turn_1",
+          content: [{ type: "output_text", text: "Working on it" }],
+        },
+      }),
+    );
+    sink.push(sse("response.compaction.in_progress", {}));
+    sink.push(status("idle"));
+    await tick();
+    (pendingFlush as (() => void) | null)?.();
 
-    expect(spinnerIds()).toEqual([]);
     expect(useChatStore.getState().activeResponse?.state).toBe("completed");
-  });
-
-  it("clears it on a bare terminal edge that finalizes the streaming turn", () => {
-    useChatStore.setState({
-      conversationId: "conv_native",
-      activeResponse: { responseId: "codex_turn_1", state: "streaming", error: null },
-      blocks: [spinner("codex_turn_1")],
-    });
-
-    handleSessionEvent({ type: "session_status", conversationId: "conv_native", status: "idle" });
-
     expect(spinnerIds()).toEqual([]);
+
+    controller.abort();
   });
 
   it("clears a turn's spinner when the turn is stopped", () => {
