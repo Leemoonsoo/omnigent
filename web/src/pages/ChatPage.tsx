@@ -1955,6 +1955,8 @@ interface ComposerProps {
  * :param showModel: Whether to include ``/model`` (in-process sessions
  *     and claude-native, which both honor ``conv.model_override``; see
  *     the call site).
+ * :param showGoal: Whether to include ``/goal`` (sessions whose "+" menu
+ *     offers the Goal action).
  * :returns: Merged ``Record<command, description>``.
  */
 export function buildSlashCommandMap(
@@ -1966,6 +1968,7 @@ export function buildSlashCommandMap(
   showSide = false,
   skillPrefix: "/" | "$" = "/",
   supportsModelReset = false,
+  showGoal = false,
 ): Record<string, string> {
   const m: Record<string, string> = {};
   for (const [name, description] of Object.entries(BUILTIN_SLASH_COMMANDS)) {
@@ -1976,6 +1979,7 @@ export function buildSlashCommandMap(
     if (name === "/btw" && !showBtw) continue;
     // /side is a Codex CLI built-in (ephemeral fork) — only offer it on codex-native.
     if (name === "/side" && !showSide) continue;
+    if (name === "/goal" && !showGoal) continue;
     m[name] = name === "/model" && supportsModelReset ? `${description} | default` : description;
   }
   for (const skill of skills) {
@@ -1997,6 +2001,8 @@ export function buildSlashCommandMap(
  * :param showEffort: Whether ``/effort`` should be selectable.
  * :param showModel: Whether ``/model`` should be selectable (same gate
  *     as :func:`buildSlashCommandMap`'s ``showModel``).
+ * :param showGoal: Whether ``/goal`` should be selectable (same gate as
+ *     :func:`buildSlashCommandMap`'s ``showGoal``).
  * :returns: A ``Set`` of prefixed command and skill names.
  */
 export function buildSlashCommandWithArgsSet(
@@ -2006,6 +2012,7 @@ export function buildSlashCommandWithArgsSet(
   showBtw = false,
   showSide = false,
   skillPrefix: "/" | "$" = "/",
+  showGoal = false,
 ): Set<string> {
   const s = new Set<string>();
   if (showEffort) s.add("/effort");
@@ -2014,6 +2021,8 @@ export function buildSlashCommandWithArgsSet(
   if (showBtw) s.add("/btw");
   // Selecting /side fills "/side " so the user types the side question after it.
   if (showSide) s.add("/side");
+  // Selecting /goal fills "/goal " so the user types the objective after it.
+  if (showGoal) s.add("/goal");
   for (const skill of skills) s.add(`${skillPrefix}${skill.name}`);
   return s;
 }
@@ -2480,6 +2489,7 @@ function ComposerImpl(
   const { goal, setGoal: setGoalState } = useGoalState(
     composerSessionId,
     showGoalControl && runnerOnline === true,
+    isWorking,
   );
   // "@"-file-mention is scoped to the native coding-agent harnesses: their
   // vendor CLIs run in the workspace and read an on-disk file from an
@@ -2642,6 +2652,10 @@ function ComposerImpl(
   // only on codex-native sessions. Selected/typed, it sends as plaintext to the
   // vendor turn path (see submit); the runner opens the fork as a sub-agent chat.
   const showSide = supportsSideChat(sessionHarness);
+  // Typed /goal is offered wherever the "+" menu's Goal action is enabled.
+  const showGoal = showGoalControl || showClaudeGoalControl || showPollyCodexGoalControl;
+  const goalDisabled = !composerSessionId || (!showGoalControl && isReadOnly);
+  const showGoalCommand = showGoal && !goalDisabled;
   const slashCommands = useMemo(
     () =>
       buildSlashCommandMap(
@@ -2653,6 +2667,7 @@ function ComposerImpl(
         showSide,
         skillPrefix,
         supportsModelReset,
+        showGoalCommand,
       ),
     [
       skills,
@@ -2663,6 +2678,7 @@ function ComposerImpl(
       showSide,
       skillPrefix,
       supportsModelReset,
+      showGoalCommand,
     ],
   );
   const slashCommandNames = useMemo(() => Object.keys(slashCommands), [slashCommands]);
@@ -2671,8 +2687,16 @@ function ComposerImpl(
   // existing fill/execute split.
   const slashCommandsWithArgs = useMemo(
     () =>
-      buildSlashCommandWithArgsSet(skills, showEffort, showModel, showBtw, showSide, skillPrefix),
-    [skills, showEffort, showModel, showBtw, showSide, skillPrefix],
+      buildSlashCommandWithArgsSet(
+        skills,
+        showEffort,
+        showModel,
+        showBtw,
+        showSide,
+        skillPrefix,
+        showGoalCommand,
+      ),
+    [skills, showEffort, showModel, showBtw, showSide, skillPrefix, showGoalCommand],
   );
 
   // Suggest names until a space starts the arguments; exclude file paths.
@@ -3280,6 +3304,17 @@ function ComposerImpl(
         setPickerOpenNonce((n) => n + 1);
         return;
       }
+      // "/goal <objective>" falls through to plaintext, the same message the
+      // command-backed Goal dialog sends; the harness sets the goal from it.
+      // Bare "/goal" has nothing to set, so open the Goal dialog instead.
+      const goalCommand = cmd === "/goal" && cmd in slashCommands;
+      if (goalCommand && !arg) {
+        dirtyRef.current = true;
+        setValue("");
+        setCommandError(null);
+        setGoalDialogOpen(true);
+        return;
+      }
       // /btw is a built-in for menu/autocomplete purposes only — it is NOT
       // executed locally. It must reach the vendor TUI as plaintext so Claude
       // Code opens its side chat and the forwarder relays the answer to the
@@ -3287,6 +3322,7 @@ function ComposerImpl(
       if (
         cmd !== "/btw" &&
         cmd !== "/side" &&
+        !goalCommand &&
         cmd in BUILTIN_SLASH_COMMANDS &&
         cmd in slashCommands
       ) {
@@ -3303,7 +3339,7 @@ function ComposerImpl(
       // Known skill on an in-process session: send a `slash_command` event so
       // the server resolves it. Native-terminal sessions have no
       // `onSendSlashCommand`; their vendor TUI loads the skill from plaintext.
-      if (skill !== null) {
+      if (skill !== null && !goalCommand) {
         sendSkill(skill);
         return;
       }
@@ -3790,9 +3826,9 @@ function ComposerImpl(
                   disabled || isReadOnly || hasPendingElicitation || composerLockedByBtw
                 }
                 onAttach={() => fileInputRef.current?.click()}
-                showGoal={showGoalControl || showClaudeGoalControl || showPollyCodexGoalControl}
+                showGoal={showGoal}
                 onGoal={() => setGoalDialogOpen(true)}
-                goalDisabled={!composerSessionId || (!showGoalControl && isReadOnly)}
+                goalDisabled={goalDisabled}
                 goalActive={goal !== null}
                 goalDescription={goal ? "View or update your goal" : "Set a goal for this session"}
                 showPlan={showCodexPlanMode}

@@ -11,8 +11,19 @@ interface UseGoalStateResult {
  *
  * The hook intentionally fails closed to ``null`` on read errors: the dialog
  * performs its own read and surfaces the error text when the user opens it.
+ *
+ * @param conversationId - Session whose goal to read, or ``null``.
+ * @param enabled - ``false`` clears the snapshot without reading.
+ * @param turnActive - Whether a turn is running. Each change re-reads the
+ *   goal: a typed ``/goal`` sets it when its turn starts, and the harness can
+ *   complete or limit it during a turn.
+ * @returns The goal snapshot and a setter for dialog-driven updates.
  */
-export function useGoalState(conversationId: string | null, enabled: boolean): UseGoalStateResult {
+export function useGoalState(
+  conversationId: string | null,
+  enabled: boolean,
+  turnActive = false,
+): UseGoalStateResult {
   const [goal, setGoal] = useState<Goal | null>(null);
 
   useEffect(() => {
@@ -31,7 +42,7 @@ export function useGoalState(conversationId: string | null, enabled: boolean): U
     return () => {
       cancelled = true;
     };
-  }, [conversationId, enabled]);
+  }, [conversationId, enabled, turnActive]);
 
   return { goal, setGoal };
 }

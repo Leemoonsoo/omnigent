@@ -49,6 +49,28 @@ describe("useGoalState", () => {
     expect(result.current.goal).toBeNull();
   });
 
+  it("reloads the goal when a turn starts and ends", async () => {
+    // A typed /goal sets the goal on the runner, outside this hook's writes.
+    mockGetGoal
+      .mockResolvedValueOnce({ goal: null })
+      .mockResolvedValueOnce({ goal: GOAL })
+      .mockResolvedValueOnce({ goal: { ...GOAL, status: "complete" } });
+
+    const { result, rerender } = renderHook(
+      ({ turnActive }) => useGoalState("conv", true, turnActive),
+      { initialProps: { turnActive: false } },
+    );
+    await waitFor(() => expect(mockGetGoal).toHaveBeenCalledTimes(1));
+    expect(result.current.goal).toBeNull();
+
+    rerender({ turnActive: true });
+    await waitFor(() => expect(result.current.goal).toEqual(GOAL));
+
+    rerender({ turnActive: false });
+    await waitFor(() => expect(result.current.goal?.status).toBe("complete"));
+    expect(mockGetGoal).toHaveBeenCalledTimes(3);
+  });
+
   it("reloads the goal when a session becomes reachable again", async () => {
     mockGetGoal.mockResolvedValueOnce({ goal: GOAL });
 
