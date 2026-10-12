@@ -3263,6 +3263,8 @@ function ComposerImpl(
     const skill = onSendSlashCommand
       ? matchSlashCommandInvocation(trimmed, slashCommandNames)
       : null;
+    // Set by the /goal branch below to the canonical text the plaintext path sends.
+    let goalMessage: string | null = null;
     if (
       draft.quotes.length === 0 &&
       (skill !== null || isSlashCommandText(trimmed)) &&
@@ -3317,6 +3319,9 @@ function ComposerImpl(
         setGoalDialogOpen(true);
         return;
       }
+      // The harnesses parse only a lowercase "/goal" followed by a space, so
+      // "/Goal X" or a newline after the command is rewritten to that form.
+      if (goalCommand) goalMessage = `/goal ${trimmed.slice(parts[0].length).trim()}`;
       // /btw is a built-in for menu/autocomplete purposes only — it is NOT
       // executed locally. It must reach the vendor TUI as plaintext so Claude
       // Code opens its side chat and the forwarder relays the answer to the
@@ -3372,7 +3377,7 @@ function ComposerImpl(
       };
       onSend(serializeReplyDraft(outgoing), sendFiles, snapshotReplyDraft(outgoing));
     } else {
-      const message = isSlashCommandText(trimmed) ? trimmed : fullText.trimEnd();
+      const message = goalMessage ?? (isSlashCommandText(trimmed) ? trimmed : fullText.trimEnd());
       onSend(mentionPreamble + message, sendFiles);
     }
     dirtyRef.current = true;

@@ -911,6 +911,19 @@ describe("Composer typed /goal", () => {
     },
   );
 
+  it.each([
+    ["/Goal Fix CI", "/goal Fix CI"],
+    ["/goal\nFix CI", "/goal Fix CI"],
+    ["/goal   Fix\nCI  ", "/goal Fix\nCI"],
+  ])("sends %j as the canonical %j the harness parses", (text, sent) => {
+    const { onSend } = renderGoalSession("codex-native");
+
+    fireEvent.change(textarea(), { target: { value: text } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+
+    expect(onSend.mock.calls[0]?.[0]).toBe(sent);
+  });
+
   it.each<GoalSession>(["codex-native", "polly-claude", "polly-codex"])(
     "sends /goal with an objective as plaintext, not a skill (%s)",
     (session) => {
