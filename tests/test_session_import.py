@@ -1291,6 +1291,44 @@ def test_load_codex_session_keeps_full_history_past_two_mb(tmp_path: Path) -> No
     assert _codex_compaction_baselines(imported) == [["compaction summary baseline"]]
 
 
+@pytest.mark.parametrize(("cap", "trimmed"), [(5, False), (4, True)], ids=["at-cap", "over-cap"])
+def test_load_codex_session_trims_to_the_last_compaction_only_above_the_item_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap: int, trimmed: bool
+) -> None:
+    """Up to the item cap the whole history imports; past it, the last compaction onward."""
+    monkeypatch.setattr(local_import, "MAX_IMPORT_ITEMS", cap)
+    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    _write_codex_rollout_with_compaction(tmp_path, session_id)
+
+    imported = load_codex_session(session_id, codex_home=tmp_path)
+
+    post = ["post compaction question", "post compaction answer"]
+    pre = ["pre compaction question", "pre compaction answer"]
+    assert _codex_item_texts(imported) == (post if trimmed else pre + post)
+    assert imported.items[0].type == ("compaction" if trimmed else "message")
+    assert _codex_compaction_baselines(imported) == [["compaction summary baseline"]]
+    baselines, replayed = _codex_cold_resume(imported, cwd=tmp_path)
+    assert baselines == [["compaction summary baseline"]]
+    assert replayed == post
+
+
+def test_load_codex_session_keeps_an_over_cap_thread_with_no_compaction_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no compaction to trim to, an over-cap thread imports whole for the API to reject."""
+    monkeypatch.setattr(local_import, "MAX_IMPORT_ITEMS", 2)
+    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    _write_codex_turns(
+        tmp_path / "sessions" / "2026" / "10" / "02" / f"rollout-x-{session_id}.jsonl",
+        session_id,
+        [("question 1", "answer 1"), ("question 2", "answer 2")],
+    )
+
+    imported = load_codex_session(session_id, codex_home=tmp_path)
+
+    assert len(imported.items) == 4
+
+
 def _write_codex_rollout(tmp_path: Path, session_id: str, *, first_message: str) -> None:
     """Write a minimal importable Codex rollout with one user message."""
     rollout = (

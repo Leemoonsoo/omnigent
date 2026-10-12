@@ -32,6 +32,7 @@ from omnigent.server.schemas import SessionCreateRequest
 from omnigent.session_import import (
     IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
     IMPORT_SOURCE_LABEL_KEY,
+    MAX_IMPORT_ITEMS,
     ImportSource,
     title_from_items,
 )
@@ -43,9 +44,6 @@ from omnigent.stores.project_store import ProjectStore
 
 _logger = logging.getLogger(__name__)
 
-# Upper bound on items in one imported session, shared by the CLI-normalized
-# ``/imports`` body and the host-streamed ``/imports/local`` path.
-_MAX_IMPORT_ITEMS = 100_000
 _LOCAL_IMPORT_STREAM_ERROR_MESSAGE = (
     "The local session import stopped unexpectedly. Retry the import or contact an administrator."
 )
@@ -102,7 +100,7 @@ class ImportSessionRequest(BaseModel):
     # The harness had archived this session (e.g. ``codex archive``); the
     # imported conversation is archived too instead of landing in the sidebar.
     archived: bool = False
-    items: list[ImportItemInput] = Field(min_length=1, max_length=_MAX_IMPORT_ITEMS)
+    items: list[ImportItemInput] = Field(min_length=1, max_length=MAX_IMPORT_ITEMS)
 
     @field_validator("external_session_id")
     @classmethod
@@ -622,7 +620,7 @@ def create_imports_router(
                 or source is None
                 # Mirror the /imports item cap so one oversized transcript can't
                 # balloon a batch import's memory.
-                or len(raw_items) > _MAX_IMPORT_ITEMS
+                or len(raw_items) > MAX_IMPORT_ITEMS
             ):
                 _fail(
                     external_session_id,

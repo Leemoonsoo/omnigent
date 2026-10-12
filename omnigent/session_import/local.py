@@ -34,6 +34,7 @@ from omnigent.harnesses.opencode_native.app_server import (
 )
 from omnigent.harnesses.opencode_native.forwarder import opencode_tool_output_text
 from omnigent.session_import.models import (
+    MAX_IMPORT_ITEMS,
     ImportSource,
     LocalSessionImport,
     SessionImportNotFoundError,
@@ -897,6 +898,21 @@ def _codex_items_from_records(
     return items, workspace
 
 
+def _codex_items_within_import_cap(
+    items: list[NewConversationItem],
+) -> list[NewConversationItem]:
+    """Trim an import above ``MAX_IMPORT_ITEMS`` to its last compaction onward.
+
+    Up to the cap the whole history imports. Past it the import API would reject
+    the session, so keep the last compaction item and everything after it, the
+    context a cold resume rebuilds from. Without a compaction, nothing is trimmed.
+    """
+    if len(items) <= MAX_IMPORT_ITEMS:
+        return items
+    compactions = [index for index, item in enumerate(items) if item.type == "compaction"]
+    return items[compactions[-1] :] if compactions else items
+
+
 def load_codex_session(
     session_id: str,
     *,
@@ -925,6 +941,7 @@ def load_codex_session(
     items, workspace = _codex_items_from_records(
         chain(inherited, [] if first is None else [first], own_records)
     )
+    items = _codex_items_within_import_cap(items)
     if not items:
         raise SessionImportNotFoundError(f"Codex session {session_id!r} has no importable history")
     return LocalSessionImport(

@@ -11,6 +11,10 @@ from omnigent.entities.conversation import synthesize_conversation_title
 
 ImportSource = Literal["claude", "codex", "kimi", "kiro", "opencode", "pi", "qwen"]
 
+# Upper bound on items in one imported session. The import API rejects a larger
+# session, so the Codex loader trims to its last compaction to stay under it.
+MAX_IMPORT_ITEMS = 100_000
+
 IMPORT_SOURCE_LABEL_KEY = "omnigent.import.source"
 IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY = "omnigent.import.external_session_id"
 IMPORT_PROVENANCE_LABEL_KEYS = frozenset(
