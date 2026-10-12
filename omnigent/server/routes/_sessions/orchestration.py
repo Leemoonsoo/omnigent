@@ -4729,7 +4729,8 @@ async def _recover_side_chat_runner_via_source(
     and rebinds the side chat atomically so concurrent rebindings are
     preserved. The caller must initialize the side chat on the returned
     runner. Recovery requires edit access to the source and, like an explicit
-    runner attach, ownership of the runner the side chat would use.
+    runner attach, ownership of the runner the side chat would use; a runner
+    owned by another user raises ``FORBIDDEN`` with that explanation.
     """
     source_id = _side_chat_source_id(side_chat)
     if source_id is None:
@@ -4784,7 +4785,11 @@ async def _recover_side_chat_runner_via_source(
                     source.runner_id,
                     extra={"session_id": side_chat.id},
                 )
-                return None, side_chat
+                raise OmnigentError(
+                    "This side chat can't reconnect: its parent session runs on "
+                    "another user's runner.",
+                    code=ErrorCode.FORBIDDEN,
+                )
         if source.runner_id != side_chat.runner_id:
             try:
                 if side_chat.runner_id is None:

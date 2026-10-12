@@ -314,6 +314,63 @@ async def test_side_chat_recovery_gates_on_source_edit_access_at_the_routes(
     assert [c.kwargs["session_id"] for c in ensure.await_args_list] == [side.id, source.id]
 
 
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [(ErrorCode.WRONG_REPLICA, 400), (ErrorCode.FORBIDDEN, 403)],
+    ids=["wrong-replica", "foreign-runner"],
+)
+async def test_side_chat_recovery_errors_reach_both_routes(
+    auth_client: httpx.AsyncClient,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    status: int,
+) -> None:
+    """Message and Resume return recovery's redirect and ownership errors unchanged.
+
+    Neither route may consume the message or replace the error with the generic
+    unavailable response.
+    """
+    store = SqlAlchemyConversationStore(db_uri)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    agent = await create_test_agent(client, name=f"side-chat-recovery-error-{code}")
+    source = store.create_conversation(agent_id=agent["id"])
+    store.set_runner_id(source.id, "runner-shared")
+    side = store.fork_conversation(
+        source.id,
+        extra_labels={SIDE_CHAT_LABEL_KEY: "1", SIDE_CHAT_SOURCE_LABEL_KEY: source.id},
+    )
+    store.set_runner_id(side.id, "runner-shared")
+    permissions.ensure_user(_OWNER)
+    permissions.grant(_OWNER, source.id, LEVEL_OWNER)
+    permissions.grant(_OWNER, side.id, LEVEL_OWNER)
+
+    async def _ensure(*, conv: Conversation, **_kwargs: object):
+        return None, conv
+
+    monkeypatch.setattr(routes_events, "ensure_runner_connected", AsyncMock(side_effect=_ensure))
+    monkeypatch.setattr(sessions, "_get_runner_client", AsyncMock(return_value=None))
+    recover = AsyncMock(side_effect=OmnigentError("recovery refused", code=code))
+    monkeypatch.setattr(routes_events, "_recover_side_chat_runner_via_source", recover)
+
+    message = {
+        "type": "message",
+        "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    }
+    for event in (message, {"type": "retry_session", "data": {}}):
+        response = await auth_client.post(
+            f"/v1/sessions/{side.id}/events",
+            json=event,
+            headers={"X-Forwarded-Email": _OWNER},
+        )
+        assert response.status_code == status, response.text
+        assert response.json()["error"]["code"] == code, response.text
+
+    assert recover.await_count == 2
+    assert store.list_items(side.id).data == []
+
+
 async def test_resume_single_flight_is_shared_only_within_one_caller(
     db_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -402,7 +459,8 @@ async def test_side_chat_recovery_requires_ownership_of_source_runner(
     """Recovery binds a side chat only to a runner its caller owns, like an explicit attach.
 
     Both callers may edit the source, but its live runner belongs to one of
-    them. The other editor's unbound side chat stays unbound.
+    them. The other editor gets an explained ``FORBIDDEN`` and their side chat
+    stays unbound.
     """
     store = SqlAlchemyConversationStore(db_uri)
     source, side = _source_and_side_chat(store, db_uri)
@@ -425,20 +483,24 @@ async def test_side_chat_recovery_requires_ownership_of_source_runner(
     get_client = AsyncMock(return_value=runner_client)
     monkeypatch.setattr(sessions, "_get_runner_client", get_client)
 
-    client, recovered = await _recover(
-        store, unbound, user_id=caller, permission_store=permissions, runner_router=router
-    )
+    if recovers:
+        client, _ = await _recover(
+            store, unbound, user_id=caller, permission_store=permissions, runner_router=router
+        )
+        assert client is runner_client
+    else:
+        with pytest.raises(OmnigentError) as raised:
+            await _recover(
+                store, unbound, user_id=caller, permission_store=permissions, runner_router=router
+            )
+        assert raised.value.code == ErrorCode.FORBIDDEN
+        assert "another user's runner" in str(raised.value)
+        get_client.assert_not_awaited()
 
     router.runner_owner.assert_called_with("runner-replacement")
     saved = store.get_conversation(side.id)
     assert saved is not None
-    if recovers:
-        assert client is runner_client
-        assert saved.runner_id == "runner-replacement"
-    else:
-        assert client is None and recovered is unbound
-        assert saved.runner_id is None
-        get_client.assert_not_awaited()
+    assert saved.runner_id == ("runner-replacement" if recovers else None)
 
 
 async def test_side_chat_recovery_redirects_when_source_host_is_on_another_replica(
@@ -462,28 +524,35 @@ async def test_side_chat_recovery_redirects_when_source_host_is_on_another_repli
 
 
 @pytest.mark.parametrize(
-    "shape", ["host_bound", "missing_source_label", "not_side_chat", "sub_agent"]
+    ("changes", "expected"),
+    [
+        ({}, "source-1"),
+        ({"host_id": _HOST_ID}, None),
+        ({"labels": {SIDE_CHAT_LABEL_KEY: "1"}}, None),
+        ({"labels": {SIDE_CHAT_SOURCE_LABEL_KEY: "source-1"}}, None),
+        ({"kind": "sub_agent"}, None),
+        ({"labels": {SIDE_CHAT_LABEL_KEY: "1", SIDE_CHAT_SOURCE_LABEL_KEY: "side-1"}}, None),
+    ],
+    ids=[
+        "hostless-side-chat",
+        "host-bound",
+        "missing-source-label",
+        "not-side-chat",
+        "sub-agent",
+        "self-source",
+    ],
 )
-async def test_only_hostless_side_chats_recover_through_source(
-    db_uri: str, monkeypatch: pytest.MonkeyPatch, shape: str
+def test_side_chat_source_id_accepts_only_hostless_side_chats(
+    changes: dict[str, Any], expected: str | None
 ) -> None:
-    store = SqlAlchemyConversationStore(db_uri)
-    source, side = _source_and_side_chat(store, db_uri)
-    labels = dict(side.labels)
-    changes: dict[str, object] = {}
-    if shape == "host_bound":
-        changes["host_id"] = _HOST_ID
-    elif shape == "missing_source_label":
-        labels.pop(SIDE_CHAT_SOURCE_LABEL_KEY)
-    elif shape == "not_side_chat":
-        labels.pop(SIDE_CHAT_LABEL_KEY)
-    else:
-        changes["kind"] = "sub_agent"
-    candidate = dataclasses.replace(side, **changes, labels=labels)
-    ensure = AsyncMock(return_value=(object(), source))
-    monkeypatch.setattr(orchestration, "ensure_runner_connected", ensure)
+    side_chat = Conversation(
+        id="side-1",
+        created_at=0,
+        updated_at=0,
+        root_conversation_id="side-1",
+        labels={SIDE_CHAT_LABEL_KEY: "1", SIDE_CHAT_SOURCE_LABEL_KEY: "source-1"},
+    )
 
-    client, unchanged = await _recover(store, candidate)
-
-    assert client is None and unchanged is candidate
-    ensure.assert_not_awaited()
+    assert (
+        orchestration._side_chat_source_id(dataclasses.replace(side_chat, **changes)) == expected
+    )
