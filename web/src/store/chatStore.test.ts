@@ -13819,6 +13819,77 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
+  it("clears the open turn's compaction spinner when reconnect falls back to a fresh window", async () => {
+    const id = "conv_spinner_window";
+    const preGap = Array.from({ length: 30 }, (_, i) => gapUser("pre", i));
+    const windowItems = preGap.slice(-SESSION_HISTORY_PAGE_SIZE);
+    seedSession(id, preGap);
+    const sinks: StreamSink[] = [];
+    const heldItems: (() => void)[] = [];
+    let holdItems = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === `/v1/sessions/${id}/stream`) {
+        const sink = pushableStream();
+        sinks.push(sink);
+        return mockResponse(null, { bodyStream: sink.stream });
+      }
+      if (holdItems && url.startsWith(`/v1/sessions/${id}/items`)) {
+        return new Promise<Response>((resolve) => {
+          heldItems.push(() => resolve(defaultFetchHandler(input, init)));
+        });
+      }
+      return defaultFetchHandler(input, init);
+    });
+    const controller = new AbortController();
+    useChatStore.setState({
+      conversationId: id,
+      abortController: controller,
+      blocks: itemsToBlocks(windowItems),
+      hasMoreHistory: true,
+      oldestItemId: windowItems[0]!.id,
+      sessionStatus: "running",
+      status: "streaming",
+      activeResponse: { responseId: "resp_live", state: "streaming", error: null },
+    });
+
+    const loop = startStreamPump(id, controller, setState, getState);
+    await drainAsync();
+
+    // The turn ends during a gap too long to backfill, so reconcile falls
+    // back to a fresh window. Before its fetches land, the new stream replays
+    // the turn header and the compaction progress it announced.
+    const gap = Array.from({ length: 100 }, (_, i) => gapUser("gap", i));
+    seedSessionItems(id, [...preGap, ...gap]);
+    holdItems = true;
+    sinks[0]!.error();
+    await drainAsync();
+    expect(sinks).toHaveLength(2);
+    sinks[1]!.push(sse("response.created", { id: "resp_live", status: "in_progress", output: [] }));
+    sinks[1]!.push(sse("response.compaction.in_progress", {}));
+    await drainAsync();
+    expect(useChatStore.getState().blocks.some((b) => b.type === "compaction_loading")).toBe(true);
+
+    holdItems = false;
+    /* oxlint-disable no-await-in-loop */
+    while (heldItems.length > 0) {
+      heldItems.shift()!();
+      await drainAsync();
+    }
+    /* oxlint-enable no-await-in-loop */
+
+    const state = useChatStore.getState();
+    // The fallback actually ran: the window was replaced by the fresh one.
+    expect(state.oldestItemId).toBe(gap.at(-INITIAL_WINDOW_ITEMS)!.id);
+    expect(state.activeResponse?.state).toBe("completed");
+    expect(state.blocks.some((b) => b.type === "compaction_loading")).toBe(false);
+
+    sinks[1]!.push("data: [DONE]\n\n");
+    sinks[1]!.close();
+    await drainAsync(2);
+    await loop;
+  });
+
   it("tombstones native previews found only by capped re-hydration", async () => {
     const preGap = Array.from({ length: 30 }, (_, i) => gapUser("npre", i));
     const windowItems = preGap.slice(-SESSION_HISTORY_PAGE_SIZE);

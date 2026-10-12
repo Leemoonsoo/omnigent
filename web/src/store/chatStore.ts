@@ -5110,18 +5110,21 @@ async function rehydrateWindowOnReconnect(
       windowBlocks,
       withoutRebuiltUserInputCards(tail, windowBlocks),
     );
+    const statusPatch = reconnectStatusPatch(session, s, launchBeforeFetch);
+    const blocks =
+      reconcileElicitationBlocks(
+        merged,
+        snapshotPending,
+        preGapElicitations.pending,
+        preGapElicitations.autoResolved,
+      ) ?? merged;
     return {
-      ...reconnectStatusPatch(session, s, launchBeforeFetch),
+      ...statusPatch,
       // Same persisted-item evidence as the reconnect path: a rehydrated item
       // can be a send whose POST died in the gap.
       ...reconcileSendDraftWithSnapshot(s, freshItemIds, session),
       blocks:
-        reconcileElicitationBlocks(
-          merged,
-          snapshotPending,
-          preGapElicitations.pending,
-          preGapElicitations.autoResolved,
-        ) ?? merged,
+        snapshotCompactionSpinners(blocks, s.activeResponse, statusPatch.activeResponse) ?? blocks,
       hasMoreHistory: fresh.hasMore,
       oldestItemId: fresh.items[0]?.id ?? null,
       loadingMoreHistory: false,
