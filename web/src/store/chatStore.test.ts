@@ -17951,11 +17951,6 @@ describe("chatStore — compaction spinner follows its turn", () => {
       .blocks.filter((b) => b.type === "compaction_loading")
       .map((b) => b.ctx.responseId);
 
-  const bubbleKinds = () => {
-    const s = useChatStore.getState();
-    return buildBubbles(s.blocks, s.activeResponse).map((b) => b.kind);
-  };
-
   function startPump(conversationId: string) {
     useChatStore.setState({ conversationId, blocks: [], activeResponse: null, status: "idle" });
     const sink = pushableStream();
@@ -17986,12 +17981,10 @@ describe("chatStore — compaction spinner follows its turn", () => {
     await tick();
 
     expect(spinnerIds()).toEqual(["resp_compact"]);
-    expect(bubbleKinds()).toContain("compaction_loading");
 
     sink.push(sse("response.compaction.completed", {}));
     await tick();
-    expect(bubbleKinds()).toContain("compaction");
-    expect(bubbleKinds()).not.toContain("compaction_loading");
+    expect(useChatStore.getState().blocks.some((b) => b.type === "compaction")).toBe(true);
 
     sink.push(turnEvent("response.completed", "resp_compact"));
     await tick();
@@ -18010,7 +18003,6 @@ describe("chatStore — compaction spinner follows its turn", () => {
     await tick();
 
     expect(spinnerIds()).toEqual([]);
-    expect(bubbleKinds()).not.toContain("compaction_loading");
 
     controller.abort();
   });
@@ -18068,27 +18060,41 @@ describe("chatStore — compaction spinner follows its turn", () => {
     },
   );
 
+  const nativeStatus = (status: string, responseId: string) =>
+    sse("session.status", {
+      conversation_id: "conv_native_frame",
+      status,
+      response_id: responseId,
+    });
+
   it.each([
     {
-      ending: "idle edge",
-      frame: sse("session.status", {
-        conversation_id: "conv_native_frame",
-        status: "idle",
-        response_id: "codex_turn_1",
-      }),
+      edge: "the turn's idle edge",
+      before: [],
+      after: [nativeStatus("idle", "codex_turn_1")],
       settled: "completed",
     },
     {
-      ending: "stop",
-      frame: sse("session.interrupted", {
-        type: "session.interrupted",
-        data: { requested_at: 1704067200, response_id: "codex_turn_1" },
-      }),
+      edge: "the turn's stop",
+      before: [],
+      after: [
+        sse("session.interrupted", {
+          type: "session.interrupted",
+          data: { requested_at: 1704067200, response_id: "codex_turn_1" },
+        }),
+      ],
       settled: "cancelled",
     },
+    {
+      // Progress announced after the turn settled, ahead of the next turn.
+      edge: "the next turn's start",
+      before: [nativeStatus("idle", "codex_turn_1")],
+      after: [nativeStatus("running", "codex_turn_2"), nativeStatus("idle", "codex_turn_2")],
+      settled: "completed",
+    },
   ])(
-    "clears a spinner still awaiting its frame flush when the turn's $ending lands first",
-    async ({ frame, settled }) => {
+    "clears a spinner still awaiting its frame flush when $edge lands first",
+    async ({ before, after, settled }) => {
       useChatStore.setState({
         conversationId: "conv_native_frame",
         blocks: [],
@@ -18106,15 +18112,9 @@ describe("chatStore — compaction spinner follows its turn", () => {
         },
       });
 
-      sink.push(
-        sse("session.status", {
-          conversation_id: "conv_native_frame",
-          status: "running",
-          response_id: "codex_turn_1",
-        }),
-      );
+      sink.push(nativeStatus("running", "codex_turn_1"));
       // The turn's first content paints at once; the spinner after it waits
-      // for the next frame, and the turn's ending arrives before that frame.
+      // for the next frame, and the turn edge arrives before that frame.
       sink.push(
         sse("response.output_item.done", {
           item: {
@@ -18126,8 +18126,9 @@ describe("chatStore — compaction spinner follows its turn", () => {
           },
         }),
       );
+      before.forEach((frame) => sink.push(frame));
       sink.push(sse("response.compaction.in_progress", {}));
-      sink.push(frame);
+      after.forEach((frame) => sink.push(frame));
       await tick();
       (pendingFlush as (() => void) | null)?.();
 

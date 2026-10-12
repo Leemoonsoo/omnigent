@@ -6217,8 +6217,8 @@ export async function pumpStreamEvents(
         };
       },
       () => {
-        // Commit what the turn emitted before its ending edge applies, so
-        // that edge's cleanup (e.g. its "Compacting…" spinner) sees it.
+        // Commit what the stream emitted before a turn edge applies, so the
+        // edge's adoption and cleanup (e.g. of a "Compacting…" spinner) see it.
         flush();
       },
     ),
@@ -8164,18 +8164,14 @@ async function* tapSessionEvents(
   events: AsyncIterable<StreamEvent>,
   conversationId: string,
   onElicitationResolved?: (elicitationId: string) => void,
-  beforeTurnEnd?: () => void,
+  beforeTurnEdge?: () => void,
 ): AsyncIterable<StreamEvent> {
   for await (const event of events) {
     if (!isConversationDisposed(conversationId)) {
       streamEventRevisions.set(conversationId, (streamEventRevisions.get(conversationId) ?? 0) + 1);
     }
-    if (
-      event.type === "session_interrupted" ||
-      (event.type === "session_status" &&
-        (event.status === "idle" || event.status === "failed" || event.status === "waiting"))
-    ) {
-      beforeTurnEnd?.();
+    if (event.type === "session_status" || event.type === "session_interrupted") {
+      beforeTurnEdge?.();
     }
     handleSessionEvent(event, conversationId);
     if (event.type === "elicitation_resolved") {
