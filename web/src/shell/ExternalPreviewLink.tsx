@@ -4,11 +4,8 @@ import { useFileViewerConversationId } from "./FileViewerContext";
 
 /**
  * Anchor for a URL (`https:`, `mailto:`, `//host`) in a read-only file preview.
- * It opens the way a chat link does: a new tab on the web, and in the desktop
- * app the shell's window-open policy (the system browser, or the in-app browser
- * when opted in). A same-window link would instead navigate the app itself off
- * its server, which a Databricks browser sign-in window treats as a lost
- * session and drops back to the connect screen.
+ * Shares chat's external-link handling, so a click opens outside the app window
+ * instead of navigating the app itself off its server.
  */
 export function ExternalPreviewLink({
   href,

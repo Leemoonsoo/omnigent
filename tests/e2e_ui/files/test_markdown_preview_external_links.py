@@ -21,6 +21,8 @@ import httpx
 import pytest
 from playwright.sync_api import Page, Route, expect
 
+from tests.e2e_ui.conftest import open_previewable_files_in_preview
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _MARKDOWN_FILE_PATH = "external_link_preview.md"
@@ -67,20 +69,7 @@ def test_markdown_preview_web_link_opens_new_tab(
     """Clicking a URL in the Preview opens it in a new page; the app stays put."""
     base_url, session_id = seeded_external_link_markdown_session
     page.context.route("https://docs.external.example/**", _fulfill_external_page)
-    page.add_init_script(
-        """
-        window.localStorage.setItem(
-          "omnigent:file-view-preferences",
-          JSON.stringify({
-            diffActive: false,
-            diffLayout: "unified",
-            previewableViewMode: "preview",
-            hideWhitespace: false,
-            wrapLines: false,
-          }),
-        );
-        """
-    )
+    open_previewable_files_in_preview(page)
     page.goto(f"{base_url}/c/{session_id}?file={_MARKDOWN_FILE_PATH}")
 
     file_viewer = page.locator('[data-testid="file-viewer"]:visible')
