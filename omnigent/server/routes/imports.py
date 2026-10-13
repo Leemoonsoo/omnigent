@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal, cast, get_args
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -371,6 +371,7 @@ def create_imports_router(
         project_id: str | None = None,
         host_id: str | None = None,
         archived: bool = False,
+        replace_conversation_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Create the conversation, append items, stamp import labels, grant owner.
 
@@ -383,9 +384,9 @@ def create_imports_router(
         resuming defaults to the machine the workspace lives on; bound only
         alongside a workspace (the ``ck_conversations_workspace_required_for_host``
         check constraint). ``archived`` files the session under Archived
-        sessions when the harness had archived it. Caller handles the
-        already-imported / force decision first. Returns ``(conversation id,
-        title)``.
+        sessions when the harness had archived it. Caller authorizes any
+        ``replace_conversation_id``; replacement waits until validation
+        succeeds. Returns ``(conversation id, title)``.
         """
         native_agent = native_coding_agent_for_harness(f"{source}-native")
         if native_agent is None:
@@ -411,6 +412,11 @@ def create_imports_router(
             # resume lands on the right machine. Requires a workspace (check
             # constraint), so only set host_id when one is recorded.
             if host_id is not None:
+                # Host ownership must still hold when the import is persisted.
+                if host_store is not None:
+                    await asyncio.to_thread(
+                        resolve_host_owner, user_id=user_id, host_id=host_id, host_store=host_store
+                    )
                 create_kwargs["host_id"] = host_id
         if project_id is not None:
             create_kwargs["project_id"] = project_id
@@ -423,6 +429,8 @@ def create_imports_router(
         workspace = resolved_create.body.workspace
         resolved_host_id = resolved_create.body.host_id
         title = (native_title or "").strip() or title_from_items(items)
+        if replace_conversation_id is not None:
+            await conversation_store.delete_conversation(replace_conversation_id)
         try:
             conversation = await asyncio.to_thread(
                 conversation_store.create_conversation,
@@ -508,9 +516,6 @@ def create_imports_router(
                     code=ErrorCode.CONFLICT,
                 )
 
-        if existing is not None:
-            await conversation_store.delete_conversation(existing.id)
-
         session_id, _title = await _persist_import(
             source=body.source,
             external_session_id=body.external_session_id,
@@ -521,6 +526,7 @@ def create_imports_router(
             project_id=body.project_id,
             host_id=body.host_id,
             archived=body.archived,
+            replace_conversation_id=existing.id if existing is not None else None,
         )
 
         response.status_code = 201
@@ -664,6 +670,15 @@ def create_imports_router(
                 continue
             except ValueError:
                 _fail(external_session_id, source, "This session's data could not be imported.")
+                continue
+            except HTTPException:
+                # Host authorization can change during a batch. Retain the
+                # per-session failure handling instead of aborting the batch.
+                _fail(
+                    external_session_id,
+                    source,
+                    "This session's host is no longer available to you.",
+                )
                 continue
             counts["imported"] += 1
             yield ImportedSessionRef(session_id=session_id, title=title)
