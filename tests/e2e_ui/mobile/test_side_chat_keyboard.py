@@ -68,21 +68,9 @@ def test_side_chat_input_stays_above_ios_keyboard(
 ) -> None:
     """With the keyboard up, the focused side-chat input and Send stay visible above it."""
     base_url, session_id = seeded_session
-    parent_reply = "The parent conversation is ready."
     question = f"kb-side-{session_id}: what changed?"
     reply = "The side chat answered above the keyboard."
-    configure_mock_llm(
-        mock_llm_server_url,
-        [{"text": parent_reply}],
-        key=f"kb-main-{session_id}",
-        match=f"kb-main-{session_id}",
-    )
-    configure_mock_llm(
-        mock_llm_server_url,
-        [{"text": reply}],
-        key=f"kb-side-{session_id}",
-        match=f"kb-side-{session_id}",
-    )
+    configure_mock_llm(mock_llm_server_url, [{"text": reply}], match=f"kb-side-{session_id}")
 
     child_ids: list[str] = []
 
@@ -101,13 +89,6 @@ def test_side_chat_input_stays_above_ios_keyboard(
         composer = page.get_by_placeholder("Send a message…")
         expect(composer).to_be_visible(timeout=60_000)
         expect(page.locator(".app-shell")).to_have_attribute("data-ios-native", "true")
-
-        composer.fill(f"kb-main-{session_id}: get ready")
-        page.get_by_role("button", name="Send", exact=True).click()
-        expect(page.locator(_ASSISTANT).filter(has_text=parent_reply)).to_be_visible(
-            timeout=30_000
-        )
-        expect(page.get_by_test_id("working-indicator")).to_have_count(0, timeout=30_000)
 
         composer.fill(f"/side {question}")
         page.get_by_role("button", name="Send", exact=True).click()

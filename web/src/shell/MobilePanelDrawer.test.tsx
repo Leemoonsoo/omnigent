@@ -113,8 +113,24 @@ describe("MobilePanelDrawer", () => {
     // A kept-mounted drawer (side chats) sits off-screen while another
     // surface holds the keyboard.
     const setKeyboardHeight = stubIOSKeyboard();
-    renderDrawer({ open: false, keepMounted: true });
+    const { rerender } = renderDrawer({ keepMounted: true });
+    const drawer = screen.getByTestId("shells-panel-drawer");
     setKeyboardHeight(336);
-    expect(screen.getByTestId("shells-panel-drawer").style.paddingBottom).toBe("");
+    expect(drawer.style.paddingBottom).toBe("336px");
+
+    rerender(
+      <MobilePanelDrawer
+        open={false}
+        title="Shells"
+        onClose={() => {}}
+        testId="shells-panel-drawer"
+        keepMounted
+      >
+        <div data-testid="drawer-body" />
+      </MobilePanelDrawer>,
+    );
+    expect(drawer.style.paddingBottom).toBe("");
+    setKeyboardHeight(300);
+    expect(drawer.style.paddingBottom).toBe("");
   });
 });
