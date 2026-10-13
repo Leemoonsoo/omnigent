@@ -2656,10 +2656,45 @@ function ComposerImpl(
   const showGoal = showGoalControl || showClaudeGoalControl || showPollyCodexGoalControl;
   const goalDisabled = !composerSessionId || (!showGoalControl && isReadOnly);
   const showGoalCommand = showGoal && !goalDisabled;
+  // Submit runs an enabled built-in over a skill with the same name, so a
+  // leading command lists that name only as the built-in. Mid-sentence
+  // suggestions still offer the skill.
+  const builtinCommandNames = useMemo(
+    () =>
+      new Set(
+        Object.keys(
+          buildSlashCommandMap(
+            [],
+            showEffort,
+            showModel,
+            showCompact,
+            showBtw,
+            showSide,
+            skillPrefix,
+            supportsModelReset,
+            showGoalCommand,
+          ),
+        ),
+      ),
+    [
+      showEffort,
+      showModel,
+      showCompact,
+      showBtw,
+      showSide,
+      skillPrefix,
+      supportsModelReset,
+      showGoalCommand,
+    ],
+  );
+  const commandSkills = useMemo(
+    () => skills.filter((skill) => !builtinCommandNames.has(`${skillPrefix}${skill.name}`)),
+    [skills, builtinCommandNames, skillPrefix],
+  );
   const slashCommands = useMemo(
     () =>
       buildSlashCommandMap(
-        skills,
+        commandSkills,
         showEffort,
         showModel,
         showCompact,
@@ -2670,7 +2705,7 @@ function ComposerImpl(
         showGoalCommand,
       ),
     [
-      skills,
+      commandSkills,
       showEffort,
       showModel,
       showCompact,
@@ -2688,7 +2723,7 @@ function ComposerImpl(
   const slashCommandsWithArgs = useMemo(
     () =>
       buildSlashCommandWithArgsSet(
-        skills,
+        commandSkills,
         showEffort,
         showModel,
         showBtw,
@@ -2696,7 +2731,7 @@ function ComposerImpl(
         skillPrefix,
         showGoalCommand,
       ),
-    [skills, showEffort, showModel, showBtw, showSide, skillPrefix, showGoalCommand],
+    [commandSkills, showEffort, showModel, showBtw, showSide, skillPrefix, showGoalCommand],
   );
 
   // Suggest names until a space starts the arguments; exclude file paths.
@@ -3104,6 +3139,7 @@ function ComposerImpl(
     text: value,
     commands: slashCommands,
     skills: skillCommands,
+    builtinNames: builtinCommandNames,
     labels: skillLabels,
     textareaRef,
     prefix: skillPrefix,

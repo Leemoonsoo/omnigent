@@ -938,6 +938,29 @@ describe("Composer typed /goal", () => {
     },
   );
 
+  it("lists a skill named goal as the built-in it runs as", async () => {
+    setComposerState({ skills: [{ name: "goal", description: "Track a goal" }] });
+    const { onSend, onSendSlashCommand } = renderGoalSession("polly-codex");
+
+    fireEvent.change(textarea(), { target: { value: "/go" } });
+    expect(screen.getAllByTestId("slash-menu-item-goal")).toHaveLength(1);
+    expect(screen.getByTestId("slash-menu-item-goal")).toHaveTextContent(
+      BUILTIN_SLASH_COMMANDS["/goal"],
+    );
+    expect(screen.queryByText("Track a goal")).toBeNull();
+    expect(screen.queryByText("Skills")).toBeNull();
+
+    fireEvent.change(textarea(), { target: { value: "/goal " } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(await screen.findByTestId("goal-condition")).toBeInTheDocument();
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    fireEvent.change(textarea(), { target: { value: "/goal Fix CI" } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(onSend.mock.calls[0]?.[0]).toBe("/goal Fix CI");
+    expect(onSendSlashCommand).not.toHaveBeenCalled();
+  });
+
   it("lets a multi-word skill starting with goal outrank the /goal built-in", () => {
     // Same precedence as every built-in ("/Help Desk summarize" runs the skill),
     // so a "goal fix" skill stays reachable in a Goal-enabled session.
