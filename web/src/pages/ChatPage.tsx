@@ -3306,11 +3306,8 @@ function ComposerImpl(
         setPickerOpenNonce((n) => n + 1);
         return;
       }
-      // "/goal <objective>" falls through to plaintext, the same message the
-      // command-backed Goal dialog sends; the harness sets the goal from it.
-      // Bare "/goal" has nothing to set, so open the Goal dialog instead.
-      // Gate on the Goal capability, not map membership: without it, "/goal"
-      // can still be a session skill named "goal".
+      // Send objectives as the dialog's plaintext command. Gate on the Goal
+      // capability, not map membership, to keep session skills named "goal".
       const goalCommand = cmd === "/goal" && showGoalCommand;
       if (goalCommand && !arg) {
         dirtyRef.current = true;

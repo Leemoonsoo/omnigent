@@ -47,8 +47,6 @@ describe("CommandGoalDialog", () => {
 
     const scrollRegion = screen.getByTestId("goal-condition").closest(".overflow-y-auto");
     if (!scrollRegion) throw new Error("goal scroll region not found");
-    // overflow-y-auto clips at the padding box, so without padding the
-    // full-width field's 3px focus ring is cut off at its edges.
     expect(scrollRegion).toHaveClass("p-1", "-m-1");
   });
 

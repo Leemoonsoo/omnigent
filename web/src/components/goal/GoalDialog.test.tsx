@@ -102,8 +102,6 @@ describe("GoalDialog", () => {
     await waitFor(() => expect(mockGetGoal).toHaveBeenCalledWith("conv_codex"));
     const scrollRegion = screen.getByTestId("goal-objective").closest(".overflow-y-auto");
     if (!scrollRegion) throw new Error("goal scroll region not found");
-    // overflow-y-auto clips at the padding box, so without padding the
-    // full-width fields' 3px focus ring is cut off at its edges.
     expect(scrollRegion).toHaveClass("p-1", "-m-1");
   });
 

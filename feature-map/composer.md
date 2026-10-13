@@ -27,8 +27,9 @@ and steers messages while the agent is busy.
 - `permission-mode`: the harness's native approval modes; the current mode is
   marked and the choice persists.
 - `slash-menu`: typing `/` opens commands and skills with keyboard navigation.
-- `goal-command`: where **+ → Goal** is available (Codex sessions, and Polly
-  on Claude SDK or Codex), `/goal` is listed under Commands. `/goal <objective>`
+- `goal-command`: where **+ → Goal** is available (Codex-native sessions, or
+  top-level Polly sessions on Claude SDK or Codex), `/goal` is listed under
+  Commands. `/goal <objective>`
   sends the objective for the harness to set as the goal; a bare `/goal` opens
   the Goal dialog, as **+ → Goal** does.
 - `attachments`: attach button, paste, and drop onto the transcript; chips can
@@ -64,7 +65,8 @@ and steers messages while the agent is busy.
   return to Chat.
 - Type `/` in the message box; attach files with the button, by paste, or by
   dropping them on the transcript.
-- In a Codex or Polly session, type `/goal <objective>` or a bare `/goal`, or
+- In a Codex-native session, or a top-level Polly session on Claude SDK or
+  Codex, type `/goal <objective>` or a bare `/goal`, or
   choose **+ → Goal**.
 - Send while the agent is working to queue a message, then steer it.
 
@@ -153,7 +155,7 @@ Tests under `tests/browser_ui/` stub every backend call and need no instance:
   `tests/browser_ui/chat/test_slash_menu.py::test_slash_menu_tracks_real_focus_and_wrapping_keyboard_navigation`
 - **`goal-command`:** no browser-level coverage; the `Composer typed /goal`
   web unit tests in `web/src/pages/ChatPage.composer.test.tsx` cover it.
-  Manually, in a Codex session: type `/go`. The menu lists `/goal` under
+  Manually, in a Codex-native session: type `/go`. The menu lists `/goal` under
   Commands; the first Enter fills `/goal `, and a second Enter opens the Goal
   dialog with the composer cleared. Then send `/goal <objective>`. Codex starts
   working on the objective, and by the time the turn ends the goal marker shows
