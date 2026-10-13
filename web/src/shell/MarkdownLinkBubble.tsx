@@ -1,8 +1,5 @@
-// Link popup for the Markdown editor. In edit mode a plain click on a link
-// places the caret (the Link extension runs with openOnClick:false), so while
-// the caret rests in a link this popup shows its target and an Open action —
-// otherwise the only way to follow it is an undiscoverable ⌘/Ctrl-click.
-// Alt+Enter in the editor moves focus to Open; Escape returns to the editor.
+// Plain clicks on a link in the Markdown editor place the caret, so the link
+// stays editable; this popup makes following the link discoverable.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -21,13 +18,14 @@ interface Point {
   bottom: number;
 }
 
-interface LinkBubble {
+/** A link's target and the point the popup attaches to. */
+interface LinkBubble extends Point {
   href: string;
-  top: number;
-  left: number;
 }
 
-// Minimum gap between the popup and the viewport's right edge.
+// Gap between the popup and its link.
+const ANCHOR_GAP_PX = 4;
+// Minimum gap between the popup and the viewport's edges.
 const VIEWPORT_MARGIN_PX = 8;
 
 const OPEN_ACTION_TITLE = `Open link (${ALT_KEY}+Enter from the editor)`;
@@ -63,10 +61,10 @@ function isClipped(point: Point, node: Node, container: HTMLElement | null): boo
 }
 
 /**
- * The link under a collapsed caret, positioned below the link's start, or
- * below the caret when the link wraps or its start is scrolled out of view.
- * Null when the selection is a range — that shows the Add comment button
- * instead — or when the link is scrolled out of view.
+ * The link under a collapsed caret, anchored at the link's start, or at the
+ * caret when the link wraps or its start is scrolled out of view. Null when
+ * the selection is a range — that shows the Add comment button instead — or
+ * when the link is scrolled out of view.
  */
 function linkBubbleAt(
   editor: Editor,
@@ -99,7 +97,7 @@ function linkBubbleAt(
   const candidates = Math.abs(start.top - caret.top) < 1 ? [start, caret] : [caret];
   const anchor = candidates.find((point) => !isClipped(point, node, container));
   if (!anchor) return null;
-  return { href, top: anchor.bottom + 4, left: anchor.left };
+  return { href, left: anchor.left, top: anchor.top, bottom: anchor.bottom };
 }
 
 export function MarkdownLinkBubble({
@@ -127,6 +125,8 @@ export function MarkdownLinkBubble({
       const next = (props?.event?.relatedTarget ?? null) as Node | null;
       if (!popupRef.current?.contains(next)) setBubble(null);
     };
+    // Alt+Enter reaches Open without a pointer. Open then keeps its native
+    // keys (Enter follows a link), and Escape returns to the editor.
     const onKeyDown = (event: KeyboardEvent) => {
       const altEnter =
         event.key === "Enter" &&
@@ -159,15 +159,22 @@ export function MarkdownLinkBubble({
     };
   }, [editor, scrollContainerRef]);
 
-  // The FileViewer is usually the rightmost panel, so a link near its edge
-  // would push the popup off-screen: shift it left until it fits.
+  // Place the popup below its link, or above it near the viewport's bottom,
+  // and shift it left near the right edge: the FileViewer is usually the
+  // rightmost panel. Measured at the viewport's left so a fixed popup near the
+  // right edge reports its natural width rather than a squeezed one.
   useLayoutEffect(() => {
     const el = popupRef.current;
     if (!el || !bubble) return;
-    const overflow = el.getBoundingClientRect().right - (window.innerWidth - VIEWPORT_MARGIN_PX);
-    if (overflow > 0) {
-      el.style.left = `${Math.max(VIEWPORT_MARGIN_PX, bubble.left - overflow)}px`;
-    }
+    el.style.left = "0px";
+    el.style.top = "0px";
+    const { width, height } = el.getBoundingClientRect();
+    const maxLeft = window.innerWidth - VIEWPORT_MARGIN_PX - width;
+    const below = bubble.bottom + ANCHOR_GAP_PX;
+    const fitsBelow = below + height <= window.innerHeight - VIEWPORT_MARGIN_PX;
+    const above = bubble.top - ANCHOR_GAP_PX - height;
+    el.style.left = `${Math.max(VIEWPORT_MARGIN_PX, Math.min(bubble.left, maxLeft))}px`;
+    el.style.top = `${fitsBelow ? below : Math.max(VIEWPORT_MARGIN_PX, above)}px`;
   }, [bubble]);
 
   if (!bubble) return null;
@@ -192,7 +199,6 @@ export function MarkdownLinkBubble({
         editor.view.focus();
       }}
       className="fixed z-50 flex max-w-[min(28rem,calc(100vw-1rem))] items-center gap-2 rounded-lg border border-border bg-popover py-1 pr-1 pl-2.5 text-sm shadow-menu"
-      style={{ top: bubble.top, left: bubble.left }}
     >
       <span className="min-w-0 truncate text-muted-foreground" title={href}>
         {href}

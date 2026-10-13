@@ -101,6 +101,25 @@ function placeCaret(ed: Editor, pos: number, to = pos) {
 
 const bubble = () => document.querySelector("[data-link-bubble]");
 
+/** Give the popup a layout size; jsdom measures every element as 0×0. */
+function mockPopupSize(width: number, height: number) {
+  const measure = HTMLElement.prototype.getBoundingClientRect;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: HTMLElement,
+  ) {
+    return this.hasAttribute("data-link-bubble")
+      ? ({ width, height } as DOMRect)
+      : measure.call(this);
+  });
+}
+
+function resizeWindow(innerWidth: ReturnType<typeof vi.spyOn>, width: number) {
+  innerWidth.mockReturnValue(width);
+  act(() => {
+    window.dispatchEvent(new Event("resize"));
+  });
+}
+
 describe("MarkdownLinkBubble", () => {
   it("shows a web link's URL and an Open link that leaves the app window", () => {
     const ed = renderBubble();
@@ -139,19 +158,28 @@ describe("MarkdownLinkBubble", () => {
     expect(el.style.left).toBe(`${line2.left}px`);
   });
 
-  it("shifts left to stay inside the viewport", () => {
-    vi.spyOn(window, "innerWidth", "get").mockReturnValue(400);
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
-      this: HTMLElement,
-    ) {
-      return (
-        this.hasAttribute("data-link-bubble") ? { left: RECT.left, right: RECT.left + 340 } : {}
-      ) as DOMRect;
-    });
+  it("shifts left to stay inside the viewport, tracking window resizes", () => {
+    const innerWidth = vi.spyOn(window, "innerWidth", "get").mockReturnValue(400);
+    mockPopupSize(340, 30);
     const ed = renderBubble();
     placeCaret(ed, posInText(ed, "ES-1"));
-    // right edge 460 overflows 400 - 8 by 68px.
-    expect((bubble() as HTMLElement).style.left).toBe(`${RECT.left - 68}px`);
+    const left = () => (bubble() as HTMLElement).style.left;
+    // 400 - 8 margin - 340 wide.
+    expect(left()).toBe("52px");
+    resizeWindow(innerWidth, 380);
+    expect(left()).toBe("32px");
+    // Back below the link once there is room.
+    resizeWindow(innerWidth, 1000);
+    expect(left()).toBe(`${RECT.left}px`);
+  });
+
+  it("flips above the link near the bottom of the viewport", () => {
+    vi.spyOn(window, "innerHeight", "get").mockReturnValue(80);
+    mockPopupSize(200, 20);
+    const ed = renderBubble();
+    placeCaret(ed, posInText(ed, "ES-1"));
+    // Below would end at 56 + 4 + 20 = 80, past 80 - 8.
+    expect((bubble() as HTMLElement).style.top).toBe(`${RECT.top - 4 - 20}px`);
   });
 
   it("shows while the caret is at the end of the link", () => {
@@ -232,6 +260,25 @@ describe("MarkdownLinkBubble", () => {
     expect(open.getAttribute("aria-keyshortcuts")).toBe("Alt+Enter");
     await user.keyboard("{Enter}");
     expect(openFile).toHaveBeenCalledWith("notes/plan.md");
+  });
+
+  it("follows a web link from the keyboard: Alt+Enter, then Enter", async () => {
+    const user = userEvent.setup();
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+    // The popup-blocked fallback navigates through a temporary anchor.
+    const followed: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      followed.push(this.href);
+    });
+    const ed = renderBubble();
+    placeCaret(ed, posInText(ed, "ES-1"));
+    await user.keyboard("{Alt>}{Enter}{/Alt}");
+    expect(document.activeElement).toBe(screen.getByRole("link", { name: "Open" }));
+    await user.keyboard("{Enter}");
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(followed).toEqual(["https://tracker.example.com/browse/ES-1"]);
   });
 
   it("returns focus to the editor on Escape and stays open", async () => {
