@@ -116,7 +116,7 @@ describe("NotebookPreview — markdown links", () => {
         {
           cell_type: "markdown",
           metadata: {},
-          source: "[docs](https://example.com/docs) and [below](#usage)",
+          source: "[docs](https://example.com/docs), [plan](plan.md) and [below](#usage)",
         },
       ],
     };
@@ -126,6 +126,8 @@ describe("NotebookPreview — markdown links", () => {
     expect(link.getAttribute("href")).toBe("https://example.com/docs");
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    // Only URLs open outside the app window; relative and in-page links don't.
+    expect(screen.getByText("plan").getAttribute("target")).toBeNull();
     expect(screen.getByText("below").getAttribute("target")).toBeNull();
   });
 });
