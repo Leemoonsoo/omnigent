@@ -1,28 +1,12 @@
-"""iOS side-chat composer must stay above the soft keyboard while typing.
+"""Verify the iOS side-chat drawer keeps its composer above the soft keyboard.
 
-Reported journey: on an iPhone, open a side chat (it fills the screen as the
-mobile Side chats drawer) -> tap the side-chat input -> the keyboard rises and
-covers the input, so the user cannot see what they type.
-
-The iOS app is a WKWebView over this same SPA, so the journey runs on the web
-lane at a phone viewport with a ``window.omnigentNative = {kind: "ios"}``
-bridge stub. The stub also stands in for the shell's keyboard API
-(``getKeyboardViewport`` / ``onKeyboardViewportChanged`` in
-``web/ios/Omnigent/OmnigentWebView.swift``), which publishes the height above
-the docked keyboard; the app's own iOS keyboard handling consumes it.
-
-The drawer is a ``fixed inset-0`` overlay. The iOS shell-lock resizes only
-flow content inside ``.app-shell`` and disables WebKit's focus reveal, so the
-drawer must reserve the keyboard itself or its bottom-anchored composer stays
-under the keyboard.
+A bridge stub stands in for the iOS shell and its keyboard viewport API.
 """
 
 from __future__ import annotations
 
-import os
-
 import httpx
-from playwright.sync_api import Browser, BrowserContext, Page, Route, expect
+from playwright.sync_api import Browser, Page, Route, expect
 
 from tests.e2e_ui.conftest import configure_mock_llm
 
@@ -64,15 +48,6 @@ _IOS_SHELL_INIT_SCRIPT = """
   };
 })();
 """
-
-
-def _new_phone_context(browser: Browser) -> BrowserContext:
-    """Open a touch phone context, filmed when the recording harness asks."""
-    ctx_kwargs: dict = {"viewport": _VIEWPORT, "has_touch": True, "is_mobile": True}
-    record_dir = os.environ.get("OMNIGENT_E2E_RECORD_DIR")
-    if record_dir:
-        ctx_kwargs["record_video_dir"] = record_dir
-    return browser.new_context(**ctx_kwargs)
 
 
 def _set_keyboard_height(page: Page, height: int) -> None:
@@ -117,7 +92,7 @@ def test_side_chat_input_stays_above_ios_keyboard(
             child_ids.append(response.json()["id"])
         route.fulfill(response=response)
 
-    context = _new_phone_context(browser)
+    context = browser.new_context(viewport=_VIEWPORT, has_touch=True, is_mobile=True)
     try:
         page = context.new_page()
         page.add_init_script(_IOS_SHELL_INIT_SCRIPT)
