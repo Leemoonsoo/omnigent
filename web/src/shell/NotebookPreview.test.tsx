@@ -126,9 +126,15 @@ describe("NotebookPreview — markdown links", () => {
     expect(link.getAttribute("href")).toBe("https://example.com/docs");
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");
-    // Only URLs open outside the app window; relative and in-page links don't.
-    expect(screen.getByText("plan").getAttribute("target")).toBeNull();
-    expect(screen.getByText("below").getAttribute("target")).toBeNull();
+    // Only URLs open outside the app window; relative and in-page links are unchanged.
+    for (const [text, href] of [
+      ["plan", "plan.md"],
+      ["below", "#usage"],
+    ]) {
+      const unchanged = screen.getByText(text);
+      expect(unchanged.getAttribute("href")).toBe(href);
+      expect(unchanged.getAttribute("target")).toBeNull();
+    }
   });
 });
 
