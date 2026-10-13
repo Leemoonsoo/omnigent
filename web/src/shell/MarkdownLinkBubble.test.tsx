@@ -3,6 +3,7 @@
 // has no layout, so Range rects are stubbed to give coordsAtPos a position.
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { Link } from "@tiptap/extension-link";
@@ -16,6 +17,8 @@ const CONTENT =
   "[the plan](../notes/plan.md#steps), and [top](#top).";
 
 const RECT = { left: 120, right: 160, top: 40, bottom: 56, width: 40, height: 16, x: 120, y: 40 };
+// The editor's scroll viewport, which comfortably contains RECT.
+const VIEWPORT_RECT = { left: 0, right: 800, top: 0, bottom: 600 };
 
 const openFile = vi.fn();
 const FILE_VIEWER = {
@@ -28,7 +31,7 @@ const FILE_VIEWER = {
 };
 
 let editor: Editor | null = null;
-let editorElement: HTMLElement | null = null;
+let containerElement: HTMLElement | null = null;
 
 beforeEach(() => {
   openFile.mockClear();
@@ -41,14 +44,18 @@ afterEach(() => {
   vi.restoreAllMocks();
   cleanup();
   editor?.destroy();
-  editorElement?.remove();
+  containerElement?.remove();
   editor = null;
-  editorElement = null;
+  containerElement = null;
 });
 
-function renderBubble({ editable = true, container = null as HTMLDivElement | null } = {}) {
-  editorElement = document.createElement("div");
-  document.body.appendChild(editorElement);
+function renderBubble({ editable = true, containerRect = VIEWPORT_RECT } = {}) {
+  const container = document.createElement("div");
+  container.getBoundingClientRect = () => containerRect as DOMRect;
+  const editorElement = document.createElement("div");
+  container.appendChild(editorElement);
+  document.body.appendChild(container);
+  containerElement = container;
   editor = new Editor({
     element: editorElement,
     editable,
@@ -114,6 +121,24 @@ describe("MarkdownLinkBubble", () => {
     expect(el.style.left).toBe(`${RECT.left}px`);
   });
 
+  it("sits below the caret when the link wraps onto another line", () => {
+    const line2 = { ...RECT, left: 24, right: 64, top: 60, bottom: 76, x: 24, y: 60 };
+    // The link starts on line 1; from its third character on, it is on line 2.
+    const rectFor = (range: Range) =>
+      range.startContainer.textContent === "ES-1" && range.startOffset >= 2 ? line2 : RECT;
+    Range.prototype.getClientRects = function (this: Range) {
+      return [rectFor(this)] as unknown as DOMRectList;
+    };
+    Range.prototype.getBoundingClientRect = function (this: Range) {
+      return rectFor(this) as DOMRect;
+    };
+    const ed = renderBubble();
+    placeCaret(ed, posInText(ed, "ES-1", 3));
+    const el = bubble() as HTMLElement;
+    expect(el.style.top).toBe(`${line2.bottom + 4}px`);
+    expect(el.style.left).toBe(`${line2.left}px`);
+  });
+
   it("shifts left to stay inside the viewport", () => {
     vi.spyOn(window, "innerWidth", "get").mockReturnValue(400);
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
@@ -162,11 +187,22 @@ describe("MarkdownLinkBubble", () => {
   });
 
   it("hides when the link is outside the scroll container", () => {
-    const container = document.createElement("div");
-    container.getBoundingClientRect = () =>
-      ({ top: 200, bottom: 600, left: 0, right: 800 }) as DOMRect;
-    const ed = renderBubble({ container });
+    const ed = renderBubble({ containerRect: { ...VIEWPORT_RECT, top: 200 } });
     placeCaret(ed, posInText(ed, "ES-1"));
+    expect(bubble()).toBeNull();
+  });
+
+  it("hides when a nested scroller, like a wide table's, scrolls the link out of view", () => {
+    const ed = renderBubble();
+    placeCaret(ed, posInText(ed, "ES-1"));
+    expect(bubble()).not.toBeNull();
+    const scroller = ed.view.dom.querySelector("p") as HTMLElement;
+    scroller.style.overflowX = "auto";
+    scroller.getBoundingClientRect = () => ({ ...VIEWPORT_RECT, left: 200 }) as DOMRect;
+    act(() => {
+      // Scroll events don't bubble.
+      scroller.dispatchEvent(new Event("scroll"));
+    });
     expect(bubble()).toBeNull();
   });
 
@@ -184,6 +220,44 @@ describe("MarkdownLinkBubble", () => {
     const ed = renderBubble({ editable: false });
     placeCaret(ed, posInText(ed, "ES-1"));
     expect(bubble()).toBeNull();
+  });
+
+  it("moves focus to Open on Alt+Enter, where Enter activates it", async () => {
+    const user = userEvent.setup();
+    const ed = renderBubble();
+    placeCaret(ed, posInText(ed, "the plan"));
+    await user.keyboard("{Alt>}{Enter}{/Alt}");
+    const open = screen.getByRole("button", { name: "Open" });
+    expect(document.activeElement).toBe(open);
+    expect(open.getAttribute("aria-keyshortcuts")).toBe("Alt+Enter");
+    await user.keyboard("{Enter}");
+    expect(openFile).toHaveBeenCalledWith("notes/plan.md");
+  });
+
+  it("returns focus to the editor on Escape and stays open", async () => {
+    const user = userEvent.setup();
+    const ed = renderBubble();
+    placeCaret(ed, posInText(ed, "ES-1"));
+    await user.keyboard("{Alt>}{Enter}{/Alt}");
+    expect(document.activeElement).toBe(screen.getByRole("link", { name: "Open" }));
+    await user.keyboard("{Escape}");
+    expect(document.activeElement).toBe(ed.view.dom);
+    expect(bubble()).not.toBeNull();
+  });
+
+  it("hides when focus leaves both the editor and the popup", async () => {
+    const user = userEvent.setup();
+    const ed = renderBubble();
+    const elsewhere = document.createElement("button");
+    containerElement?.after(elsewhere);
+    placeCaret(ed, posInText(ed, "ES-1"));
+    await user.keyboard("{Alt>}{Enter}{/Alt}");
+    expect(bubble()).not.toBeNull();
+    act(() => {
+      elsewhere.focus();
+    });
+    expect(bubble()).toBeNull();
+    elsewhere.remove();
   });
 
   it("keeps the editor focused when the popup is pressed", () => {

@@ -3,8 +3,9 @@
 In edit mode a plain click on a link places the caret instead of following it.
 The popup under the caret is the visible way to open the link: a web link opens
 in a new page while the app stays on its session, and a workspace-relative link
-opens in the FileViewer. Seeded via the filesystem PUT endpoint (no agent run);
-the linked site is a routed stub, so the test never reaches the network.
+opens in the FileViewer. Alt+Enter moves focus to the popup's Open action.
+Seeded via the filesystem PUT endpoint (no agent run); the linked site is a
+routed stub, so the test never reaches the network.
 """
 
 from __future__ import annotations
@@ -107,11 +108,11 @@ def test_editor_link_popup_opens_web_link_in_new_page(
     expect(editor).to_be_visible()
 
 
-def test_editor_link_popup_opens_relative_link_in_file_viewer(
+def test_editor_link_popup_opens_relative_link_from_keyboard(
     page: Page,
     seeded_link_popup_session: tuple[str, str],
 ) -> None:
-    """Open on a workspace-relative link shows that file in the FileViewer."""
+    """Alt+Enter, then Enter, on a workspace-relative link shows that file."""
     base_url, session_id = seeded_link_popup_session
     page.goto(f"{base_url}/c/{session_id}?file={_MARKDOWN_FILE_PATH}")
 
@@ -122,7 +123,10 @@ def test_editor_link_popup_opens_relative_link_in_file_viewer(
     editor.get_by_role("link", name="the plan").click()
     popup = page.locator("[data-link-bubble]")
     expect(popup).to_contain_text(_LINKED_FILE_PATH)
-    popup.get_by_role("button", name="Open").click()
+    page.keyboard.press("Alt+Enter")
+    open_button = popup.get_by_role("button", name="Open")
+    expect(open_button).to_be_focused()
+    page.keyboard.press("Enter")
 
     expect(page).to_have_url(re.compile(rf"file={re.escape(_LINKED_FILE_PATH)}"))
     expect(file_viewer.get_by_text("Steps for the rollout.")).to_be_visible(timeout=10_000)
