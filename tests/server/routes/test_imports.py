@@ -1265,15 +1265,20 @@ async def test_import_session_archives_when_requested(
     assert conversation.archived is True
 
 
-@pytest.mark.parametrize("leading", [False, True], ids=["after-a-turn", "leading"])
+@pytest.mark.parametrize(
+    "before",
+    [["turn"], [], ["turn", "compaction"]],
+    ids=["after-a-turn", "leading", "adjacent-compactions"],
+)
 async def test_import_anchors_compactions_to_the_item_before_them(
     client: httpx.AsyncClient,
     db_uri: str,
-    leading: bool,
+    before: list[str],
 ) -> None:
     """An imported compaction's cursor names a stored item, so history loads from it.
 
-    A compaction imported first names itself, since nothing is stored before it.
+    A compaction imported first names itself, since nothing is stored before it, and
+    one right after another compaction names that compaction.
     """
     from omnigent.runtime.workflow import _load_initial_history
 
@@ -1286,31 +1291,34 @@ async def test_import_anchors_compactions_to_the_item_before_them(
             data["agent"] = "claude-native-ui"
         return {"type": "message", "response_id": "claude:turn", "data": data}
 
+    def compaction(summary: str) -> dict[str, object]:
+        return {
+            "type": "compaction",
+            "response_id": "claude:compaction",
+            "data": {
+                "summary": summary,
+                "last_item_id": "import:compaction",
+                "token_count": 0,
+                "compacted_messages": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": summary}],
+                    }
+                ],
+            },
+        }
+
+    prefix = {
+        "turn": [message("user", "before compaction"), message("assistant", "answer")],
+        "compaction": [compaction("earlier summary")],
+    }
     payload = {
         "source": "claude",
-        "external_session_id": f"claude-compacted-{int(leading)}",
+        "external_session_id": f"claude-compacted-{'-'.join(before)}",
         "items": [
-            *(
-                []
-                if leading
-                else [message("user", "before compaction"), message("assistant", "answer")]
-            ),
-            {
-                "type": "compaction",
-                "response_id": "claude:compaction",
-                "data": {
-                    "summary": "summary of the first turn",
-                    "last_item_id": "import:compaction",
-                    "token_count": 0,
-                    "compacted_messages": [
-                        {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "summary"}],
-                        }
-                    ],
-                },
-            },
+            *(item for kind in before for item in prefix[kind]),
+            compaction("summary of the first turn"),
             message("user", "after compaction"),
             message("assistant", "answer after compaction"),
         ],
@@ -1322,11 +1330,11 @@ async def test_import_anchors_compactions_to_the_item_before_them(
     store = SqlAlchemyConversationStore(db_uri)
     session_id = created.json()["session_id"]
     stored = store.list_items(session_id, limit=10, order="asc").data
-    compaction_index = 0 if leading else 2
-    compaction = stored[compaction_index]
-    assert compaction.type == "compaction"
-    expected_boundary = compaction if leading else stored[compaction_index - 1]
-    assert compaction.data.last_item_id == expected_boundary.id
+    compactions = [index for index, item in enumerate(stored) if item.type == "compaction"]
+    assert len(compactions) == before.count("compaction") + 1
+    for index in compactions:
+        boundary = stored[index - 1] if index else stored[index]
+        assert stored[index].data.last_item_id == boundary.id
     loaded = _load_initial_history(store, session_id)
     assert loaded.last_compaction_created_at is not None
     assert [item.id for item in loaded.items[-2:]] == [item.id for item in stored[-2:]]

@@ -350,17 +350,16 @@ def _recent_local_sessions_with_recency(
             )
         candidates = []
         for path in rollouts:
-            meta = _codex_rollout_meta(path)
             # Only rollouts the loader can resolve by filename; Codex names every one.
             ids = _codex_rollout_ids(path)
             if ids is None:
                 continue
-            session_id = ids[0]
+            meta = _codex_rollout_meta(path)
             # Skip non-interactive runs (exec / mcp / sub-agent / internal)
             # that Codex itself hides.
             if not _codex_source_is_interactive(meta.get("source") if meta else None):
                 continue
-            candidates.append((path, session_id))
+            candidates.append((path, ids[0]))
         return _recent_unique_sessions_with_recency(candidates, limit=limit)
 
     raise ValueError(f"Unsupported import source: {source}")
