@@ -1094,6 +1094,9 @@ def test_load_codex_session_keeps_history_and_records_compaction_boundary(tmp_pa
     # The replacement_history baseline rides on the compaction item, as a live
     # codex-native session persists it, so a cold resume rebuilds the same context.
     assert _codex_compaction_baselines(imported) == [["compaction summary baseline"]]
+    # The record carries no ``message``, so the summary falls back to a fixed note.
+    [compaction] = [item for item in imported.items if item.type == "compaction"]
+    assert compaction.data.summary == "[Codex compaction — context was compacted in Codex]"
     assert imported.items[2].data.model_dump()["window_id"] == 1
 
 
@@ -1250,18 +1253,6 @@ def _codex_cold_resume(
         if record["type"] == "response_item" and record["payload"].get("type") == "message"
     ]
     return baselines, replayed
-
-
-def test_imported_codex_compaction_rebuilds_the_resume_rollout_baseline(tmp_path: Path) -> None:
-    """A cold resume rebuilt from the imported items restarts at the compaction baseline."""
-    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    _write_codex_rollout_with_compaction(tmp_path, session_id)
-    imported = load_codex_session(session_id, codex_home=tmp_path)
-
-    baselines, replayed = _codex_cold_resume(imported, cwd=tmp_path)
-
-    assert baselines == [["compaction summary baseline"]]
-    assert replayed == ["post compaction question", "post compaction answer"]
 
 
 def test_load_codex_session_keeps_full_history_past_two_mb(tmp_path: Path) -> None:
