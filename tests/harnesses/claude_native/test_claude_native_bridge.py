@@ -4048,6 +4048,11 @@ def test_write_tmux_target_persists_socket_and_target(tmp_path: Path) -> None:
     assert before <= payload["updated_at"] <= after
 
 
+# Each send-keys first leaves copy mode in the same tmux call; without it,
+# a pane the reader scrolled back hands the keys to tmux instead of Claude.
+_LEAVE_COPY_MODE = ["copy-mode", "-q", "-t", "claude:0.0", ";"]
+
+
 @pytest.mark.parametrize(
     "content,expected_payload",
     [
@@ -4144,6 +4149,7 @@ def test_inject_user_message_pastes_content_then_submits(
         f"got {len(captured)}."
     )
     clear_home, clear_kill, load, paste, submit = captured
+    assert clear_home[3:8] == _LEAVE_COPY_MODE
     assert clear_home[-4:] == ["-l", "-t", "claude:0.0", "\x1b[97;5u"]
     assert clear_kill[-4:] == ["-l", "-t", "claude:0.0", "\x1b[107;5u"]
     # The buffer file carried the normalized content + trailing CR. A
@@ -4176,6 +4182,7 @@ def test_inject_user_message_pastes_content_then_submits(
         "tmux",
         "-S",
         "/tmp/example/tmux.sock",
+        *_LEAVE_COPY_MODE,
         "send-keys",
         "-t",
         "claude:0.0",
@@ -5113,6 +5120,7 @@ def test_inject_interrupt_sends_escape_keystroke(
         "tmux",
         "-S",
         "/tmp/example/tmux.sock",
+        *_LEAVE_COPY_MODE,
         "send-keys",
         "-t",
         "claude:0.0",
@@ -5359,6 +5367,7 @@ def test_inject_slash_command_clears_draft_pastes_literal_then_enter(
         "tmux",
         "-S",
         "/tmp/example/tmux.sock",
+        *_LEAVE_COPY_MODE,
         "send-keys",
         "-t",
         "claude:0.0",
@@ -5368,6 +5377,7 @@ def test_inject_slash_command_clears_draft_pastes_literal_then_enter(
         "tmux",
         "-S",
         "/tmp/example/tmux.sock",
+        *_LEAVE_COPY_MODE,
         "send-keys",
         "-l",
         "-t",
@@ -5378,6 +5388,7 @@ def test_inject_slash_command_clears_draft_pastes_literal_then_enter(
         "tmux",
         "-S",
         "/tmp/example/tmux.sock",
+        *_LEAVE_COPY_MODE,
         "send-keys",
         "-t",
         "claude:0.0",
