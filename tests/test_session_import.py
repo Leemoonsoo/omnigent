@@ -1586,50 +1586,59 @@ def test_load_codex_session_imports_metadata_only_fork_from_its_base(tmp_path: P
     assert imported.title == "parent question 1"
 
 
+@pytest.mark.parametrize(
+    ("cut_inside_root", "inherited"),
+    [
+        (
+            False,
+            [
+                "root question 1",
+                "root answer 1",
+                "root question 2",
+                "root answer 2",
+                "middle question",
+                "middle answer",
+            ],
+        ),
+        (True, ["root question 1", "root answer 1"]),
+    ],
+    ids=["whole-lineage", "cutoff-inside-the-base-inherited-range"],
+)
 def test_load_codex_session_follows_fork_lineage_through_intermediate_forks(
-    tmp_path: Path,
+    tmp_path: Path, cut_inside_root: bool, inherited: list[str]
 ) -> None:
-    """A fork of a fork inherits the whole lineage, each cut at its history_base ordinal."""
+    """A fork of a fork inherits the lineage, each rollout cut at its history_base ordinal.
+
+    A leaf cutoff inside the middle fork's inherited range also bounds the root.
+    """
     root_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     middle_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
     leaf_id = "01a11f4f-af66-74e3-92a6-6e9c14bf68a2"
     sessions = tmp_path / "sessions" / "2026" / "10" / "02"
-
-    def fork_meta(base_id: str, end: int) -> dict[str, object]:
-        return {
-            "history_base": {"thread_id": base_id, "end_ordinal_exclusive": end},
-        }
-
     root_end = _write_codex_turns(
         sessions / f"rollout-2026-10-02T10-00-00-{root_id}.jsonl",
         root_id,
-        [("root question", "root answer")],
+        [("root question 1", "root answer 1"), ("root question 2", "root answer 2")],
     )
     middle_end = _write_codex_turns(
         sessions / f"rollout-2026-10-02T10-30-00-{middle_id}.jsonl",
         middle_id,
         [("middle question", "middle answer")],
         start_ordinal=root_end,
-        **fork_meta(root_id, root_end),
+        history_base={"thread_id": root_id, "end_ordinal_exclusive": root_end},
     )
+    leaf_cutoff = _codex_turn_end(0, 1) if cut_inside_root else middle_end
     _write_codex_turns(
         sessions / f"rollout-2026-10-02T11-00-00-{leaf_id}.jsonl",
         leaf_id,
         [("leaf question", "leaf answer")],
-        start_ordinal=middle_end,
-        **fork_meta(middle_id, middle_end),
+        start_ordinal=leaf_cutoff,
+        history_base={"thread_id": middle_id, "end_ordinal_exclusive": leaf_cutoff},
     )
 
     imported = load_codex_session(leaf_id, codex_home=tmp_path)
 
-    assert _codex_item_texts(imported) == [
-        "root question",
-        "root answer",
-        "middle question",
-        "middle answer",
-        "leaf question",
-        "leaf answer",
-    ]
+    assert _codex_item_texts(imported) == [*inherited, "leaf question", "leaf answer"]
 
 
 def _codex_turn_end(start_ordinal: int, turns: int) -> int:
@@ -1752,45 +1761,6 @@ def test_load_codex_session_reads_fork_base_by_rollout_id_after_base_revert(
         "parent answer after revert",
         "late child question",
         "late child answer",
-    ]
-
-
-def test_load_codex_session_caps_nested_fork_cutoffs_at_the_outer_cutoff(
-    tmp_path: Path,
-) -> None:
-    """A cutoff inside a base's own inherited range also bounds that base's ancestors."""
-    root_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    middle_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
-    leaf_id = "01a11f4f-af66-74e3-92a6-6e9c14bf68a2"
-    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
-    root_end = _write_codex_turns(
-        sessions / f"rollout-2026-10-02T10-00-00-{root_id}.jsonl",
-        root_id,
-        [("root question 1", "root answer 1"), ("root question 2", "root answer 2")],
-    )
-    _write_codex_turns(
-        sessions / f"rollout-2026-10-02T10-30-00-{middle_id}.jsonl",
-        middle_id,
-        [("middle question", "middle answer")],
-        start_ordinal=root_end,
-        history_base={"thread_id": root_id, "end_ordinal_exclusive": root_end},
-    )
-    leaf_cutoff = _codex_turn_end(0, 1)
-    _write_codex_turns(
-        sessions / f"rollout-2026-10-02T11-00-00-{leaf_id}.jsonl",
-        leaf_id,
-        [("leaf question", "leaf answer")],
-        start_ordinal=leaf_cutoff,
-        history_base={"thread_id": middle_id, "end_ordinal_exclusive": leaf_cutoff},
-    )
-
-    imported = load_codex_session(leaf_id, codex_home=tmp_path)
-
-    assert _codex_item_texts(imported) == [
-        "root question 1",
-        "root answer 1",
-        "leaf question",
-        "leaf answer",
     ]
 
 
