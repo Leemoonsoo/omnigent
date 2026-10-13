@@ -961,6 +961,43 @@ describe("Composer typed /goal", () => {
     expect(onSendSlashCommand).not.toHaveBeenCalled();
   });
 
+  it("runs the built-in when a skill named help is selected", () => {
+    const onSendSlashCommand = vi.fn();
+    setComposerState({
+      conversationId: "conv_plain",
+      skills: [{ name: "help", description: "Custom help skill" }],
+    });
+    render(<Composer {...composerProps({ onSendSlashCommand })} />);
+
+    fireEvent.change(textarea(), { target: { value: "/hel" } });
+    expect(screen.getByTestId("slash-menu-item-help")).toHaveTextContent(
+      BUILTIN_SLASH_COMMANDS["/help"],
+    );
+    expect(screen.queryByText("Custom help skill")).toBeNull();
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+
+    expect(textarea()).toHaveValue("");
+    expect(document.body).toHaveTextContent(`/help — ${BUILTIN_SLASH_COMMANDS["/help"]}`);
+    expect(onSendSlashCommand).not.toHaveBeenCalled();
+  });
+
+  it.each(["/Goal Fix CI", "/goal"])(
+    "sends %j with an attachment as typed, as for every command",
+    (text) => {
+      const { onSend } = renderGoalSession("codex-native");
+      fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+        target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+      });
+
+      fireEvent.change(textarea(), { target: { value: text } });
+      fireEvent.keyDown(textarea(), { key: "Enter" });
+
+      expect(onSend.mock.calls[0]?.[0]).toBe(text);
+      expect(onSend.mock.calls[0]?.[1]).toHaveLength(1);
+      expect(screen.queryByTestId("goal-objective")).toBeNull();
+    },
+  );
+
   it("still offers a skill named goal mid-sentence", () => {
     setComposerState({ skills: [{ name: "goal", description: "Track a goal" }] });
     const { onSend, onSendSlashCommand } = renderGoalSession("polly-codex");
