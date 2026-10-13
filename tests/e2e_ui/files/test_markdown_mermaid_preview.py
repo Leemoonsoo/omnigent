@@ -10,13 +10,17 @@ Seeded via the filesystem PUT endpoint (no agent run).
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
 from tests.e2e_ui.conftest import open_previewable_files_in_preview
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _MARKDOWN_FILE_PATH = "mermaid_preview.md"
 
@@ -39,12 +43,9 @@ def seeded_mermaid_markdown_session(
     seeded_session: tuple[str, str],
 ) -> Iterator[tuple[str, str]]:
     base_url, session_id = seeded_session
-    file_url = (
-        f"{base_url}/v1/sessions/{session_id}"
-        f"/resources/environments/default/filesystem/{_MARKDOWN_FILE_PATH}"
-    )
     resp = httpx.put(
-        file_url,
+        f"{base_url}/v1/sessions/{session_id}"
+        f"/resources/environments/default/filesystem/{_MARKDOWN_FILE_PATH}",
         json={"content": _MARKDOWN_CONTENT, "encoding": "utf-8"},
         timeout=10.0,
     )
@@ -52,8 +53,7 @@ def seeded_mermaid_markdown_session(
     try:
         yield (base_url, session_id)
     finally:
-        # Deleting the session keeps its workspace files, so remove the seed here.
-        httpx.delete(file_url, timeout=10.0)
+        shutil.rmtree(_REPO_ROOT / session_id, ignore_errors=True)
 
 
 def test_mermaid_fence_renders_as_preview_diagram(
