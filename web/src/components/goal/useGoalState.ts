@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getGoal, type Goal } from "@/lib/goalApi";
 
 interface UseGoalStateResult {
@@ -18,32 +18,40 @@ interface UseGoalStateResult {
  *   goal: a typed ``/goal`` sets it when its turn starts, and the harness can
  *   complete or limit it during a turn. The turn-start read can finish before
  *   the harness stores a typed goal, so the goal may only appear at turn end.
- * @returns The goal snapshot and a setter for dialog-driven updates.
+ * @returns The goal snapshot and a setter for dialog-driven updates. A read
+ *   still in flight when the setter runs is discarded.
  */
 export function useGoalState(
   conversationId: string | null,
   enabled: boolean,
   turnActive = false,
 ): UseGoalStateResult {
-  const [goal, setGoal] = useState<Goal | null>(null);
+  const [goal, setGoalSnapshot] = useState<Goal | null>(null);
+  const dialogUpdates = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     if (!enabled || !conversationId) {
-      setGoal(null);
+      setGoalSnapshot(null);
       return;
     }
+    const updatesAtStart = dialogUpdates.current;
+    const apply = (next: Goal | null) => {
+      if (!cancelled && dialogUpdates.current === updatesAtStart) setGoalSnapshot(next);
+    };
     void getGoal(conversationId)
-      .then((response) => {
-        if (!cancelled) setGoal(response.goal);
-      })
-      .catch(() => {
-        if (!cancelled) setGoal(null);
-      });
+      .then((response) => apply(response.goal))
+      .catch(() => apply(null));
     return () => {
       cancelled = true;
     };
   }, [conversationId, enabled, turnActive]);
+
+  // Stable identity: the dialog lists it as a dependency of its own read.
+  const setGoal = useCallback((next: Goal | null) => {
+    dialogUpdates.current += 1;
+    setGoalSnapshot(next);
+  }, []);
 
   return { goal, setGoal };
 }

@@ -1,6 +1,6 @@
 import type * as GoalApiModule from "@/lib/goalApi";
 
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getGoal, type Goal } from "@/lib/goalApi";
 import { useGoalState } from "./useGoalState";
@@ -37,16 +37,50 @@ describe("useGoalState", () => {
   });
 
   it("clears state when disabled and fails closed on errors", async () => {
-    mockGetGoal.mockRejectedValueOnce(new Error("offline"));
+    mockGetGoal.mockResolvedValueOnce({ goal: GOAL }).mockRejectedValueOnce(new Error("offline"));
 
-    const { result, rerender } = renderHook(({ enabled }) => useGoalState("conv", enabled), {
-      initialProps: { enabled: true },
-    });
-    result.current.setGoal(GOAL);
+    const { result, rerender } = renderHook(
+      ({ enabled, turnActive }) => useGoalState("conv", enabled, turnActive),
+      { initialProps: { enabled: true, turnActive: false } },
+    );
+    await waitFor(() => expect(result.current.goal).toEqual(GOAL));
+    rerender({ enabled: true, turnActive: true });
     await waitFor(() => expect(result.current.goal).toBeNull());
 
-    rerender({ enabled: false });
+    rerender({ enabled: false, turnActive: true });
     expect(result.current.goal).toBeNull();
+  });
+
+  it("does not let an older turn-edge read overwrite a newer dialog update", async () => {
+    let resolveStaleRead: (response: { goal: Goal | null }) => void = () => {};
+    mockGetGoal.mockResolvedValueOnce({ goal: null }).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStaleRead = resolve;
+      }),
+    );
+    const { result, rerender } = renderHook(
+      ({ turnActive }) => useGoalState("conv", true, turnActive),
+      { initialProps: { turnActive: false } },
+    );
+    await waitFor(() => expect(mockGetGoal).toHaveBeenCalledTimes(1));
+    rerender({ turnActive: true });
+    await waitFor(() => expect(mockGetGoal).toHaveBeenCalledTimes(2));
+
+    const saved = { ...GOAL, objective: "Saved in the dialog" };
+    act(() => result.current.setGoal(saved));
+    await act(async () => resolveStaleRead({ goal: GOAL }));
+
+    expect(result.current.goal).toEqual(saved);
+  });
+
+  it("keeps setGoal stable across renders", () => {
+    const { result, rerender } = renderHook(
+      ({ turnActive }) => useGoalState("conv", false, turnActive),
+      { initialProps: { turnActive: false } },
+    );
+    const first = result.current.setGoal;
+    rerender({ turnActive: true });
+    expect(result.current.setGoal).toBe(first);
   });
 
   // A typed /goal sets the goal on the runner, outside this hook's writes, and

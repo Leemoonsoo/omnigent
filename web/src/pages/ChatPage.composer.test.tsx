@@ -938,12 +938,12 @@ describe("Composer typed /goal", () => {
     },
   );
 
-  it("lists a skill named goal as the built-in it runs as", async () => {
-    setComposerState({ skills: [{ name: "goal", description: "Track a goal" }] });
+  it.each(["goal", "Goal"])("lists a skill named %s as the built-in it runs as", async (name) => {
+    setComposerState({ skills: [{ name, description: "Track a goal" }] });
     const { onSend, onSendSlashCommand } = renderGoalSession("polly-codex");
 
     fireEvent.change(textarea(), { target: { value: "/go" } });
-    expect(screen.getAllByTestId("slash-menu-item-goal")).toHaveLength(1);
+    expect(screen.getAllByTestId(/^slash-menu-item-goal$/i)).toHaveLength(1);
     expect(screen.getByTestId("slash-menu-item-goal")).toHaveTextContent(
       BUILTIN_SLASH_COMMANDS["/goal"],
     );
@@ -998,17 +998,17 @@ describe("Composer typed /goal", () => {
     },
   );
 
-  it("still offers a skill named goal mid-sentence", () => {
-    setComposerState({ skills: [{ name: "goal", description: "Track a goal" }] });
+  it.each(["goal", "Goal"])("still offers a skill named %s mid-sentence", (name) => {
+    setComposerState({ skills: [{ name, description: "Track a goal" }] });
     const { onSend, onSendSlashCommand } = renderGoalSession("polly-codex");
 
     fireEvent.change(textarea(), { target: { value: "please /go" } });
     expect(screen.getByText("Skills")).toBeVisible();
     expect(screen.queryByText("Commands")).toBeNull();
-    expect(screen.getByTestId("slash-menu-item-goal")).toHaveTextContent("Track a goal");
+    expect(screen.getByTestId(`slash-menu-item-${name}`)).toHaveTextContent("Track a goal");
     fireEvent.keyDown(textarea(), { key: "Tab" });
 
-    expect(textarea()).toHaveValue("please /goal ");
+    expect(textarea()).toHaveValue(`please /${name} `);
     expect(onSend).not.toHaveBeenCalled();
     expect(onSendSlashCommand).not.toHaveBeenCalled();
   });

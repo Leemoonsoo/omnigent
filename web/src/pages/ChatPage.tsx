@@ -2656,9 +2656,9 @@ function ComposerImpl(
   const showGoal = showGoalControl || showClaudeGoalControl || showPollyCodexGoalControl;
   const goalDisabled = !composerSessionId || (!showGoalControl && isReadOnly);
   const showGoalCommand = showGoal && !goalDisabled;
-  // Submit runs an enabled built-in over a skill with the same name, so a
-  // leading command lists that name only as the built-in. Mid-sentence
-  // suggestions still offer the skill.
+  // Submit runs an enabled built-in over a skill with the same name in any
+  // case, so a leading command lists that name only as the built-in.
+  // Mid-sentence suggestions still offer the skill.
   const builtinCommandNames = useMemo(
     () =>
       new Set(
@@ -2688,7 +2688,10 @@ function ComposerImpl(
     ],
   );
   const commandSkills = useMemo(
-    () => skills.filter((skill) => !builtinCommandNames.has(`${skillPrefix}${skill.name}`)),
+    () =>
+      skills.filter(
+        (skill) => !builtinCommandNames.has(`${skillPrefix}${skill.name}`.toLowerCase()),
+      ),
     [skills, builtinCommandNames, skillPrefix],
   );
   const slashCommands = useMemo(
