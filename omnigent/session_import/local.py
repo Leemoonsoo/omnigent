@@ -47,8 +47,8 @@ _MAX_RESPONSE_ID_LENGTH = 64
 _OPENCODE_COMMAND_TIMEOUT_SECONDS = 120
 
 # Claude transcript byte size past which an import keeps only the last compaction
-# summary onward; Codex imports never trim (each ``compacted`` record becomes a
-# compaction item). See docs/session-compaction.md.
+# summary onward; Codex does not use this byte-size trim (each ``compacted`` record
+# becomes a compaction item). See docs/session-compaction.md.
 _IMPORT_COMPACT_TRIM_BYTES = 2 * 1024 * 1024
 
 

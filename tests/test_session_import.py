@@ -1685,10 +1685,15 @@ def test_load_codex_session_keeps_history_from_before_a_revert(
 def test_load_codex_session_reads_fork_base_by_rollout_id_after_base_revert(
     tmp_path: Path,
 ) -> None:
-    """A fork inherits the base rollout it names, not the base thread's later revert rollout."""
+    """A fork inherits the base rollout it names, whichever rollout the base thread is on now.
+
+    A fork made before the parent reverted reads the original rollout; one made after
+    reads the revert rollout, which inherits the original prefix in turn.
+    """
     parent_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     revert_rollout_id = "01a11f4f-af66-74e3-92a6-6e9c14bf68a2"
     child_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
+    late_child_id = "01a3c5e7-1b2d-7f40-8a6c-9e0b2d4f6a81"
     sessions = tmp_path / "sessions" / "2026" / "10" / "02"
     parent_end = _write_codex_turns(
         sessions / f"rollout-2026-10-02T10-00-00-{parent_id}.jsonl",
@@ -1707,12 +1712,19 @@ def test_load_codex_session_reads_fork_base_by_rollout_id_after_base_revert(
     parent_current = (
         sessions / f"rollout-2026-10-02T11-00-00-{parent_id}_{revert_rollout_id}.jsonl"
     )
-    _write_codex_turns(
+    revert_end = _write_codex_turns(
         parent_current,
         parent_id,
         [("parent question after revert", "parent answer after revert")],
         start_ordinal=revert_point,
         history_base={"thread_id": parent_id, "end_ordinal_exclusive": revert_point},
+    )
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T11-30-00-{late_child_id}.jsonl",
+        late_child_id,
+        [("late child question", "late child answer")],
+        start_ordinal=revert_end,
+        history_base={"thread_id": revert_rollout_id, "end_ordinal_exclusive": revert_end},
     )
     _write_codex_threads_db(
         tmp_path,
@@ -1731,6 +1743,15 @@ def test_load_codex_session_reads_fork_base_by_rollout_id_after_base_revert(
         "parent answer 2",
         "child question",
         "child answer",
+    ]
+    late = load_codex_session(late_child_id, codex_home=tmp_path)
+    assert _codex_item_texts(late) == [
+        "parent question 1",
+        "parent answer 1",
+        "parent question after revert",
+        "parent answer after revert",
+        "late child question",
+        "late child answer",
     ]
 
 
