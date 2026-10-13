@@ -912,12 +912,15 @@ describe("Composer typed /goal", () => {
   );
 
   it.each<[GoalSession, string, string]>([
+    ["codex-native", "/goal Fix CI", "/goal Fix CI"],
     ["codex-native", "/Goal Fix CI", "/goal Fix CI"],
     ["codex-native", "/goal\nFix CI", "/goal Fix CI"],
     ["codex-native", "/goal   Fix\nCI  ", "/goal Fix\nCI"],
+    ["polly-claude", "/goal Fix CI", "/goal Fix CI"],
     ["polly-claude", "/Goal Fix CI", "/goal Fix CI"],
+    ["polly-codex", "/goal Fix CI", "/goal Fix CI"],
     ["polly-codex", "/goal\nFix CI", "/goal Fix CI"],
-  ])("on %s, sends %j as the canonical %j the harness parses", (session, text, sent) => {
+  ])("on %s, sends %j as the plaintext %j the harness parses", (session, text, sent) => {
     const { onSend, onSendSlashCommand } = renderGoalSession(session);
 
     fireEvent.change(textarea(), { target: { value: text } });
@@ -925,21 +928,8 @@ describe("Composer typed /goal", () => {
 
     expect(onSend.mock.calls[0]?.[0]).toBe(sent);
     expect(onSendSlashCommand).not.toHaveBeenCalled();
+    expect(screen.queryByTestId(dialogFieldFor(session))).toBeNull();
   });
-
-  it.each<GoalSession>(["codex-native", "polly-claude", "polly-codex"])(
-    "sends /goal with an objective as plaintext, not a skill (%s)",
-    (session) => {
-      const { onSend, onSendSlashCommand } = renderGoalSession(session);
-
-      fireEvent.change(textarea(), { target: { value: "/goal Fix CI" } });
-      fireEvent.keyDown(textarea(), { key: "Enter" });
-
-      expect(onSend.mock.calls[0]?.[0]).toBe("/goal Fix CI");
-      expect(onSendSlashCommand).not.toHaveBeenCalled();
-      expect(screen.queryByTestId(dialogFieldFor(session))).toBeNull();
-    },
-  );
 
   it.each(["goal", "Goal"])("lists a skill named %s as the built-in it runs as", async (name) => {
     setComposerState({ skills: [{ name, description: "Track a goal" }] });

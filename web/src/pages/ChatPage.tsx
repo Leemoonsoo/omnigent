@@ -3345,8 +3345,7 @@ function ComposerImpl(
       // /btw is a built-in for menu/autocomplete purposes only — it is NOT
       // executed locally. It must reach the vendor TUI as plaintext so Claude
       // Code opens its side chat and the forwarder relays the answer to the
-      // web overlay; fall through to the plaintext send path below. /goal is
-      // handled above or, as a skill, below.
+      // web overlay; fall through to the plaintext send path below.
       if (
         cmd !== "/btw" &&
         cmd !== "/side" &&
