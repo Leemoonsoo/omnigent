@@ -5,8 +5,6 @@ Fork and revert lineage is covered by the loader tests in tests/test_session_imp
 
 from __future__ import annotations
 
-import signal
-import subprocess
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -21,7 +19,7 @@ from tests._helpers.codex_rollout import (
     codex_message,
     write_codex_thread_store,
 )
-from tests.e2e.test_host_e2e import _spawn_host_daemon, _wait_for_host_online
+from tests._helpers.host import isolated_host
 
 pytestmark = pytest.mark.timeout(300)
 
@@ -93,30 +91,14 @@ class _ImportHost:
 
 @pytest.fixture(scope="module")
 def import_host(
-    live_server: str,
-    http_client: httpx.Client,
-    mock_llm_server_url: str,
-    tmp_path_factory: pytest.TempPathFactory,
+    live_server: str, http_client: httpx.Client, tmp_path_factory: pytest.TempPathFactory
 ) -> Iterator[_ImportHost]:
     """A real host daemon whose ``HOME`` holds the seeded Codex threads."""
-    home = tmp_path_factory.mktemp("codex-history-host")
-    seeded = _seed_codex_home(home)
-    with pytest.MonkeyPatch.context() as patch:
-        for name in _HOST_ENV_STRIP:
-            patch.delenv(name, raising=False)
-        daemon = _spawn_host_daemon(
-            tmp_path=home, live_server=live_server, mock_llm_server_url=mock_llm_server_url
-        )
-    try:
-        _wait_for_host_online(http_client, daemon.host_id)
-        yield _ImportHost(daemon.host_id, seeded)
-    finally:
-        daemon.proc.send_signal(signal.SIGTERM)
-        try:
-            daemon.proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.proc.kill()
-            daemon.proc.wait(timeout=5)
+    root = tmp_path_factory.mktemp("codex-history-host")
+    seeded = _seed_codex_home(root / "home")
+    with isolated_host(root, live_server, env=dict.fromkeys(_HOST_ENV_STRIP)) as host:
+        host.wait_online(http_client)
+        yield _ImportHost(host.host_id, seeded)
 
 
 def _import(http_client: httpx.Client, host: _ImportHost, thread_id: str) -> str:

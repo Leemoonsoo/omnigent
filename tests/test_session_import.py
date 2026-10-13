@@ -1291,11 +1291,18 @@ def test_load_codex_session_keeps_full_history_past_two_mb(tmp_path: Path) -> No
     assert _codex_compaction_baselines(imported) == [["compaction summary baseline"]]
 
 
-@pytest.mark.parametrize(("cap", "trimmed"), [(5, False), (4, True)], ids=["at-cap", "over-cap"])
+@pytest.mark.parametrize(
+    ("cap", "trimmed"),
+    [(5, False), (4, True), (2, True)],
+    ids=["at-cap", "over-cap", "suffix-over-cap"],
+)
 def test_load_codex_session_trims_to_the_last_compaction_only_above_the_item_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap: int, trimmed: bool
 ) -> None:
-    """Up to the item cap the whole history imports; past it, the last compaction onward."""
+    """Up to the item cap the whole history imports; past it, the last compaction onward.
+
+    A suffix still over the cap is not cut further, so the API rejects it whole.
+    """
     monkeypatch.setattr(local_import, "MAX_IMPORT_ITEMS", cap)
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     _write_codex_rollout_with_compaction(tmp_path, session_id)

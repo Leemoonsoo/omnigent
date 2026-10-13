@@ -331,19 +331,25 @@ async def _stream_local_sessions_from_host(
 
 
 def _anchor_compactions(items: list[NewConversationItem]) -> list[NewConversationItem]:
-    """Mint item ids and point each compaction's ``last_item_id`` at the item before it.
+    """Point each compaction's ``last_item_id`` at the item stored before it.
 
     Imported compactions predate any stored id, so without this a history loader
-    finds no anchor. A leading compaction covers nothing stored, so it names itself.
+    finds no anchor. Only anchors get a minted ``stable_id``, since the store
+    looks up every stable id before appending. A leading compaction names itself.
     """
-    anchored: list[NewConversationItem] = []
-    for item in items:
-        item_id = item.stable_id or generate_item_id(item.type)
-        update: dict[str, object] = {"stable_id": item_id}
-        if isinstance(item.data, CompactionData):
-            boundary_id = anchored[-1].stable_id if anchored else item_id
-            update["data"] = item.data.model_copy(update={"last_item_id": boundary_id})
-        anchored.append(item.model_copy(update=update))
+    anchored = list(items)
+    for index, item in enumerate(items):
+        if not isinstance(item.data, CompactionData):
+            continue
+        boundary = index - 1 if index else index
+        if anchored[boundary].stable_id is None:
+            anchored[boundary] = anchored[boundary].model_copy(
+                update={"stable_id": generate_item_id(anchored[boundary].type)}
+            )
+        boundary_id = anchored[boundary].stable_id
+        anchored[index] = anchored[index].model_copy(
+            update={"data": item.data.model_copy(update={"last_item_id": boundary_id})}
+        )
     return anchored
 
 
