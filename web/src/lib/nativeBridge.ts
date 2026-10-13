@@ -214,7 +214,13 @@ interface ElectronDesktopApi extends NativeShellApi {
     conversationId: string,
     url: string,
     bounds?: unknown,
-    opts?: { force?: boolean; agent?: boolean; sourceHostId?: string },
+    opts?: {
+      force?: boolean;
+      agent?: boolean;
+      sourceHostId?: string;
+      rememberedArcaHostId?: string;
+      sourceIsArcaHost?: boolean;
+    },
   ) => Promise<{ ok: boolean; created?: boolean; error?: string }>;
   /**
    * Hide/show the active embedded browser view while a DOM overlay is open.
@@ -270,6 +276,8 @@ export interface DesktopFeatures {
    * window's server is Databricks-managed.
    */
   databricksInternalFeatures?: boolean;
+  /** Shell can restore Arca preview identity after a desktop restart. */
+  arcaPreviewRecovery?: boolean;
 }
 
 /** Status of the local `omni` CLI, from the desktop shell. */
