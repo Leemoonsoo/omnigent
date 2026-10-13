@@ -961,6 +961,21 @@ describe("Composer typed /goal", () => {
     expect(onSendSlashCommand).not.toHaveBeenCalled();
   });
 
+  it("still offers a skill named goal mid-sentence", () => {
+    setComposerState({ skills: [{ name: "goal", description: "Track a goal" }] });
+    const { onSend, onSendSlashCommand } = renderGoalSession("polly-codex");
+
+    fireEvent.change(textarea(), { target: { value: "please /go" } });
+    expect(screen.getByText("Skills")).toBeVisible();
+    expect(screen.queryByText("Commands")).toBeNull();
+    expect(screen.getByTestId("slash-menu-item-goal")).toHaveTextContent("Track a goal");
+    fireEvent.keyDown(textarea(), { key: "Tab" });
+
+    expect(textarea()).toHaveValue("please /goal ");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onSendSlashCommand).not.toHaveBeenCalled();
+  });
+
   it("lets a multi-word skill starting with goal outrank the /goal built-in", () => {
     // Same precedence as every built-in ("/Help Desk summarize" runs the skill),
     // so a "goal fix" skill stays reachable in a Goal-enabled session.
