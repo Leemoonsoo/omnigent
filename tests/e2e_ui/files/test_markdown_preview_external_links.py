@@ -1,13 +1,8 @@
 """E2E: a web link in the Markdown Preview opens in a new tab.
 
-The read-only Preview pane once rendered a URL as a same-window anchor, so a
-click replaced the app with the linked page. In the desktop app with
-Databricks browser sign-in, that navigation left the workspace origin and the
-shell dropped the connection. This pins the browser behaviour unit tests can't:
-the click opens a new page and the app stays on its session.
-
-Seeded via the filesystem PUT endpoint (no agent run). The linked site is a
-routed stub, so the test never reaches the network.
+Clicking an HTTPS link opens a separate page while the app stays on its
+session. Seeded via the filesystem PUT endpoint (no agent run); the linked site
+is a routed stub, so the test never reaches the network.
 """
 
 from __future__ import annotations
