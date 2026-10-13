@@ -2656,48 +2656,10 @@ function ComposerImpl(
   const showGoal = showGoalControl || showClaudeGoalControl || showPollyCodexGoalControl;
   const goalDisabled = !composerSessionId || (!showGoalControl && isReadOnly);
   const showGoalCommand = showGoal && !goalDisabled;
-  // Submit runs an enabled built-in over a skill with the same name in any
-  // case, so a leading command lists that name only as the built-in.
-  // Mid-sentence suggestions still offer the skill.
-  const builtinCommandNames = useMemo(
-    () =>
-      new Set(
-        Object.keys(
-          buildSlashCommandMap(
-            [],
-            showEffort,
-            showModel,
-            showCompact,
-            showBtw,
-            showSide,
-            skillPrefix,
-            supportsModelReset,
-            showGoalCommand,
-          ),
-        ),
-      ),
-    [
-      showEffort,
-      showModel,
-      showCompact,
-      showBtw,
-      showSide,
-      skillPrefix,
-      supportsModelReset,
-      showGoalCommand,
-    ],
-  );
-  const commandSkills = useMemo(
-    () =>
-      skills.filter(
-        (skill) => !builtinCommandNames.has(`${skillPrefix}${skill.name}`.toLowerCase()),
-      ),
-    [skills, builtinCommandNames, skillPrefix],
-  );
-  const slashCommands = useMemo(
+  const builtinCommands = useMemo(
     () =>
       buildSlashCommandMap(
-        commandSkills,
+        [],
         showEffort,
         showModel,
         showCompact,
@@ -2708,7 +2670,6 @@ function ComposerImpl(
         showGoalCommand,
       ),
     [
-      commandSkills,
       showEffort,
       showModel,
       showCompact,
@@ -2718,6 +2679,29 @@ function ComposerImpl(
       supportsModelReset,
       showGoalCommand,
     ],
+  );
+  const builtinCommandNames = useMemo(
+    () => new Set(Object.keys(builtinCommands)),
+    [builtinCommands],
+  );
+  // Submit runs an enabled built-in over a skill with the same name in any
+  // case, so a leading command lists that name only as the built-in.
+  // Mid-sentence suggestions still offer the skill.
+  const commandSkills = useMemo(
+    () =>
+      skills.filter(
+        (skill) => !builtinCommandNames.has(`${skillPrefix}${skill.name}`.toLowerCase()),
+      ),
+    [skills, builtinCommandNames, skillPrefix],
+  );
+  const slashCommands = useMemo(
+    () => ({
+      ...builtinCommands,
+      ...Object.fromEntries(
+        commandSkills.map((skill) => [`${skillPrefix}${skill.name}`, skillMenuDescription(skill)]),
+      ),
+    }),
+    [builtinCommands, commandSkills, skillPrefix],
   );
   const slashCommandNames = useMemo(() => Object.keys(slashCommands), [slashCommands]);
   // Skills always need an optional argument fill-in so the user can

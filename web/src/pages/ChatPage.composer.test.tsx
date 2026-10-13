@@ -911,17 +911,20 @@ describe("Composer typed /goal", () => {
     },
   );
 
-  it.each([
-    ["/Goal Fix CI", "/goal Fix CI"],
-    ["/goal\nFix CI", "/goal Fix CI"],
-    ["/goal   Fix\nCI  ", "/goal Fix\nCI"],
-  ])("sends %j as the canonical %j the harness parses", (text, sent) => {
-    const { onSend } = renderGoalSession("codex-native");
+  it.each<[GoalSession, string, string]>([
+    ["codex-native", "/Goal Fix CI", "/goal Fix CI"],
+    ["codex-native", "/goal\nFix CI", "/goal Fix CI"],
+    ["codex-native", "/goal   Fix\nCI  ", "/goal Fix\nCI"],
+    ["polly-claude", "/Goal Fix CI", "/goal Fix CI"],
+    ["polly-codex", "/goal\nFix CI", "/goal Fix CI"],
+  ])("on %s, sends %j as the canonical %j the harness parses", (session, text, sent) => {
+    const { onSend, onSendSlashCommand } = renderGoalSession(session);
 
     fireEvent.change(textarea(), { target: { value: text } });
     fireEvent.keyDown(textarea(), { key: "Enter" });
 
     expect(onSend.mock.calls[0]?.[0]).toBe(sent);
+    expect(onSendSlashCommand).not.toHaveBeenCalled();
   });
 
   it.each<GoalSession>(["codex-native", "polly-claude", "polly-codex"])(

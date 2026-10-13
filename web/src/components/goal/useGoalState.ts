@@ -9,7 +9,9 @@ interface UseGoalStateResult {
 /**
  * Keep the current goal snapshot for a composer session.
  *
- * The hook intentionally fails closed to ``null`` on read errors: the dialog
+ * The hook intentionally fails closed to ``null`` on read errors, including a
+ * failed turn-edge read: a goal it cannot confirm may have been cleared or
+ * completed. The next successful read restores the marker, and the dialog
  * performs its own read and surfaces the error text when the user opens it.
  *
  * @param conversationId - Session whose goal to read, or ``null``.
