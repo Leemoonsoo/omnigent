@@ -5336,13 +5336,10 @@ def _run_tmux(socket_path: str, *args: str) -> None:
     """
     Invoke ``tmux -S <socket_path> <args...>`` and raise on failure.
 
-    A ``send-keys`` first returns its pane to the live view, in the same
-    tmux invocation. Scrolling the embedded terminal back (mouse wheel,
-    Page Up) leaves the pane in copy mode, where tmux hands injected keys
-    to the copy-mode key table instead of Claude Code: Escape and Enter
-    only drive the scrollback view, and the CSI-u clearing keys fail with
-    ``not in a mode``. ``copy-mode -q`` (tmux 3.1a+) cancels copy mode and
-    any other mode, and is a no-op on a pane already showing its live view.
+    A ``send-keys`` first leaves any pane mode (``copy-mode -q``, tmux
+    3.1a+), so keys reach the application instead of the copy mode a
+    scrolled-back pane is in. Both run in one tmux invocation, so the pane
+    cannot enter a mode between the exit and the send.
 
     :param socket_path: Absolute path to the tmux socket the terminal
         was launched on, e.g. ``"/tmp/.../tmux.sock"``.

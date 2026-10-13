@@ -180,6 +180,8 @@ def test_interrupt_reaches_scrolled_back_pane(pane: _Pane) -> None:
     assert not pane.in_mode(), "The interrupt should return the pane to the live view."
 
 
+# No key is sent on this path, so the key table cannot change the outcome.
+@pytest.mark.parametrize("pane", ["emacs"], indirect=True)
 def test_watchers_leave_scrollback_alone_when_nothing_is_on_screen(pane: _Pane) -> None:
     """Polling helpers that find nothing to act on keep the reader's scrollback position."""
     pane.scroll_back()
