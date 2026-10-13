@@ -455,12 +455,14 @@ describe("CodeViewer markdown preview links", () => {
     // A same-window URL navigates the app off its server; the desktop app's
     // Databricks browser sign-in treats that as a lost session.
     const openFile = renderPreview(
-      "[docs](https://example.com/docs), [mail](mailto:docs@example.com) and [below](#usage)\n\n## Usage",
+      "[docs](https://example.com/docs), [cdn](//cdn.example.com/docs), " +
+        "[mail](mailto:docs@example.com) and [below](#usage)\n\n## Usage",
       "docs/guide.md",
     );
 
     for (const [text, href] of [
       ["docs", "https://example.com/docs"],
+      ["cdn", "//cdn.example.com/docs"],
       ["mail", "mailto:docs@example.com"],
     ]) {
       const link = screen.getByText(text);
