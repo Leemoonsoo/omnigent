@@ -828,12 +828,14 @@ async def test_local_import_stream_reports_failure_reasons(
     """Failed sessions surface a per-session reason, not just a count.
 
     Covers both failure origins: a session the server can't normalize (malformed
-    frame) and one the host couldn't read (reported on the done frame). Each gets
-    a ``failed`` line, the tally counts them, and ``done.failures`` lists reasons.
+    frame, or more items than the import cap) and one the host couldn't read
+    (reported on the done frame). Each gets a ``failed`` line, the tally counts
+    them, and ``done.failures`` lists reasons.
     """
     from omnigent.server.routes import imports as imports_module
 
     _seed_claude_agent(db_uri)
+    monkeypatch.setattr(imports_module, "MAX_IMPORT_ITEMS", 1)
 
     async def _fake_stream(**kwargs: object):
         stats = kwargs.get("stats")
@@ -857,6 +859,19 @@ async def test_local_import_stream_reports_failure_reasons(
             "items": "not-a-list",
             "title": None,
             "source": "claude",
+        }
+        # Over the item cap, as a Codex thread with no compaction to trim to arrives.
+        message = {
+            "type": "message",
+            "response_id": "codex:1",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        }
+        yield {
+            "external_session_id": "too-big-1",
+            "workspace": None,
+            "items": [message, message],
+            "title": "Too big",
+            "source": "codex",
         }
         # A session the host enumerated but couldn't read (no frame, only a
         # reason on the terminal done frame).
@@ -910,12 +925,13 @@ async def test_local_import_stream_reports_failure_reasons(
     # The host-read failure keeps its source-session identity through the wire.
     assert {(f["external_session_id"], f["source"]) for f in failed} == {
         ("bad-1", "claude"),
+        ("too-big-1", "codex"),
         ("unreadable-1", "codex"),
     }
     done = events[-1]
     assert done["event"] == "done"
-    assert (done["imported"], done["failed"]) == (1, 2)
-    assert len(done["failures"]) == 2
+    assert (done["imported"], done["failed"]) == (1, 3)
+    assert len(done["failures"]) == 3
 
 
 async def test_local_import_id_collision_counts_as_already_imported(
