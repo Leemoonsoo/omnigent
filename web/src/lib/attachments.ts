@@ -176,6 +176,8 @@ export function classifyAttachment(
 
   // Match the server even when a browser mislabels a ZIP as text/plain.
   if (filesystemExtensions.has(ext)) return "file";
+  // A default filesystem type the server leaves out is refused, not inlined.
+  if (DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS.has(ext)) return null;
   if (type.startsWith("image/")) return "image";
   if (type === "application/pdf" || ext === ".pdf") return "pdf";
   if (
@@ -186,6 +188,20 @@ export function classifyAttachment(
     return "text";
   }
   return policy?.all_types ? "file" : null;
+}
+
+/** The attachment types *policy* accepts, for rejection messages. */
+function supportedAttachmentTypes(policy?: FilesystemAttachmentsInfo | null): string {
+  const extensions = policy ? [...policy.extensions].sort() : null;
+  const isDefault =
+    extensions === null ||
+    (extensions.length === DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS.size &&
+      extensions.every((ext) => DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS.has(ext)));
+  if (isDefault) {
+    return "images, PDF, text/code, archives, office documents, and databases";
+  }
+  if (extensions.length === 0) return "images, PDF, and text/code files";
+  return `images, PDF, text/code, and ${extensions.join(", ")} files`;
 }
 
 export interface AttachmentValidation {
@@ -212,8 +228,7 @@ export function validateAttachments(
     const category = classifyAttachment(file, policy);
     if (category === null) {
       errors.push(
-        `"${name}" can't be attached: only images, PDF, text/code, archives, ` +
-          `office documents, and databases are supported.`,
+        `"${name}" can't be attached: only ${supportedAttachmentTypes(policy)} are supported.`,
       );
       continue;
     }

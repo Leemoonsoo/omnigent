@@ -756,6 +756,9 @@ _ALL_TYPES = FilesystemAttachmentPolicy(all_types=True)
         # A list replaces the defaults, so a listed text type moves to disk.
         ("big.log", "text/plain", FilesystemAttachmentPolicy(frozenset({".log"})), "filesystem"),
         ("bundle.zip", "application/zip", FilesystemAttachmentPolicy(frozenset()), None),
+        # A default extension the list leaves out is refused, whatever its declared MIME.
+        ("bundle.zip", "text/plain", FilesystemAttachmentPolicy(frozenset()), None),
+        ("bundle.zip", "text/plain", FilesystemAttachmentPolicy(frozenset({".gz"})), None),
     ],
 )
 def test_attachment_delivery(
@@ -1758,6 +1761,7 @@ def _stores_with(
     content_type: str,
     blob: bytes,
     session_id: str | None = None,
+    source_metadata: dict[str, Any] | None = None,
 ) -> tuple[FakeFileStore, FakeArtifactStore]:
     """Build fake stores holding one attachment.
 
@@ -1772,6 +1776,7 @@ def _stores_with(
                 bytes=len(blob),
                 content_type=content_type,
                 session_id=session_id,
+                source_metadata=source_metadata,
             )
         }
     )
@@ -1809,6 +1814,22 @@ def test_archive_is_announced_to_policy_without_text(content_type: str, block_ty
     out = extract_text_attachments(content, fs, arts)  # type: ignore[arg-type]
 
     assert out == [{"filename": "bundle.zip", "content_type": content_type, "text": ""}]
+
+
+def test_listed_text_type_is_announced_to_policy_without_text() -> None:
+    """A text file recorded for filesystem delivery is announced, not decoded."""
+    fs, arts = _stores_with(
+        "file_log",
+        "big.log",
+        "text/plain",
+        b"secret line\n",
+        source_metadata={"delivery": "filesystem"},
+    )
+    content = [{"type": "input_file", "file_id": "file_log"}]
+
+    out = extract_text_attachments(content, fs, arts)  # type: ignore[arg-type]
+
+    assert out == [{"filename": "big.log", "content_type": "text/plain", "text": ""}]
 
 
 def test_resolved_block_takes_its_filename_from_the_stored_file() -> None:

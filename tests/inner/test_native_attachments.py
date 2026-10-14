@@ -549,6 +549,25 @@ def test_inline_bytes_are_refused_for_deployment_file_types() -> None:
     assert seen == [("notes.txt", "text/plain"), ("trace.gz", "application/gzip")]
 
 
+def test_unnamed_inline_bytes_are_classified_by_mime() -> None:
+    """A block without a filename is checked by its data-URI MIME type."""
+    seen: list[tuple[str, str | None]] = []
+
+    def requires(name: str, mime: str | None) -> bool:
+        seen.append((name, mime))
+        return mime == "application/gzip"
+
+    content = [
+        # A remote URL has no MIME to check.
+        {"type": "input_image", "image_url": "https://example.com/a.png"},
+        {"type": "input_file", "file_data": "data:application/gzip;base64,H4s="},
+    ]
+
+    assert inline_filesystem_attachment_name(content) is None
+    assert inline_filesystem_attachment_name(content, requires) == "application/gzip"
+    assert seen == [("", "application/gzip")]
+
+
 @pytest.mark.parametrize(
     ("source_metadata", "client_delivery", "expected"),
     [

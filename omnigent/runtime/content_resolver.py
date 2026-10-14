@@ -19,6 +19,7 @@ from omnigent.entities import ConversationItem, MessageData
 from omnigent.inner.native_attachments import (
     FilesystemAttachmentPolicy,
     framework_notice_block,
+    requires_filesystem,
     resize_dimensions,
     uses_filesystem_delivery,
 )
@@ -641,8 +642,9 @@ def attachment_delivery(
     Decide how an upload reaches the agent, or ``None`` when it is refused.
 
     Listed extensions are matched by name first, so a misleading MIME cannot
-    send one inline. Everything else accepted inline stays inline; with
-    ``policy.all_types``, the remaining files are delivered as files.
+    send one inline; a default filesystem extension the policy leaves out is
+    refused for the same reason. Everything else accepted inline stays inline;
+    with ``policy.all_types``, the remaining files are delivered as files.
 
     :param filename: The upload's filename, e.g. ``"trace.gz"``.
     :param declared_type: The MIME the client declared, e.g. ``"application/gzip"``.
@@ -651,6 +653,8 @@ def attachment_delivery(
     """
     if policy.matches(filename):
         return "filesystem"
+    if requires_filesystem(filename):
+        return None
     content_type = _resolve_content_type(declared_type, filename)
     if (
         attachment_upload_limit(content_type) is not None

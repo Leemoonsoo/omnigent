@@ -199,9 +199,11 @@ def inline_filesystem_attachment_name(
     reach the sandbox.
 
     :param content: A message's content blocks.
-    :param requires: Deployment check given a filename and its data-URI MIME
-        type, applied in addition to the default extensions.
-    :returns: The offending filename, e.g. ``"payload.zip"``, or ``None``.
+    :param requires: Deployment check given a filename (``""`` when the block
+        has none) and its data-URI MIME type, applied in addition to the
+        default extensions.
+    :returns: The offending filename, e.g. ``"payload.zip"``, the MIME type of
+        an unnamed one, e.g. ``"application/gzip"``, or ``None``.
     """
     if not isinstance(content, list):
         return None
@@ -210,12 +212,18 @@ def inline_filesystem_attachment_name(
             continue
         filename = block.get("filename")
         data_uri = block.get("file_data") or block.get("image_url")
-        if not isinstance(filename, str) or not data_uri:
+        if not data_uri:
             continue
-        if requires_filesystem(filename):
-            return filename
-        if requires is not None and requires(filename, _data_uri_mime(data_uri)):
-            return filename
+        if isinstance(filename, str):
+            if requires_filesystem(filename):
+                return filename
+            if requires is not None and requires(filename, _data_uri_mime(data_uri)):
+                return filename
+            continue
+        # Without a name, only the data URI's MIME says what the bytes are.
+        mime = _data_uri_mime(data_uri)
+        if requires is not None and mime is not None and requires("", mime):
+            return mime
     return None
 
 

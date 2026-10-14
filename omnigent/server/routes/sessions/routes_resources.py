@@ -11,7 +11,7 @@ import urllib.parse
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import httpx
 from fastapi import (
@@ -108,6 +108,9 @@ from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
 
+if TYPE_CHECKING:
+    from omnigent.inner.native_attachments import FilesystemAttachmentPolicy
+
 
 class _RunnerStreamResponse(StreamingResponse):
     """Stream a runner response body and close it however the send ends.
@@ -164,6 +167,23 @@ def _attachment_upload_lock(session_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _attachment_upload_locks[session_id] = lock
     return lock
+
+
+def _unsupported_attachment_detail(content_type: str, policy: FilesystemAttachmentPolicy) -> str:
+    """Explain a refused upload in terms of the types this server accepts."""
+    from omnigent.inner.native_attachments import DEFAULT_FILESYSTEM_ATTACHMENT_POLICY
+
+    detail = (
+        f"Unsupported attachment type '{content_type}'. Attach images, PDF, or text/code files"
+    )
+    if policy == DEFAULT_FILESYSTEM_ATTACHMENT_POLICY:
+        return (
+            f"{detail}, or use Claude Code or Codex for archives, Office documents, and databases."
+        )
+    if policy.extensions:
+        extensions = ", ".join(sorted(policy.extensions))
+        return f"{detail}, or use Claude Code or Codex for {extensions} files."
+    return f"{detail}."
 
 
 def register_resources_routes(
@@ -1715,7 +1735,6 @@ def register_resources_routes(
         from omnigent.inner.native_attachments import (
             DELIVERY_KEY,
             FILESYSTEM_DELIVERY,
-            INLINE_DELIVERY,
             filesystem_attachment_capability,
             requires_filesystem,
         )
@@ -1739,13 +1758,14 @@ def register_resources_routes(
         )
         # Listed extensions are checked by name first so a misleading MIME cannot
         # skip the harness requirement or the quotas for files that need local tools.
-        delivery = attachment_delivery(
-            file.filename, file.content_type, _filesystem_attachment_policy(request.app.state)
-        )
+        policy = _filesystem_attachment_policy(request.app.state)
+        delivery = attachment_delivery(file.filename, file.content_type, policy)
         filesystem_required = delivery == "filesystem"
-        if filesystem_required:
-            # Drop the declared type so the file is never stored as text.
+        if filesystem_required or requires_filesystem(file.filename):
+            # Drop the declared type so the file is never stored as text, even
+            # when the policy leaves its extension out.
             content_type = _resolve_content_type("application/octet-stream", file.filename)
+        if filesystem_required:
             await _require_filesystem_attachment_support(
                 request,
                 conv,
@@ -1780,11 +1800,7 @@ def register_resources_routes(
                 if type_limit is None:
                     raise HTTPException(
                         status_code=415,
-                        detail=(
-                            f"Unsupported attachment type '{content_type}'. Attach images, PDF, "
-                            "or text/code files, or use Claude Code or Codex for archives, "
-                            "Office documents, and databases."
-                        ),
+                        detail=_unsupported_attachment_detail(content_type, policy),
                     )
                 read_limit = min(type_limit, MAX_ATTACHMENT_UPLOAD_BYTES)
             filename = file.filename
@@ -1825,8 +1841,6 @@ def register_resources_routes(
             # Record the decision so delivery doesn't change if the policy does.
             if filesystem_required:
                 source_metadata = {DELIVERY_KEY: FILESYSTEM_DELIVERY}
-            elif requires_filesystem(file.filename):
-                source_metadata = {**(source_metadata or {}), DELIVERY_KEY: INLINE_DELIVERY}
             stored = file_store.create(
                 session_id=session_id,
                 filename=filename,

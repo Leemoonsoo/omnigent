@@ -9238,6 +9238,51 @@ async def test_copy_new_type_refuses_old_runtime(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delivery_support", [False, True])
+async def test_copy_requires_delivery_support_for_new_types(
+    file_client: httpx.AsyncClient,
+    file_app: FastAPI,
+    file_conv_store: _ConversationStore,
+    file_store: Any,
+    artifact_store: _InMemoryArtifactStore,
+    delivery_support: bool,
+) -> None:
+    """A copied file recorded for filesystem delivery needs a host that honors the record."""
+    from omnigent.harness_plugins import CLAUDE_NATIVE_CODING_AGENT
+    from omnigent.inner.native_attachments import CAP_FILESYSTEM_ATTACHMENTS
+
+    child = "405bfe154d5c0e795a2b87021bc897bf"
+    parent = "b460374fc8e697b296708f52dc9d8179"
+    file_conv_store._conversations[child].labels.update(
+        CLAUDE_NATIVE_CODING_AGENT.presentation_labels
+    )
+    file_app.state.host_registry.get("host_files").hello.capabilities = (
+        HOST_CAPABILITIES if delivery_support else [CAP_FILESYSTEM_ATTACHMENTS]
+    )
+    stored = file_store.create(
+        session_id=parent,
+        filename="trace.gz",
+        bytes=2,
+        content_type="application/gzip",
+        source_metadata={"delivery": "filesystem"},
+    )
+    artifact_store.put(stored.id, b"\x1f\x8b")
+    response = await file_client.post(
+        f"/v1/sessions/{child}/resources/files:copy",
+        json={"source_session_id": parent, "file_ids": [stored.id]},
+    )
+    if delivery_support:
+        assert response.status_code == 200, response.text
+        copied = file_store.get(response.json()["mapping"][stored.id]["new_id"], session_id=child)
+        assert copied is not None
+        assert copied.source_metadata == {"delivery": "filesystem"}
+    else:
+        assert response.status_code == 409, response.text
+        assert "this file type" in response.text
+        assert file_store.list(child).data == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("retained_history", [False, True])
 async def test_native_send_rechecks_runtime_after_upload(
     file_client: httpx.AsyncClient,

@@ -199,36 +199,69 @@ def test_host_without_delivery_support_refuses_only_new_types(
         assert "this file type" in response.text
 
 
+@pytest.mark.parametrize("content_type", ["application/zip", "text/plain"])
 def test_empty_policy_refuses_default_filesystem_types(
-    upload_client: tuple[TestClient, str], monkeypatch: pytest.MonkeyPatch
+    upload_client: tuple[TestClient, str],
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    content_type: str,
 ) -> None:
-    """An empty extension list turns filesystem attachments off."""
+    """An empty extension list turns filesystem attachments off, even for a text MIME."""
     monkeypatch.setattr(
         "omnigent.server.server_config.filesystem_attachment_policy",
         lambda: FilesystemAttachmentPolicy(frozenset()),
     )
     client, session_id = upload_client
-    response = _upload(client, session_id, "bundle.zip", content_type="application/zip")
+    response = _upload(client, session_id, "bundle.zip", content_type=content_type)
     assert response.status_code == 415, response.text
+    assert "'application/zip'" in response.text
+    assert "Claude Code or Codex" not in response.text
+    assert SqlAlchemyFileStore(db_uri).list(session_id).data == []
 
 
+def test_unsupported_type_message_names_the_configured_extensions(
+    upload_client: tuple[TestClient, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused upload lists the extensions this server delivers as files."""
+    monkeypatch.setattr(
+        "omnigent.server.server_config.filesystem_attachment_policy",
+        lambda: FilesystemAttachmentPolicy(frozenset({".har", ".gz"})),
+    )
+    client, session_id = upload_client
+    response = _upload(client, session_id, "clip.mp4", content_type="video/mp4")
+    assert response.status_code == 415, response.text
+    assert "use Claude Code or Codex for .gz, .har files." in response.text
+
+
+@pytest.mark.parametrize(
+    "block,named",
+    [
+        (
+            {
+                "type": "input_file",
+                "filename": "trace.gz",
+                "file_data": "data:application/gzip;base64,H4s=",
+            },
+            "trace.gz",
+        ),
+        (
+            {"type": "input_file", "file_data": "data:application/gzip;base64,H4s="},
+            "application/gzip",
+        ),
+    ],
+)
 @pytest.mark.usefixtures("all_types_policy")
 def test_all_types_policy_refuses_inline_bytes_for_file_types(
-    upload_client: tuple[TestClient, str],
+    upload_client: tuple[TestClient, str], block: dict[str, str], named: str
 ) -> None:
     """A type delivered as a file must be uploaded, so the upload checks apply."""
     client, session_id = upload_client
-    block = {
-        "type": "input_file",
-        "filename": "trace.gz",
-        "file_data": "data:application/gzip;base64,H4s=",
-    }
     resp = client.post(
         f"/v1/sessions/{session_id}/events",
         json={"type": "message", "data": {"role": "user", "content": [block]}},
     )
     assert resp.status_code == 400, resp.text
-    assert "trace.gz" in resp.text
+    assert named in resp.text
 
 
 @pytest.mark.usefixtures("all_types_policy")

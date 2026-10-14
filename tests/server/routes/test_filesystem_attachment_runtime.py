@@ -30,10 +30,19 @@ from omnigent.server.routes._sessions.helpers import require_filesystem_attachme
         (None, None, ErrorCode.CONFLICT),
     ],
 )
+@pytest.mark.parametrize(
+    "required", [CAP_FILESYSTEM_ATTACHMENTS, CAP_FILESYSTEM_ATTACHMENT_DELIVERY]
+)
 async def test_connected_builds_must_advertise_attachment_support(
-    host_capable: bool | None, runner_capable: bool | None, expected: str | None
+    host_capable: bool | None,
+    runner_capable: bool | None,
+    expected: str | None,
+    required: str,
 ) -> None:
     """Legacy omitted tokens fail closed, including a stale runner under a new daemon."""
+    # A build lacking per-file delivery still advertises the original token.
+    older = [] if required == CAP_FILESYSTEM_ATTACHMENTS else [CAP_FILESYSTEM_ATTACHMENTS]
+    advertised = {True: [*older, required], False: older}
     hosts = HostRegistry()
     runners = TunnelRegistry()
     if host_capable is not None:
@@ -43,7 +52,7 @@ async def test_connected_builds_must_advertise_attachment_support(
                     version="0.14.0",
                     frame_protocol_version=1,
                     name="host",
-                    capabilities=[CAP_FILESYSTEM_ATTACHMENTS] if host_capable else [],
+                    capabilities=advertised[host_capable],
                 )
             )
         )
@@ -55,7 +64,7 @@ async def test_connected_builds_must_advertise_attachment_support(
                 HelloFrame(
                     runner_version="0.14.0",
                     frame_protocol_version=1,
-                    capabilities=[CAP_FILESYSTEM_ATTACHMENTS] if runner_capable else [],
+                    capabilities=advertised[runner_capable],
                 )
             )
         )
@@ -66,6 +75,7 @@ async def test_connected_builds_must_advertise_attachment_support(
         "runner_id": "runner_test" if runner_capable is not None else None,
         "host_registry": hosts,
         "tunnel_registry": runners,
+        "capability": required,
     }
     if expected is None:
         require_filesystem_attachment_runtime(**kwargs)
@@ -89,36 +99,3 @@ def test_attachment_check_on_wrong_replica_keeps_retry_signal() -> None:
         )
     assert error.value.code == ErrorCode.WRONG_REPLICA
     router.host_is_on_another_replica.assert_called_once_with("host_remote")
-
-
-@pytest.mark.parametrize(
-    ("capabilities", "allowed"),
-    [
-        ([CAP_FILESYSTEM_ATTACHMENTS], False),
-        ([CAP_FILESYSTEM_ATTACHMENTS, CAP_FILESYSTEM_ATTACHMENT_DELIVERY], True),
-    ],
-)
-def test_new_file_types_need_delivery_support(capabilities: list[str], allowed: bool) -> None:
-    """Types beyond the defaults need a build that follows the recorded delivery."""
-    hosts = HostRegistry()
-    hosts.register(
-        "host_test",
-        Mock(),
-        HostHelloFrame(
-            version="0.20.0", frame_protocol_version=1, name="host", capabilities=capabilities
-        ),
-        owner=None,
-    )
-    kwargs = {
-        "host_id": "host_test",
-        "runner_id": None,
-        "host_registry": hosts,
-        "tunnel_registry": TunnelRegistry(),
-        "capability": CAP_FILESYSTEM_ATTACHMENT_DELIVERY,
-    }
-    if allowed:
-        require_filesystem_attachment_runtime(**kwargs)
-    else:
-        with pytest.raises(OmnigentError, match="this file type") as error:
-            require_filesystem_attachment_runtime(**kwargs)
-        assert error.value.code == ErrorCode.CONFLICT
