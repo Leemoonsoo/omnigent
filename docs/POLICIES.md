@@ -89,7 +89,8 @@ reads a local copy outside the working checkout. See
 
 - a list of extensions, which replaces the defaults, e.g. `[".zip", ".gz", ".har"]`.
   A listed text or image type, such as `.log` or `.png`, is delivered as a file,
-  with its original bytes, instead of inline.
+  with its original bytes, instead of inline. It then needs a Claude Code or
+  Codex session, like any other file delivered as a file.
   A default extension left off the list is refused, even when the browser
   labels it as text.
 - `[]`, which turns filesystem attachments off.

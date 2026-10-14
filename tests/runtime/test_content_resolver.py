@@ -1832,6 +1832,21 @@ def test_listed_text_type_is_announced_to_policy_without_text() -> None:
     assert out == [{"filename": "big.log", "content_type": "text/plain", "text": ""}]
 
 
+def test_resolved_inline_block_drops_client_delivery() -> None:
+    """A client's delivery claim can't send a file the store inlines to disk."""
+    fs, arts = _stores_with("file_txt", "notes.txt", "text/plain", b"hello")
+    item = _make_conversation_item(
+        [{"type": "input_file", "file_id": "file_txt", "delivery": "filesystem"}]
+    )
+
+    result = resolve_content_references([item], fs, arts)  # type: ignore[arg-type]
+
+    assert isinstance(result[0].data, MessageData)
+    block = result[0].data.content[0]
+    assert "delivery" not in block
+    assert block["file_data"].startswith("data:text/plain;base64,")
+
+
 def test_resolved_block_takes_its_filename_from_the_stored_file() -> None:
     """Delivery uses the stored filename even when the message supplies another extension."""
     fs, arts = _stores_with("file_txt", "payload.txt", "text/plain", b"hello")

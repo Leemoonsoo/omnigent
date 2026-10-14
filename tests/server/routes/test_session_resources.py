@@ -2530,6 +2530,43 @@ async def test_native_forward_leaves_a_workspace_file_for_the_runner(
 
 
 @pytest.mark.asyncio
+async def test_native_forward_drops_client_delivery_claims(
+    file_client: httpx.AsyncClient,
+) -> None:
+    """Only an upload's stored record can mark a file for filesystem delivery."""
+    session_id = "64a784c3aa907d1774f44313546947c6"
+    fake_runner = _FakeRunnerClient(payload={})
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+    set_runner_client(fake_runner)  # type: ignore[arg-type]
+    upload = await file_client.post(
+        f"/v1/sessions/{session_id}/resources/files",
+        files={"file": ("notes.txt", b"hello", "text/plain")},
+    )
+    assert upload.status_code == 201, upload.text
+    content = [
+        {"type": "input_file", "file_id": upload.json()["id"], "delivery": "filesystem"},
+        {
+            "type": "input_file",
+            "filename": "inline.txt",
+            "file_data": "data:text/plain;base64,aGk=",
+            "delivery": "filesystem",
+        },
+    ]
+
+    resp = await file_client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={"type": "message", "data": {"role": "user", "content": content}},
+    )
+
+    assert resp.status_code == 202, resp.text
+    forwarded = next(
+        body for path, body in fake_runner.post_json_calls if path.endswith("/events")
+    )
+    assert len(forwarded["content"]) == 2
+    assert all("delivery" not in block for block in forwarded["content"])
+
+
+@pytest.mark.asyncio
 async def test_downscaled_upload_reaches_native_resolver(
     file_client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -9225,43 +9262,32 @@ async def test_pr_attachment_uses_bound_session_when_runner_offline(
 
 
 @pytest.mark.asyncio
-async def test_copy_new_type_refuses_old_runtime(
+@pytest.mark.parametrize(
+    ("filename", "host_tier", "status"),
+    [
+        ("archive.zip", "none", 409),
+        ("archive.zip", "attachments", 200),
+        ("trace.gz", "attachments", 409),
+        ("trace.gz", "current", 200),
+    ],
+    ids=[
+        "default-type-needs-attachments",
+        "default-type-on-attachments-host",
+        "recorded-type-needs-delivery",
+        "recorded-type-on-current-host",
+    ],
+)
+async def test_copy_requires_the_hosts_attachment_support(
     file_client: httpx.AsyncClient,
     file_app: FastAPI,
     file_conv_store: _ConversationStore,
     file_store: Any,
     artifact_store: _InMemoryArtifactStore,
+    filename: str,
+    host_tier: str,
+    status: int,
 ) -> None:
-    """A capable harness on an old host cannot receive a copied binary file."""
-    from omnigent.harness_plugins import CLAUDE_NATIVE_CODING_AGENT
-
-    child = "405bfe154d5c0e795a2b87021bc897bf"
-    parent = "b460374fc8e697b296708f52dc9d8179"
-    file_conv_store._conversations[child].labels.update(
-        CLAUDE_NATIVE_CODING_AGENT.presentation_labels
-    )
-    file_app.state.host_registry.get("host_files").hello.capabilities = []
-    file_id = _seed_parent_zip(file_store, artifact_store, "archive.zip")
-    response = await file_client.post(
-        f"/v1/sessions/{child}/resources/files:copy",
-        json={"source_session_id": parent, "file_ids": [file_id]},
-    )
-    assert response.status_code == 409, response.text
-    assert file_store.list(child).data == []
-    assert file_store.get(file_id, session_id=parent) is not None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("delivery_support", [False, True])
-async def test_copy_requires_delivery_support_for_new_types(
-    file_client: httpx.AsyncClient,
-    file_app: FastAPI,
-    file_conv_store: _ConversationStore,
-    file_store: Any,
-    artifact_store: _InMemoryArtifactStore,
-    delivery_support: bool,
-) -> None:
-    """A copied file recorded for filesystem delivery needs a host that honors the record."""
+    """A copy into a capable harness still needs a host that can deliver the file."""
     from omnigent.harness_plugins import CLAUDE_NATIVE_CODING_AGENT
     from omnigent.inner.native_attachments import CAP_FILESYSTEM_ATTACHMENTS
 
@@ -9270,29 +9296,39 @@ async def test_copy_requires_delivery_support_for_new_types(
     file_conv_store._conversations[child].labels.update(
         CLAUDE_NATIVE_CODING_AGENT.presentation_labels
     )
-    file_app.state.host_registry.get("host_files").hello.capabilities = (
-        HOST_CAPABILITIES if delivery_support else [CAP_FILESYSTEM_ATTACHMENTS]
-    )
-    stored = file_store.create(
-        session_id=parent,
-        filename="trace.gz",
-        bytes=2,
-        content_type="application/gzip",
-        source_metadata={"delivery": "filesystem"},
-    )
-    artifact_store.put(stored.id, b"\x1f\x8b")
+    file_app.state.host_registry.get("host_files").hello.capabilities = {
+        "none": [],
+        "attachments": [CAP_FILESYSTEM_ATTACHMENTS],
+        "current": HOST_CAPABILITIES,
+    }[host_tier]
+    if filename.endswith(".zip"):
+        file_id = _seed_parent_zip(file_store, artifact_store, filename)
+        source_metadata = None
+    else:
+        # Outside the default extensions, so only the record marks it for disk.
+        source_metadata = {"delivery": "filesystem"}
+        stored = file_store.create(
+            session_id=parent,
+            filename=filename,
+            bytes=2,
+            content_type="application/gzip",
+            source_metadata=source_metadata,
+        )
+        artifact_store.put(stored.id, b"\x1f\x8b")
+        file_id = stored.id
+
     response = await file_client.post(
         f"/v1/sessions/{child}/resources/files:copy",
-        json={"source_session_id": parent, "file_ids": [stored.id]},
+        json={"source_session_id": parent, "file_ids": [file_id]},
     )
-    if delivery_support:
-        assert response.status_code == 200, response.text
-        copied = file_store.get(response.json()["mapping"][stored.id]["new_id"], session_id=child)
+
+    assert response.status_code == status, response.text
+    assert file_store.get(file_id, session_id=parent) is not None
+    if status == 200:
+        copied = file_store.get(response.json()["mapping"][file_id]["new_id"], session_id=child)
         assert copied is not None
-        assert copied.source_metadata == {"delivery": "filesystem"}
+        assert copied.source_metadata == source_metadata
     else:
-        assert response.status_code == 409, response.text
-        assert "this file type" in response.text
         assert file_store.list(child).data == []
 
 

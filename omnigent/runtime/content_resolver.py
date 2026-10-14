@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from omnigent.entities import ConversationItem, MessageData
 from omnigent.inner.native_attachments import (
+    DELIVERY_KEY,
     FilesystemAttachmentPolicy,
     framework_notice_block,
     requires_filesystem,
@@ -947,7 +948,8 @@ def _resolve_file_id_block(
     # a payload the provider can't interpret. Fail with an actionable error.
     if uses_filesystem_delivery(file_meta.filename, file_meta.source_metadata):
         if defer_filesystem_files:
-            return dict(block), None
+            # The runner sets delivery from the stored record when it fetches the file.
+            return {k: v for k, v in block.items() if k != DELIVERY_KEY}, None
         raise ValueError(
             f"Attachment '{file_meta.filename}' requires a filesystem-capable "
             "harness (e.g. Claude Code, Codex) and cannot be used with this model."
@@ -964,8 +966,11 @@ def _resolve_file_id_block(
         if cache is not None:
             cache[file_id] = encoded
 
-    # Copy all fields except file_id.
-    resolved: dict[str, Any] = {k: v for k, v in block.items() if k != "file_id"}
+    # Copy all fields except file_id, and any delivery the client claimed:
+    # the stored record above already decided this file is inlined.
+    resolved: dict[str, Any] = {
+        k: v for k, v in block.items() if k not in ("file_id", DELIVERY_KEY)
+    }
     if file_meta.filename:
         # The stored name decides delivery; the block's own filename is
         # client-supplied and must not be able to relabel the file.

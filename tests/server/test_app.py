@@ -514,7 +514,12 @@ def _build_branding_app(
             {},
             {"extensions": [".gz"], "all_types": False},
         ),
-        # A deployment-supplied callable is evaluated per request, over the config file.
+        # A deployment-supplied value or callable takes precedence over the config file.
+        (
+            {"filesystem_attachment_allowed_extensions": [".gz"]},
+            {"filesystem_attachment_allowed_extensions": [".har"]},
+            {"extensions": [".har"], "all_types": False},
+        ),
         (
             {"filesystem_attachment_allowed_extensions": [".gz"]},
             {"filesystem_attachment_allowed_extensions": lambda: ["*"]},

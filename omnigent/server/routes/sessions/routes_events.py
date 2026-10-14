@@ -1082,6 +1082,7 @@ def register_events_routes(
         outgoing_needs_delivery_capability = False
         if body.type in ("message", _SLASH_COMMAND_TYPE):
             from omnigent.inner.native_attachments import (
+                DELIVERY_KEY,
                 inline_filesystem_attachment_name,
                 requires_filesystem,
                 uses_filesystem_delivery,
@@ -1089,6 +1090,12 @@ def register_events_routes(
             from omnigent.runtime.content_resolver import attachment_delivery
 
             content = body.data.get("content")
+            if isinstance(content, list):
+                # Only the upload's stored record decides delivery; a client's
+                # claim would put inline bytes on disk past the upload checks.
+                for block in content:
+                    if isinstance(block, dict):
+                        block.pop(DELIVERY_KEY, None)
             policy = _filesystem_attachment_policy(request.app.state)
             inline_name = inline_filesystem_attachment_name(
                 content,
