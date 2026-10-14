@@ -166,13 +166,7 @@ def configure_host_sharding(enabled: bool) -> None:
 
 
 def _deployment_is_sharded() -> bool:
-    """Whether this deployment shards host traffic across replicas by host_id.
-
-    A single-process server has exactly one replica, so an absent host is
-    simply offline. The server can't see the sharding layer itself (the router
-    strips its routing header), so the deployment declares it through
-    :func:`configure_host_sharding`.
-    """
+    """Return whether this deployment shards host traffic by host_id."""
     return _host_sharded
 
 
