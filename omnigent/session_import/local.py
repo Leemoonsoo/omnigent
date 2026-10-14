@@ -712,20 +712,26 @@ def _codex_rollout_ids(path: Path) -> tuple[str, str] | None:
 
 
 def _find_codex_rollout_file(home: Path, codex_id: str, *, by_rollout_id: bool) -> Path | None:
-    """Newest rollout whose filename carries ``codex_id``, searching sessions/ before archives."""
+    """Newest active or archived rollout whose filename carries ``codex_id``."""
     if not _is_codex_thread_id(codex_id):
         return None
+    selected: Path | None = None
+    selected_mtime = 0.0
     for root in (home / "sessions", home / "archived_sessions"):
         if not root.is_dir():
             continue
-        matches = []
         for path in root.glob(f"**/rollout-*{codex_id}*.jsonl"):
             ids = _codex_rollout_ids(path)
-            if ids is not None and ids[1 if by_rollout_id else 0] == codex_id and path.is_file():
-                matches.append(path)
-        if matches:
-            return max(matches, key=lambda path: path.stat().st_mtime)
-    return None
+            if ids is None or ids[1 if by_rollout_id else 0] != codex_id or not path.is_file():
+                continue
+            try:
+                modified_at = path.stat().st_mtime
+            except OSError:
+                continue
+            if selected is None or modified_at > selected_mtime:
+                selected = path
+                selected_mtime = modified_at
+    return selected
 
 
 def _codex_thread_name_from_index(home: Path, session_id: str) -> str | None:

@@ -1531,17 +1531,19 @@ def test_load_codex_session_keeps_a_compaction_inherited_from_the_fork_base(
     assert replayed == ["parent question 2", "parent answer 2", "child question", "child answer"]
 
 
+@pytest.mark.parametrize("newer", ["active", "archived"])
 def test_load_codex_session_falls_back_to_filename_when_rollout_path_is_stale(
-    tmp_path: Path,
+    tmp_path: Path, newer: str
 ) -> None:
-    """A rollout_path whose file is gone still resolves the thread by filename."""
+    """A rollout_path whose file is gone resolves the newest active or archived rollout."""
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     sessions = tmp_path / "sessions" / "2026" / "10" / "02"
-    _write_codex_turns(
-        sessions / f"rollout-2026-10-02T09-00-00-{session_id}.jsonl",
-        session_id,
-        [("question 1", "answer 1")],
-    )
+    name = f"rollout-2026-10-02T09-00-00-{session_id}.jsonl"
+    rollouts = {"active": sessions / name, "archived": tmp_path / "archived_sessions" / name}
+    for label, path in rollouts.items():
+        _write_codex_turns(path, session_id, [(f"{label} question", f"{label} answer")])
+        modified_at = 2_000 if label == newer else 1_000
+        os.utime(path, (modified_at, modified_at))
     _write_codex_threads_db(
         tmp_path,
         session_id,
@@ -1552,7 +1554,8 @@ def test_load_codex_session_falls_back_to_filename_when_rollout_path_is_stale(
 
     imported = load_codex_session(session_id, codex_home=tmp_path)
 
-    assert _codex_item_texts(imported) == ["question 1", "answer 1"]
+    assert _codex_item_texts(imported) == [f"{newer} question", f"{newer} answer"]
+    assert imported.archived is (newer == "archived")
 
 
 def test_load_codex_session_imports_metadata_only_fork_from_its_base(tmp_path: Path) -> None:
