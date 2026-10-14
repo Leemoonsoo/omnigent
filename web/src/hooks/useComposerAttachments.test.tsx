@@ -7,7 +7,11 @@ import { act, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
-import { FALLBACK_SERVER_INFO, type FilesystemAttachmentsInfo } from "@/lib/capabilities";
+import {
+  FALLBACK_SERVER_INFO,
+  type FilesystemAttachmentsInfo,
+  type ServerInfo,
+} from "@/lib/capabilities";
 import { useComposerAttachments } from "./useComposerAttachments";
 
 function textFile(name = "notes.txt"): File {
@@ -81,6 +85,31 @@ describe("useComposerAttachments", () => {
     const pasted = new File([new Uint8Array(4)], "more.gz", { type: "application/gzip" });
     act(() => result.current.onPaste(pasteEvent({ files: [pasted] }).event));
     expect(result.current.files).toEqual([gz, pasted]);
+  });
+
+  it("rechecks files added while the server's policy was loading", () => {
+    let info: ServerInfo | "loading" = "loading";
+    const onRemoved = vi.fn();
+    const { result, rerender } = renderHook(() => useComposerAttachments({ onRemoved }), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <CapabilitiesProvider info={info}>{children}</CapabilitiesProvider>
+      ),
+    });
+    const notes = textFile();
+    const zip = new File([new Uint8Array(4)], "bundle.zip", { type: "application/zip" });
+    // The defaults accept a .zip until the server says otherwise.
+    act(() => result.current.addFiles([notes, zip]));
+    expect(result.current.files).toEqual([notes, zip]);
+
+    info = {
+      ...FALLBACK_SERVER_INFO,
+      filesystem_attachments: { extensions: [], all_types: false },
+    };
+    rerender();
+
+    expect(result.current.files).toEqual([notes]);
+    expect(result.current.attachmentError).toContain("bundle.zip");
+    expect(onRemoved).toHaveBeenCalledOnce();
   });
 
   it("starts empty by default and seeds from initialFiles", () => {

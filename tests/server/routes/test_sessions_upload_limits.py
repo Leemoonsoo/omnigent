@@ -170,20 +170,6 @@ def test_all_types_policy_records_filesystem_delivery(
     assert (stored.source_metadata or {}).get("delivery") == delivery
 
 
-@pytest.mark.usefixtures("all_types_policy")
-def test_all_types_policy_still_requires_a_native_harness(
-    upload_client: tuple[TestClient, str], db_uri: str
-) -> None:
-    """Sessions without filesystem tools keep refusing types they can't inline."""
-    client, _ = upload_client
-    sdk_session = SqlAlchemyConversationStore(db_uri).create_conversation(
-        title="sdk session", agent_id="087b7cb7ac30abf4debfaa578d052ec6"
-    )
-    resp = _upload(client, sdk_session.id, "trace.gz", content_type="application/gzip")
-    assert resp.status_code == 415, resp.text
-    assert "Claude Code or Codex" in resp.text
-
-
 @pytest.mark.parametrize("filename,status", [("trace.gz", 409), ("bundle.zip", 201)])
 @pytest.mark.usefixtures("all_types_policy")
 def test_host_without_delivery_support_refuses_only_new_types(
@@ -233,28 +219,40 @@ def test_unsupported_type_message_names_the_configured_extensions(
     assert "use Claude Code or Codex for .gz, .har files." in response.text
 
 
+_GZ_BYTES = "data:application/gzip;base64,H4s="
+
+
 @pytest.mark.parametrize(
-    "policy",
-    [FilesystemAttachmentPolicy(all_types=True), FilesystemAttachmentPolicy(frozenset({".gz"}))],
-    ids=["all-types", "listed"],
-)
-@pytest.mark.parametrize(
-    "block,named",
+    "policy,block,named",
     [
         (
-            {
-                "type": "input_file",
-                "filename": "trace.gz",
-                "file_data": "data:application/gzip;base64,H4s=",
-            },
+            FilesystemAttachmentPolicy(all_types=True),
+            {"type": "input_file", "filename": "trace.gz", "file_data": _GZ_BYTES},
             "trace.gz",
         ),
         (
-            {"type": "input_file", "file_data": "data:application/gzip;base64,H4s="},
+            FilesystemAttachmentPolicy(all_types=True),
+            {"type": "input_file", "file_data": _GZ_BYTES},
             "application/gzip",
         ),
+        (
+            FilesystemAttachmentPolicy(frozenset({".gz"})),
+            {"type": "input_file", "filename": "trace.gz", "file_data": _GZ_BYTES},
+            "trace.gz",
+        ),
+        (
+            FilesystemAttachmentPolicy(frozenset({".gz"})),
+            {"type": "input_file", "file_data": _GZ_BYTES},
+            "application/gzip",
+        ),
+        # mimetypes has no extension for bzip2, so the name comes from a fixed table.
+        (
+            FilesystemAttachmentPolicy(frozenset({".bz2"})),
+            {"type": "input_file", "file_data": "data:application/x-bzip2;base64,QlpoOQ=="},
+            "application/x-bzip2",
+        ),
     ],
-    ids=["named", "unnamed"],
+    ids=["all-types-named", "all-types-unnamed", "listed-named", "listed-unnamed", "listed-bz2"],
 )
 def test_policy_refuses_inline_bytes_for_file_types(
     upload_client: tuple[TestClient, str],
@@ -290,18 +288,33 @@ def test_quota_counts_files_recorded_for_filesystem_delivery(
     assert response.status_code == 413, response.text
 
 
+@pytest.mark.parametrize(
+    "filename,content_type,policy",
+    [
+        ("archive.zip", "application/zip", None),
+        # Configured types are still delivered as files, so they need native tools too.
+        ("trace.gz", "application/gzip", FilesystemAttachmentPolicy(all_types=True)),
+    ],
+    ids=["default-type", "all-types"],
+)
 def test_upload_rejects_filesystem_types_for_an_unsupported_harness(
-    upload_client: tuple[TestClient, str], db_uri: str
+    upload_client: tuple[TestClient, str],
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    content_type: str,
+    policy: FilesystemAttachmentPolicy | None,
 ) -> None:
     """An SDK session refuses formats requiring native filesystem tools."""
+    if policy is not None:
+        monkeypatch.setattr(
+            "omnigent.server.server_config.filesystem_attachment_policy", lambda: policy
+        )
     client, _ = upload_client
     sdk_session = SqlAlchemyConversationStore(db_uri).create_conversation(
         title="sdk session", agent_id="087b7cb7ac30abf4debfaa578d052ec6"
     )
-    resp = client.post(
-        f"/v1/sessions/{sdk_session.id}/resources/files",
-        files={"file": ("archive.zip", b"PK\x03\x04 fake zip", "application/zip")},
-    )
+    resp = _upload(client, sdk_session.id, filename, b"PK\x03\x04 fake", content_type)
     assert resp.status_code == 415, resp.text
     assert "Claude Code or Codex" in resp.text
 

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { attachmentAccept, validateAttachments } from "@/lib/attachments";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 
@@ -72,6 +72,21 @@ export function useComposerAttachments({
   const policy = info === "loading" ? null : (info.filesystem_attachments ?? null);
   const policyRef = useRef(policy);
   policyRef.current = policy;
+  const filesRef = useRef(files);
+  filesRef.current = files;
+
+  // Files added before /v1/info loaded were checked against the default policy,
+  // so recheck them against the server's once it arrives.
+  const checkedPolicyRef = useRef(policy);
+  useEffect(() => {
+    if (checkedPolicyRef.current === policy) return;
+    checkedPolicyRef.current = policy;
+    const { accepted, errors } = validateAttachments(filesRef.current, policy);
+    if (errors.length === 0) return;
+    setFiles(accepted);
+    setAttachmentError(errors.join("\n"));
+    onRemovedRef.current?.();
+  }, [policy]);
 
   const addFiles = useCallback((incoming: File[]) => {
     const { accepted, errors } = validateAttachments(incoming, policyRef.current);

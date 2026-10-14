@@ -221,12 +221,30 @@ def inline_filesystem_attachment_name(
             name = filename
         elif mime is not None:
             # Extension-based policies need a name; only the MIME says what these bytes are.
-            name = f"attachment{mimetypes.guess_extension(mime) or ''}"
+            name = f"attachment{_extension_for_mime(mime)}"
         else:
             continue
         if requires_filesystem(name) or (requires is not None and requires(name, mime)):
             return filename if isinstance(filename, str) else mime
     return None
+
+
+# Filesystem types that ``mimetypes.guess_extension`` can't name: it treats
+# compression as an encoding, and has no SQLite type.
+_MIME_EXTENSIONS: dict[str, str] = {
+    "application/gzip": ".gz",
+    "application/x-gzip": ".gz",
+    "application/x-bzip2": ".bz2",
+    "application/x-xz": ".xz",
+    "application/x-compress": ".Z",
+    "application/vnd.sqlite3": ".sqlite",
+    "application/x-sqlite3": ".sqlite",
+}
+
+
+def _extension_for_mime(mime: str) -> str:
+    """Return an extension for *mime*, e.g. ``".bz2"``, or ``""`` when unknown."""
+    return _MIME_EXTENSIONS.get(mime.lower()) or mimetypes.guess_extension(mime) or ""
 
 
 def _data_uri_mime(data_uri: object) -> str | None:

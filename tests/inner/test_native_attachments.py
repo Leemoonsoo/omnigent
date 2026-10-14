@@ -572,6 +572,33 @@ def test_unnamed_inline_bytes_are_classified_by_mime() -> None:
 
 
 @pytest.mark.parametrize(
+    ("mime", "name"),
+    [
+        # Types mimetypes.guess_extension can't name.
+        ("application/x-bzip2", "attachment.bz2"),
+        ("application/x-gzip", "attachment.gz"),
+        ("application/x-compress", "attachment.Z"),
+        ("application/x-unknown-thing", "attachment"),
+    ],
+)
+def test_unnamed_inline_bytes_get_a_name_for_their_mime(mime: str, name: str) -> None:
+    """An unnamed block is checked under a name carrying its MIME type's extension."""
+    block = {"type": "input_file", "file_data": f"data:{mime};base64,QlpoOQ=="}
+
+    def requires(candidate: str, _mime: str | None) -> bool:
+        return candidate == name
+
+    assert inline_filesystem_attachment_name([block], requires) == mime
+
+
+@pytest.mark.parametrize("mime", ["application/vnd.sqlite3", "application/x-sqlite3"])
+def test_unnamed_sqlite_bytes_are_refused_by_default(mime: str) -> None:
+    """SQLite is a default filesystem type, though mimetypes has no extension for it."""
+    block = {"type": "input_file", "file_data": f"data:{mime};base64,U1FM"}
+    assert inline_filesystem_attachment_name([block]) == mime
+
+
+@pytest.mark.parametrize(
     ("source_metadata", "client_delivery", "expected"),
     [
         ({"delivery": "filesystem"}, None, "filesystem"),

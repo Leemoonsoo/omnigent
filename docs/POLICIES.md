@@ -96,7 +96,8 @@ reads a local copy outside the working checkout. See
 - `[]`, which turns filesystem attachments off.
 - `"*"` (or a list containing `"*"`), which keeps the defaults and also delivers
   every other file that can't be inlined, such as `.gz`, `.tar`, `.har`, or video.
-  Images, PDFs, and text/code files stay inline.
+  Images, PDFs, and text/code files stay inline, except for extensions listed
+  beside `"*"`: `["*", ".log"]` also delivers `.log` files as files.
 
 The server reads this key at startup. Each upload records how it is delivered,
 so changing the setting does not change files a session already holds. Types
