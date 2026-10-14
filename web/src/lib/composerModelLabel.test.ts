@@ -119,10 +119,21 @@ describe("catalog model labels", () => {
     expect(nativeModelTooltip({ id: "opus", model: "system.ai.claude-opus-4-8[1m]" })).toBe(
       "system.ai.claude-opus-4-8[1m]",
     );
-    expect(nativeModelTooltip({ id: "gpt-5.5" })).toBe("gpt-5.5");
-    expect(
-      nativeModelTooltip({ id: "fusion", fusion: { combos: [], default: "fusion-a-sidekick-b" } }),
-    ).toBeUndefined();
+    // A label that differs from the id only in case still gets the exact id.
+    expect(nativeModelTooltip({ id: "GLM-5.3", displayName: "glm-5.3" })).toBe("GLM-5.3");
+    // A namespaced id shown without its prefix keeps the full id on hover.
+    const transport = "system.ai.glm-5-3";
+    expect(nativeModelTooltip({ id: transport, model: transport, displayName: transport })).toBe(
+      transport,
+    );
+  });
+
+  it.each([
+    ["has no display name", { id: "glm-5.3" }],
+    ["repeats its id as the label", { id: "glm-5.3", model: "glm-5.3", displayName: "glm-5.3" }],
+    ["is the Fusion row", { id: "fusion", fusion: { combos: [], default: "fusion-a-sidekick-b" } }],
+  ])("has no hover text when the row %s", (_case, row) => {
+    expect(nativeModelTooltip(row)).toBeUndefined();
   });
 
   it("retains the unknown and unmarked default states", () => {
