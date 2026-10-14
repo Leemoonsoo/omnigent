@@ -1,7 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { attachmentAccept, validateAttachments } from "@/lib/attachments";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
-import { getCachedServerInfo } from "@/lib/capabilities";
 
 export interface UseComposerAttachmentsOptions {
   /**
@@ -48,11 +47,6 @@ export interface ComposerAttachmentsApi {
   clear: () => void;
 }
 
-/** The server's filesystem attachment policy, read when files are added. */
-function filesystemAttachmentPolicy() {
-  return getCachedServerInfo()?.filesystem_attachments ?? null;
-}
-
 /**
  * Attachment state for a composer: the accepted files plus the rejection
  * notice from client-side validation (`@/lib/attachments`). Every returned
@@ -73,9 +67,14 @@ export function useComposerAttachments({
   onAcceptedRef.current = onAccepted;
   const onRemovedRef = useRef(onRemoved);
   onRemovedRef.current = onRemoved;
+  // The server's filesystem attachment policy, read through a ref for the same reason.
+  const info = useServerInfo();
+  const policy = info === "loading" ? null : (info.filesystem_attachments ?? null);
+  const policyRef = useRef(policy);
+  policyRef.current = policy;
 
   const addFiles = useCallback((incoming: File[]) => {
-    const { accepted, errors } = validateAttachments(incoming, filesystemAttachmentPolicy());
+    const { accepted, errors } = validateAttachments(incoming, policyRef.current);
     if (accepted.length > 0) {
       setFiles((prev) => [...prev, ...accepted]);
       onAcceptedRef.current?.(accepted);
@@ -90,7 +89,7 @@ export function useComposerAttachments({
   }, []);
 
   const replaceFiles = useCallback((incoming: File[]) => {
-    const { accepted, errors } = validateAttachments(incoming, filesystemAttachmentPolicy());
+    const { accepted, errors } = validateAttachments(incoming, policyRef.current);
     setFiles(accepted);
     setAttachmentError(errors.length > 0 ? errors.join("\n") : null);
   }, []);
@@ -124,8 +123,7 @@ export function useComposerAttachments({
     setAttachmentError(null);
   }, []);
 
-  const info = useServerInfo();
-  const accept = attachmentAccept(info === "loading" ? null : info.filesystem_attachments);
+  const accept = attachmentAccept(policy);
 
   return {
     files,

@@ -2652,7 +2652,6 @@ def test_fork_attachment_checks_paginate_before_mutation(
 
 
 @pytest.mark.parametrize("cutoff", [None, "resp_before"])
-@pytest.mark.parametrize("second_file", ["unsent.docx", "recorded.gz"])
 @pytest.mark.parametrize(
     "policy,expected_status,message",
     [
@@ -2674,29 +2673,19 @@ def test_fork_attachment_checks_paginate_before_mutation(
 def test_fork_enforces_current_policy_before_creating_destination(
     monkeypatch: pytest.MonkeyPatch,
     cutoff: str | None,
-    second_file: str,
     policy: dict[str, Any],
     expected_status: int,
     message: str,
 ) -> None:
-    """All copied files count, including unsent uploads and files beyond the cutoff.
-
-    A file outside the default extensions counts when it was recorded for filesystem delivery.
-    """
+    """All copied files count, including unsent uploads and files beyond the cutoff."""
     client, conv_store, file_store = _attachment_fork_client(
         monkeypatch, "sample.zip", "codex-native"
     )
     source_id = "e9f8f58523cec9a57d3bdf93be543e8c"
     for index, (filename, size) in enumerate(
-        [(second_file, 4), ("ordinary.txt", 100), ("image.png", 100)]
+        [("unsent.docx", 4), ("ordinary.txt", 100), ("image.png", 100)]
     ):
-        file_store.create(
-            filename,
-            bytes=size,
-            session_id=source_id,
-            file_id=f"{index:032x}",
-            source_metadata={"delivery": "filesystem"} if filename.endswith(".gz") else None,
-        )
+        file_store.create(filename, bytes=size, session_id=source_id, file_id=f"{index:032x}")
     original_files = dict(file_store.files)
     monkeypatch.setattr("omnigent.server.server_config.load_server_config", lambda: policy)
 
@@ -2715,3 +2704,40 @@ def test_fork_enforces_current_policy_before_creating_destination(
         assert not conv_store.fork_calls
         assert len(conv_store._convs) == 1
         assert file_store.files == original_files
+
+
+@pytest.mark.parametrize(
+    "policy,expected_status",
+    [
+        ({"filesystem_attachment_max_files": 1}, 413),
+        ({"filesystem_attachment_max_total_bytes": 7}, 413),
+        ({"filesystem_attachment_max_files": 2, "filesystem_attachment_max_total_bytes": 8}, 201),
+    ],
+    ids=["file-count", "total-bytes", "within-limits"],
+)
+def test_fork_counts_files_recorded_for_filesystem_delivery(
+    monkeypatch: pytest.MonkeyPatch, policy: dict[str, Any], expected_status: int
+) -> None:
+    """A type outside the default extensions counts when its upload was recorded for disk."""
+    client, conv_store, file_store = _attachment_fork_client(
+        monkeypatch, "sample.zip", "codex-native"
+    )
+    source_id = "e9f8f58523cec9a57d3bdf93be543e8c"
+    recorded = {"delivery": "filesystem"}
+    file_store.create(
+        "trace.gz", bytes=4, session_id=source_id, file_id="0" * 32, source_metadata=recorded
+    )
+    monkeypatch.setattr("omnigent.server.server_config.load_server_config", lambda: policy)
+
+    response = client.post(
+        f"/v1/sessions/{source_id}/fork",
+        json={"agent_id": "280d725b404d2915f9e9d6cccce91303"},
+    )
+
+    assert response.status_code == expected_status, response.text
+    if expected_status == 201:
+        fork_id = response.json()["id"]
+        copied = [f for f in file_store.files.values() if f.session_id == fork_id]
+        assert [f.source_metadata for f in copied if f.filename == "trace.gz"] == [recorded]
+    else:
+        assert not conv_store.fork_calls

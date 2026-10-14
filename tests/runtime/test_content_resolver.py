@@ -1796,40 +1796,33 @@ def test_extracts_text_from_csv_attachment() -> None:
 
 
 @pytest.mark.parametrize(
-    ("content_type", "block_type"),
+    ("filename", "content_type", "block_type", "source_metadata"),
     [
-        ("application/zip", "input_file"),
-        ("text/plain", "input_file"),
-        ("image/png", "input_image"),
+        ("bundle.zip", "application/zip", "input_file", None),
+        ("bundle.zip", "text/plain", "input_file", None),
+        ("bundle.zip", "image/png", "input_image", None),
+        # A text type recorded for filesystem delivery is not decoded either.
+        ("big.log", "text/plain", "input_file", {"delivery": "filesystem"}),
     ],
 )
-def test_archive_is_announced_to_policy_without_text(content_type: str, block_type: str) -> None:
+def test_archive_is_announced_to_policy_without_text(
+    filename: str,
+    content_type: str,
+    block_type: str,
+    source_metadata: dict[str, Any] | None,
+) -> None:
     """Policy sees filesystem files without decoding, even with misleading MIME/block types."""
-    fs, arts = _stores_with("file_zip", "bundle.zip", content_type, b"PK\x03\x04data")
+    fs, arts = _stores_with(
+        "file_disk", filename, content_type, b"PK\x03\x04data", source_metadata=source_metadata
+    )
     content = [
         {"type": "input_text", "text": "unpack this"},
-        {"type": block_type, "file_id": "file_zip"},
+        {"type": block_type, "file_id": "file_disk"},
     ]
 
     out = extract_text_attachments(content, fs, arts)  # type: ignore[arg-type]
 
-    assert out == [{"filename": "bundle.zip", "content_type": content_type, "text": ""}]
-
-
-def test_listed_text_type_is_announced_to_policy_without_text() -> None:
-    """A text file recorded for filesystem delivery is announced, not decoded."""
-    fs, arts = _stores_with(
-        "file_log",
-        "big.log",
-        "text/plain",
-        b"secret line\n",
-        source_metadata={"delivery": "filesystem"},
-    )
-    content = [{"type": "input_file", "file_id": "file_log"}]
-
-    out = extract_text_attachments(content, fs, arts)  # type: ignore[arg-type]
-
-    assert out == [{"filename": "big.log", "content_type": "text/plain", "text": ""}]
+    assert out == [{"filename": filename, "content_type": content_type, "text": ""}]
 
 
 def test_resolved_inline_block_drops_client_delivery() -> None:
