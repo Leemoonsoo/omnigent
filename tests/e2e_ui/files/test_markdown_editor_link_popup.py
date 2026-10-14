@@ -3,7 +3,8 @@
 In edit mode a plain click on a link places the caret instead of following it.
 The popup under the caret is the visible way to open the link: a web link opens
 in a new page while the app stays on its session, and a workspace-relative link
-opens in the FileViewer. Alt+Enter moves focus to the popup's Open action.
+opens in the FileViewer. Alt+Enter moves focus to the popup's Open action, and
+the popup follows its link when the FileViewer is resized.
 Seeded via the filesystem PUT endpoint (no agent run); the linked site is a
 routed stub, so the test never reaches the network.
 """
@@ -15,7 +16,7 @@ from collections.abc import Iterator
 
 import httpx
 import pytest
-from playwright.sync_api import Page, Route, expect
+from playwright.sync_api import Locator, Page, Route, expect
 
 _MARKDOWN_FILE_PATH = "editor_link_popup.md"
 _LINKED_FILE_PATH = "editor_link_popup_plan.md"
@@ -75,6 +76,34 @@ def _fulfill_external_page(route: Route) -> None:
     )
 
 
+def _left(locator: Locator) -> float:
+    box = locator.bounding_box()
+    assert box is not None
+    return box["x"]
+
+
+def _resize_handle_left_of(page: Page, panel: Locator) -> Locator:
+    """The resize handle on ``panel``'s left edge; the panel that hosts the
+    FileViewer owns it, so it can sit outside the viewer element."""
+    panel_left = _left(panel)
+    for handle in page.get_by_role("separator", name="Resize panel").all():
+        box = handle.bounding_box()
+        if box and box["height"] > 0 and abs(box["x"] - panel_left) < 8:
+            return handle
+    raise AssertionError("no resize handle on the FileViewer's left edge")
+
+
+def _drag(page: Page, handle: Locator, dx: float) -> None:
+    box = handle.bounding_box()
+    assert box is not None
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + dx, y, steps=10)
+    page.mouse.up()
+
+
 def test_editor_link_popup_opens_web_link_in_new_page(
     page: Page,
     seeded_link_popup_session: tuple[str, str],
@@ -96,6 +125,33 @@ def test_editor_link_popup_opens_web_link_in_new_page(
     expect(popup).to_contain_text(_LINK_URL)
     open_link = popup.get_by_role("link", name="Open")
     expect(open_link).to_have_attribute("href", _LINK_URL)
+
+    # Pressing the popup keeps the editor focused, so the caret, and the
+    # popup, stay in the link.
+    popup.get_by_text(_LINK_URL).click()
+    expect(editor).to_be_focused()
+    expect(popup).to_be_visible()
+
+    # Narrowing the FileViewer from its resize handle reflows the link without
+    # a window resize; the popup follows it: below the link, shifted left only
+    # as far as the viewport's right edge requires.
+    link_left = _left(link)
+    _drag(page, _resize_handle_left_of(page, file_viewer), 150)
+    expect(editor).to_be_focused()
+    assert _left(link) > link_left + 100
+    page.wait_for_function(
+        """() => {
+          const popup = document.querySelector("[data-link-bubble]");
+          const link = [...document.querySelectorAll("[contenteditable='true'] a")]
+            .find((a) => a.textContent === "ES-1");
+          if (!popup || !link) return false;
+          const p = popup.getBoundingClientRect();
+          const l = link.getBoundingClientRect();
+          const left = Math.min(l.left, window.innerWidth - 8 - p.width);
+          return Math.abs(p.left - left) < 2 && Math.abs(p.top - (l.bottom + 4)) < 2;
+        }""",
+        timeout=5_000,
+    )
 
     with page.context.expect_page(timeout=10_000) as new_page_info:
         open_link.click()

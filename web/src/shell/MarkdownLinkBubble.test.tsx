@@ -6,11 +6,11 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
-import { Link } from "@tiptap/extension-link";
 import { Markdown } from "@tiptap/markdown";
 import { StarterKit } from "@tiptap/starter-kit";
 import { FileViewerContext } from "./FileViewerContext";
 import { MarkdownLinkBubble } from "./MarkdownLinkBubble";
+import { ImageAwareLink } from "./TipTapWorkspaceImage";
 
 const CONTENT =
   "See [ES-1](https://tracker.example.com/browse/ES-1), " +
@@ -42,6 +42,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   cleanup();
   editor?.destroy();
   containerElement?.remove();
@@ -49,7 +50,7 @@ afterEach(() => {
   containerElement = null;
 });
 
-function renderBubble({ editable = true, containerRect = VIEWPORT_RECT } = {}) {
+function renderBubble({ editable = true, containerRect = VIEWPORT_RECT, content = CONTENT } = {}) {
   const container = document.createElement("div");
   container.getBoundingClientRect = () => containerRect as DOMRect;
   const editorElement = document.createElement("div");
@@ -59,12 +60,13 @@ function renderBubble({ editable = true, containerRect = VIEWPORT_RECT } = {}) {
   editor = new Editor({
     element: editorElement,
     editable,
+    // The editor's own link setup, so links parse and render as in production.
     extensions: [
       StarterKit.configure({ link: false }),
-      Link.configure({ openOnClick: false, autolink: false }),
+      ImageAwareLink.configure({ openOnClick: false, autolink: false }),
       Markdown,
     ],
-    content: CONTENT,
+    content,
     contentType: "markdown",
   });
   render(
@@ -206,6 +208,44 @@ describe("MarkdownLinkBubble", () => {
     const from = posInText(ed, "ES-1", 0);
     placeCaret(ed, from, from + 3);
     expect(bubble()).toBeNull();
+  });
+
+  it.each(["javascript:alert(1)", "data:text/html,hi"])(
+    "offers no Open for a disallowed destination (%s)",
+    (href) => {
+      const ed = renderBubble({ content: `Try [bad](${href}) now.` });
+      placeCaret(ed, posInText(ed, "bad"));
+      expect(bubble()).toBeNull();
+    },
+  );
+
+  it("shows for a link at the start of a paragraph", () => {
+    const ed = renderBubble({ content: "[ES-1](https://tracker.example.com/browse/ES-1) first." });
+    placeCaret(ed, posInText(ed, "ES-1"));
+    expect(screen.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(
+      "https://tracker.example.com/browse/ES-1",
+    );
+  });
+
+  it("follows the link when the editor viewport resizes, as a panel drag does", () => {
+    let onResize: (() => void) | undefined;
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          onResize = callback;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const ed = renderBubble();
+    placeCaret(ed, posInText(ed, "ES-1"));
+    const moved = { ...RECT, left: 300, right: 340, x: 300 };
+    Range.prototype.getClientRects = () => [moved] as unknown as DOMRectList;
+    Range.prototype.getBoundingClientRect = () => moved as DOMRect;
+    act(() => onResize?.());
+    expect((bubble() as HTMLElement).style.left).toBe(`${moved.left}px`);
   });
 
   it("does not show for an in-page # link", () => {

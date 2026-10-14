@@ -33,6 +33,10 @@ const OPEN_ACTION_TITLE = `Open link (${ALT_KEY}+Enter from the editor)`;
 const OPEN_ACTION_CLASS_NAME =
   "flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-foreground hover:bg-muted transition-colors";
 
+function elementOf(node: Node): Element | null {
+  return node instanceof Element ? node : node.parentElement;
+}
+
 function isOutside(point: Point, el: Element): boolean {
   const box = el.getBoundingClientRect();
   return (
@@ -49,11 +53,7 @@ function isOutside(point: Point, el: Element): boolean {
  * as a wide table's horizontal scroller.
  */
 function isClipped(point: Point, node: Node, container: HTMLElement | null): boolean {
-  for (
-    let el = node instanceof Element ? node : node.parentElement;
-    el && el !== container;
-    el = el.parentElement
-  ) {
+  for (let el = elementOf(node); el && el !== container; el = el.parentElement) {
     const { overflowX, overflowY } = getComputedStyle(el);
     if ((overflowX !== "visible" || overflowY !== "visible") && isOutside(point, el)) return true;
   }
@@ -80,14 +80,20 @@ function linkBubbleAt(
   const mark = [...($from.nodeAfter?.marks ?? []), ...($from.nodeBefore?.marks ?? [])].find(
     (m) => m.type === linkType,
   );
-  const href = typeof mark?.attrs.href === "string" ? mark.attrs.href : "";
-  // An in-page `#` link has nothing to open: editor headings carry no ids.
-  if (!mark || !href || href.startsWith("#")) return null;
+  if (!mark) return null;
   const range = getMarkRange($from, linkType, mark.attrs);
+  let href: string;
   let caret: Point;
   let start: Point;
   let node: Node;
   try {
+    // The rendered href, as ⌘/Ctrl-click reads: the Link extension renders a
+    // disallowed destination (`javascript:`, `data:`) with an empty href,
+    // while the mark keeps it as written.
+    const rendered = elementOf(view.domAtPos(range?.from ?? selection.from, 1).node);
+    href = rendered?.closest("a")?.getAttribute("href") ?? "";
+    // An in-page `#` link has nothing to open: editor headings carry no ids.
+    if (!href || href.startsWith("#")) return null;
     caret = view.coordsAtPos(selection.from);
     start = range ? view.coordsAtPos(range.from) : caret;
     node = view.domAtPos(selection.from).node;
@@ -149,6 +155,10 @@ export function MarkdownLinkBubble({
     scrollEl?.addEventListener("keydown", onKeyDown);
     scrollEl?.addEventListener("scroll", update, true);
     window.addEventListener("resize", update);
+    // Dragging the FileViewer's resize handle reflows the link without a
+    // window resize, and keeps the editor focused.
+    const resizeObserver = new ResizeObserver(update);
+    if (scrollEl) resizeObserver.observe(scrollEl);
     return () => {
       editor.off("selectionUpdate", update);
       editor.off("focus", update);
@@ -156,6 +166,7 @@ export function MarkdownLinkBubble({
       scrollEl?.removeEventListener("keydown", onKeyDown);
       scrollEl?.removeEventListener("scroll", update, true);
       window.removeEventListener("resize", update);
+      resizeObserver.disconnect();
     };
   }, [editor, scrollContainerRef]);
 
