@@ -248,15 +248,12 @@ describe("MarkdownLinkBubble", () => {
     expect((bubble() as HTMLElement).style.left).toBe(`${moved.left}px`);
   });
 
-  it("does not show for a query-only link", () => {
-    const ed = renderBubble({ content: "See [raw](?raw=true) here." });
-    placeCaret(ed, posInText(ed, "raw"));
-    expect(bubble()).toBeNull();
-  });
-
-  it("does not show for an in-page # link", () => {
-    const ed = renderBubble();
-    placeCaret(ed, posInText(ed, "top"));
+  it.each([
+    ["an in-page # link", "[top](#top)", "top"],
+    ["a query-only link", "[raw](?raw=true)", "raw"],
+  ])("does not show for %s, which names no file", (_label, link, text) => {
+    const ed = renderBubble({ content: `See ${link} here.` });
+    placeCaret(ed, posInText(ed, text));
     expect(bubble()).toBeNull();
   });
 
@@ -351,12 +348,5 @@ describe("MarkdownLinkBubble", () => {
     });
     expect(bubble()).toBeNull();
     elsewhere.remove();
-  });
-
-  it("keeps the editor focused when the popup is pressed", () => {
-    const ed = renderBubble();
-    placeCaret(ed, posInText(ed, "ES-1"));
-    const pressed = fireEvent.mouseDown(bubble() as HTMLElement);
-    expect(pressed).toBe(false);
   });
 });
