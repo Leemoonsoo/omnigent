@@ -244,8 +244,10 @@ Other connection providers alone do not enable the managed MCP picker.
   Manually, in a Codex-native session: type `/go`. The menu lists `/goal` under
   Commands; the first Enter fills `/goal `, and a second Enter opens the Goal
   dialog with the composer cleared. Then send `/goal <objective>`. Codex starts
-  working on the objective, and by the time the turn ends the goal marker shows
-  in the composer's workspace bar without a reload; it can appear earlier.
+  working on the objective. By the time the turn ends, without a reload, a target
+  icon appears at the right end of the workspace bar above the message box (its
+  tooltip reads "Goal active" and the objective), and **+ → Goal** is marked
+  active. Both can appear earlier.
 - **`attachments`:**
   `tests/browser_ui/chat/test_composer_attachments.py::test_attach_supported_files_and_remove`,
   `tests/browser_ui/chat/test_composer_attachments.py::test_file_dropped_on_the_transcript_attaches`,
