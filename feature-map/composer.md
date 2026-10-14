@@ -38,7 +38,8 @@ and steers messages while the agent is busy.
   top-level Polly sessions on Claude SDK or Codex), `/goal` is listed under
   Commands. `/goal <objective>`
   sends the objective for the harness to set as the goal; a bare `/goal` opens
-  the Goal dialog, as **+ → Goal** does.
+  the Goal dialog, as **+ → Goal** does. A draft with attachments is sent as
+  typed, like every command, so it does not set a goal.
 - `new-command`: `/new` opens a blank new-session composer in the same project;
   working-directory selection follows the project's defaults, not the old session.
 - `attachments`: attach button, paste, and drop onto the transcript; chips can

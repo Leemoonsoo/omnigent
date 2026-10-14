@@ -36,19 +36,30 @@ describe("useGoalState", () => {
     expect(mockGetGoal).toHaveBeenCalledWith("conv");
   });
 
-  it("clears state when disabled and fails closed on errors", async () => {
+  it("clears a loaded goal when disabled", async () => {
+    mockGetGoal.mockResolvedValueOnce({ goal: GOAL });
+
+    const { result, rerender } = renderHook(({ enabled }) => useGoalState("conv", enabled), {
+      initialProps: { enabled: true },
+    });
+    await waitFor(() => expect(result.current.goal).toEqual(GOAL));
+
+    rerender({ enabled: false });
+    expect(result.current.goal).toBeNull();
+    expect(mockGetGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when a turn-edge read errors", async () => {
     mockGetGoal.mockResolvedValueOnce({ goal: GOAL }).mockRejectedValueOnce(new Error("offline"));
 
     const { result, rerender } = renderHook(
-      ({ enabled, turnActive }) => useGoalState("conv", enabled, turnActive),
-      { initialProps: { enabled: true, turnActive: false } },
+      ({ turnActive }) => useGoalState("conv", true, turnActive),
+      { initialProps: { turnActive: false } },
     );
     await waitFor(() => expect(result.current.goal).toEqual(GOAL));
-    rerender({ enabled: true, turnActive: true });
-    await waitFor(() => expect(result.current.goal).toBeNull());
 
-    rerender({ enabled: false, turnActive: true });
-    expect(result.current.goal).toBeNull();
+    rerender({ turnActive: true });
+    await waitFor(() => expect(result.current.goal).toBeNull());
   });
 
   it("does not let an older turn-edge read overwrite a newer dialog update", async () => {
