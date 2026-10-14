@@ -236,6 +236,7 @@ import {
   formatStatusModelLabel,
   formatStatusEffortLabel,
   formatModelEffortStatusLabel,
+  nativeModelTooltip,
 } from "@/lib/composerModelLabel";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
@@ -4741,6 +4742,7 @@ function SessionHarnessPicker({
                         ? selectFusionModel(composerFusion.default)
                         : selectModel(supportsModelReset && model.isDefault ? null : model.id),
                     testId: `composer-agent-model-${model.id}`,
+                    title: nativeModelTooltip(model),
                     className: "whitespace-normal break-words",
                     data: { "data-model-id": model.id },
                   })),
