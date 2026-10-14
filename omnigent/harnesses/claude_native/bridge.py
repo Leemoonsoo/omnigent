@@ -616,6 +616,10 @@ class ClaudeUserPromptPending(RuntimeError):
     """A native question or permission prompt must be answered before injection."""
 
 
+class ClaudeMessageNotAccepted(RuntimeError):
+    """The submitted draft remained in Claude's input box until the deadline."""
+
+
 @contextlib.contextmanager
 def cancellable_injection(cancel_event: threading.Event) -> Iterator[None]:
     """Bind a cancellation flag inherited by this delivery's ``asyncio.to_thread`` worker."""
@@ -4383,7 +4387,7 @@ def _paste_and_submit(
         ) from exc
     if accepted:
         return
-    raise RuntimeError(
+    raise ClaudeMessageNotAccepted(
         f"Claude Code did not accept the submitted message within {_SUBMIT_VERIFY_TIMEOUT_S}s "
         "(the draft is still in the input box). The message was not delivered."
     )
@@ -5381,6 +5385,7 @@ def _run_tmux(socket_path: str, *args: str) -> None:
         target = args[args.index("-t") + 1]
         args = ("copy-mode", "-q", "-t", target, ";", *args)
     cmd = ["tmux", "-S", socket_path, *args]
+    operation = args[0] if args else ""
     try:
         proc = subprocess.run(
             cmd,
@@ -5390,8 +5395,13 @@ def _run_tmux(socket_path: str, *args: str) -> None:
             timeout=_TMUX_SEND_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired as exc:
+        delivery_diagnostics.record_tmux_failure(operation, timeout_s=_TMUX_SEND_TIMEOUT_S)
         raise RuntimeError(f"tmux command timed out after {_TMUX_SEND_TIMEOUT_S}s") from exc
+    except OSError as exc:
+        delivery_diagnostics.record_tmux_failure(operation, os_errno=exc.errno)
+        raise
     if proc.returncode != 0:
+        delivery_diagnostics.record_tmux_failure(operation, returncode=proc.returncode)
         detail = proc.stderr.strip() or proc.stdout.strip() or "<no output>"
         raise RuntimeError(f"tmux command failed (rc={proc.returncode}): {detail}")
 
