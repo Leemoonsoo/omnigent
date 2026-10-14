@@ -7,6 +7,7 @@ import {
   formatStatusEffortLabel,
   formatStatusModelLabel,
   nativeModelLabel,
+  nativeModelTooltip,
   normalizeEffortLabel,
 } from "@/lib/composerModelLabel";
 
@@ -112,6 +113,16 @@ describe("catalog model labels", () => {
     expect(formatStatusModelLabel(model, [{ id: model, displayName: "GPT-5.6 Luna" }])).toBe(
       "GPT-5.6 Luna",
     );
+  });
+
+  it("names the exact model a row launches in its hover text", () => {
+    expect(nativeModelTooltip({ id: "opus", model: "system.ai.claude-opus-4-8[1m]" })).toBe(
+      "system.ai.claude-opus-4-8[1m]",
+    );
+    expect(nativeModelTooltip({ id: "gpt-5.5" })).toBe("gpt-5.5");
+    expect(
+      nativeModelTooltip({ id: "fusion", fusion: { combos: [], default: "fusion-a-sidekick-b" } }),
+    ).toBeUndefined();
   });
 
   it("retains the unknown and unmarked default states", () => {
