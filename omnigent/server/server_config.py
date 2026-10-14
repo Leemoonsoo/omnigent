@@ -36,7 +36,7 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -314,8 +314,17 @@ def parse_filesystem_attachment_policy(raw: object) -> FilesystemAttachmentPolic
         value = entry.strip().lower()
         if value == "*":
             all_types = True
-        else:
-            extensions.add(value if value.startswith(".") else f".{value}")
+            continue
+        extension = value if value.startswith(".") else f".{value}"
+        if PurePath(f"file{extension}").suffix != extension:
+            # Files match on their last extension only, so ".tar.gz" would match nothing.
+            logger.warning(
+                "filesystem_attachment_allowed_extensions entry %r is not a single "
+                "extension such as '.gz', skipping",
+                entry,
+            )
+            continue
+        extensions.add(extension)
     if entries and not extensions and not all_types:
         logger.warning(
             "filesystem_attachment_allowed_extensions=%r has no usable entry, using the defaults",

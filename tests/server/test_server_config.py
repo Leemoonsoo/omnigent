@@ -648,6 +648,9 @@ _DEFAULT_EXTENSIONS = {".zip", ".docx", ".xlsx", ".pptx", ".db", ".sqlite", ".sq
         ([42, ".gz"], {".gz"}, False),
         ([42], _DEFAULT_EXTENSIONS, False),
         ({"gz": True}, _DEFAULT_EXTENSIONS, False),
+        # Files match on their last extension, so a compound entry can never match.
+        ([".tar.gz", ".har"], {".har"}, False),
+        ([".tar.gz"], _DEFAULT_EXTENSIONS, False),
     ],
 )
 def test_parse_filesystem_attachment_policy(

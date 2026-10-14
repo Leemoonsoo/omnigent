@@ -88,6 +88,8 @@ reads a local copy outside the working checkout. See
 `filesystem_attachment_allowed_extensions` accepts:
 
 - a list of extensions, which replaces the defaults, e.g. `[".zip", ".gz", ".har"]`.
+  Files match on their last extension, so list `.gz` for `.tar.gz` files; a
+  compound entry such as `.tar.gz` is skipped with a warning.
   A listed text or image type, such as `.log` or `.png`, is delivered as a file,
   with its original bytes, instead of inline. It then needs a Claude Code or
   Codex session, like any other file delivered as a file.

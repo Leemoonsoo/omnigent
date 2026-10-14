@@ -8246,16 +8246,23 @@ describe("NewChatLandingScreen attachments", () => {
     );
   });
 
-  it("offers the server's filesystem attachment types in the file picker", () => {
-    renderLanding({ filesystem_attachments: { extensions: [".gz", ".har"], all_types: false } });
+  it.each([
+    {
+      policy: { extensions: [".gz", ".har"], all_types: false },
+      offered: [".gz", ".har"],
+      withheld: [".zip"],
+    },
+    // No accept filter at all: every file can be picked.
+    { policy: { extensions: [".zip"], all_types: true }, offered: null, withheld: [] },
+  ])("offers the server's filesystem attachment types in the file picker", (expected) => {
+    renderLanding({ filesystem_attachments: expected.policy });
     const accept = screen.getByTestId("new-chat-landing-file-input").getAttribute("accept");
-    expect(accept?.split(",")).toEqual(expect.arrayContaining([".gz", ".har"]));
-    expect(accept).not.toContain(".zip");
-  });
-
-  it("offers every file when the server delivers all types as files", () => {
-    renderLanding({ filesystem_attachments: { extensions: [".zip"], all_types: true } });
-    expect(screen.getByTestId("new-chat-landing-file-input").hasAttribute("accept")).toBe(false);
+    if (expected.offered === null) {
+      expect(accept).toBeNull();
+      return;
+    }
+    expect(accept?.split(",")).toEqual(expect.arrayContaining(expected.offered));
+    for (const extension of expected.withheld) expect(accept).not.toContain(extension);
   });
 
   it("keeps the supported files from a mixed drop and names the rejected one", () => {
