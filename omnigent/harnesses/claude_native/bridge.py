@@ -5381,11 +5381,11 @@ def _run_tmux(socket_path: str, *args: str) -> None:
     import subprocess
 
     _check_injection_cancelled()
-    if args[:1] == ("send-keys",) and "-t" in args:
+    operation = args[0] if args else ""
+    if operation == "send-keys" and "-t" in args:
         target = args[args.index("-t") + 1]
         args = ("copy-mode", "-q", "-t", target, ";", *args)
     cmd = ["tmux", "-S", socket_path, *args]
-    operation = args[0] if args else ""
     try:
         proc = subprocess.run(
             cmd,
