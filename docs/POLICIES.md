@@ -88,7 +88,8 @@ reads a local copy outside the working checkout. See
 `filesystem_attachment_allowed_extensions` accepts:
 
 - a list of extensions, which replaces the defaults, e.g. `[".zip", ".gz", ".har"]`.
-  A listed text type, such as `.log`, is delivered as a file instead of inline.
+  A listed text or image type, such as `.log` or `.png`, is delivered as a file,
+  with its original bytes, instead of inline.
   A default extension left off the list is refused, even when the browser
   labels it as text.
 - `[]`, which turns filesystem attachments off.

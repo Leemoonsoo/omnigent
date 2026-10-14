@@ -2453,12 +2453,14 @@ async def test_copy_refuses_a_workspace_file_for_a_harness_without_a_workspace(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recorded_type", [False, True], ids=["default-type", "recorded-gz"])
 async def test_copy_spends_the_child_workspace_quota(
     file_client: httpx.AsyncClient,
     file_conv_store: _ConversationStore,
     file_store: Any,
     artifact_store: _InMemoryArtifactStore,
     monkeypatch: pytest.MonkeyPatch,
+    recorded_type: bool,
 ) -> None:
     """Copies count against the child's workspace quota, like uploads."""
     from omnigent.harness_plugins import CLAUDE_NATIVE_CODING_AGENT
@@ -2471,7 +2473,19 @@ async def test_copy_spends_the_child_workspace_quota(
         CLAUDE_NATIVE_CODING_AGENT.presentation_labels
     )
     first = _seed_parent_zip(file_store, artifact_store, "first.zip")
-    second = _seed_parent_zip(file_store, artifact_store, "second.zip")
+    if recorded_type:
+        # Counted by its recorded delivery, since .gz isn't a default extension.
+        stored = file_store.create(
+            session_id="b460374fc8e697b296708f52dc9d8179",
+            filename="second.gz",
+            bytes=2,
+            content_type="application/gzip",
+            source_metadata={"delivery": "filesystem"},
+        )
+        artifact_store.put(stored.id, b"\x1f\x8b")
+        second = stored.id
+    else:
+        second = _seed_parent_zip(file_store, artifact_store, "second.zip")
     url = "/v1/sessions/405bfe154d5c0e795a2b87021bc897bf/resources/files:copy"
     source = "b460374fc8e697b296708f52dc9d8179"
 
@@ -9328,14 +9342,22 @@ async def test_native_send_rechecks_runtime_after_upload(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retained_history", [False, True])
+@pytest.mark.parametrize(
+    ("retained_history", "host_has_attachments", "status"),
+    [(False, True, 409), (True, True, 202), (True, False, 409)],
+)
 async def test_native_send_requires_delivery_support_for_new_types(
     file_client: httpx.AsyncClient,
     file_app: FastAPI,
     file_conv_store: _ConversationStore,
     retained_history: bool,
+    host_has_attachments: bool,
+    status: int,
 ) -> None:
-    """Only a file sent now needs the runtime to deliver types beyond the defaults."""
+    """Only a file sent now needs the runtime to deliver types beyond the defaults.
+
+    A recorded file in retained history still needs filesystem attachment support.
+    """
     from omnigent.entities import MessageData
     from omnigent.inner.native_attachments import (
         CAP_FILESYSTEM_ATTACHMENTS,
@@ -9367,20 +9389,20 @@ async def test_native_send_requires_delivery_support_for_new_types(
             )
         )
         content = [{"type": "input_text", "text": "Read the attached trace again"}]
-    file_app.state.host_registry.get("host_files").hello.capabilities = [
-        CAP_FILESYSTEM_ATTACHMENTS
-    ]
+    file_app.state.host_registry.get("host_files").hello.capabilities = (
+        [CAP_FILESYSTEM_ATTACHMENTS] if host_has_attachments else []
+    )
     response = await file_client.post(
         f"/v1/sessions/{session_id}/events",
         json={"type": "message", "data": {"role": "user", "content": content}},
     )
-    if retained_history:
-        assert response.status_code == 202, response.text
+    assert response.status_code == status, response.text
+    if status == 202:
         assert runner.post_json_calls
     else:
-        assert response.status_code == 409, response.text
-        assert "this file type" in response.text
         assert runner.post_json_calls == []
+        if not retained_history:
+            assert "this file type" in response.text
 
 
 @pytest.mark.asyncio

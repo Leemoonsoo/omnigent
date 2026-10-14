@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
-import { validateAttachments } from "@/lib/attachments";
+import { attachmentAccept, validateAttachments } from "@/lib/attachments";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { getCachedServerInfo } from "@/lib/capabilities";
 
 export interface UseComposerAttachmentsOptions {
@@ -21,6 +22,8 @@ export interface UseComposerAttachmentsOptions {
 export interface ComposerAttachmentsApi {
   files: File[];
   attachmentError: string | null;
+  /** The file picker's `accept` filter for the server's attachment policy. */
+  accept: string | undefined;
   /** Validate, append the accepted files, and surface the rejections. */
   addFiles: (incoming: File[]) => void;
   /** Drop one file by index and clear the rejection notice. */
@@ -121,9 +124,13 @@ export function useComposerAttachments({
     setAttachmentError(null);
   }, []);
 
+  const info = useServerInfo();
+  const accept = attachmentAccept(info === "loading" ? null : info.filesystem_attachments);
+
   return {
     files,
     attachmentError,
+    accept,
     addFiles,
     removeFile,
     replaceFiles,

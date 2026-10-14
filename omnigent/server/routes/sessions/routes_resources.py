@@ -1806,7 +1806,8 @@ def register_resources_routes(
             filename = file.filename
             # Persist original dimensions only after a downscale.
             source_dims: tuple[int, int] | None = None
-            if content_type in _COMPRESSIBLE_IMAGE_MIMES:
+            # An image delivered as a file keeps its original bytes.
+            if content_type in _COMPRESSIBLE_IMAGE_MIMES and not filesystem_required:
                 # Compressible images carry the large cap and the decode, so they are
                 # the server's peak upload memory. The body is already spooled to
                 # disk by the multipart parser, so gate the in-memory read + the

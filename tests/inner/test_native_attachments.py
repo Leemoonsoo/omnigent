@@ -565,7 +565,10 @@ def test_unnamed_inline_bytes_are_classified_by_mime() -> None:
 
     assert inline_filesystem_attachment_name(content) is None
     assert inline_filesystem_attachment_name(content, requires) == "application/gzip"
-    assert seen == [("", "application/gzip")]
+    assert seen == [("attachment.gz", "application/gzip")]
+    # The default extensions apply to unnamed bytes too.
+    unnamed_zip = [{"type": "input_file", "file_data": "data:application/zip;base64,UEs="}]
+    assert inline_filesystem_attachment_name(unnamed_zip) == "application/zip"
 
 
 @pytest.mark.parametrize(

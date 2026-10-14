@@ -234,6 +234,11 @@ def test_unsupported_type_message_names_the_configured_extensions(
 
 
 @pytest.mark.parametrize(
+    "policy",
+    [FilesystemAttachmentPolicy(all_types=True), FilesystemAttachmentPolicy(frozenset({".gz"}))],
+    ids=["all-types", "listed"],
+)
+@pytest.mark.parametrize(
     "block,named",
     [
         (
@@ -249,12 +254,19 @@ def test_unsupported_type_message_names_the_configured_extensions(
             "application/gzip",
         ),
     ],
+    ids=["named", "unnamed"],
 )
-@pytest.mark.usefixtures("all_types_policy")
-def test_all_types_policy_refuses_inline_bytes_for_file_types(
-    upload_client: tuple[TestClient, str], block: dict[str, str], named: str
+def test_policy_refuses_inline_bytes_for_file_types(
+    upload_client: tuple[TestClient, str],
+    monkeypatch: pytest.MonkeyPatch,
+    policy: FilesystemAttachmentPolicy,
+    block: dict[str, str],
+    named: str,
 ) -> None:
     """A type delivered as a file must be uploaded, so the upload checks apply."""
+    monkeypatch.setattr(
+        "omnigent.server.server_config.filesystem_attachment_policy", lambda: policy
+    )
     client, session_id = upload_client
     resp = client.post(
         f"/v1/sessions/{session_id}/events",
@@ -453,6 +465,38 @@ def test_upload_large_image_is_compressed_under_budget(
     # Opaque image re-encodes (WebP preferred, JPEG fallback), so the stored
     # name is realigned to match the new type.
     assert body["name"] in ("screenshot.webp", "screenshot.jpg")
+
+
+def test_image_delivered_as_a_file_keeps_its_bytes(
+    upload_client: tuple[TestClient, str], db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listed image type skips inline compression, so the agent gets the original file."""
+    import os
+    from io import BytesIO
+
+    from PIL import Image
+
+    from omnigent.runtime.content_resolver import IMAGE_MODEL_BUDGET_BYTES
+
+    monkeypatch.setattr(
+        "omnigent.server.server_config.filesystem_attachment_policy",
+        lambda: FilesystemAttachmentPolicy(frozenset({".png"})),
+    )
+    client, session_id = upload_client
+    side = 1600
+    buffer = BytesIO()
+    Image.frombytes("RGB", (side, side), os.urandom(side * side * 3)).save(buffer, format="PNG")
+    payload = buffer.getvalue()
+    assert len(payload) > IMAGE_MODEL_BUDGET_BYTES
+
+    resp = _upload(client, session_id, "screenshot.png", payload, "image/png")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["name"] == "screenshot.png"
+    assert body["metadata"]["bytes"] == len(payload)
+    stored = SqlAlchemyFileStore(db_uri).get(body["id"])
+    assert stored is not None
+    assert stored.source_metadata == {"delivery": "filesystem"}
 
 
 def test_upload_text_just_under_limit_succeeds(upload_client: tuple[TestClient, str]) -> None:

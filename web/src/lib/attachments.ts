@@ -153,6 +153,16 @@ const DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS = new Set([
   ".sqlite3",
 ]);
 
+/**
+ * The attach button's file-picker filter for *policy*, or `undefined` to
+ * offer every file when the server delivers all types as files.
+ */
+export function attachmentAccept(policy?: FilesystemAttachmentsInfo | null): string | undefined {
+  if (policy?.all_types) return undefined;
+  const extensions = policy ? policy.extensions : [...DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS];
+  return ["image/*", "application/pdf", "text/*", "application/json", ...extensions].join(",");
+}
+
 function extensionOf(filename: string): string {
   const dot = filename.lastIndexOf(".");
   return dot >= 0 ? filename.slice(dot).toLowerCase() : "";

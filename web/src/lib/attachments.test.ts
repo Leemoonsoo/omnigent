@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ATTACHMENT_SIZE_LIMITS_MB,
+  attachmentAccept,
   attachmentFilename,
   attachmentKey,
   classifyAttachment,
@@ -99,6 +100,18 @@ describe("classifyAttachment", () => {
     expect(classifyAttachment(makeFile("a.zip", "text/plain"), logs)).toBeNull();
     const none = { extensions: [], all_types: false };
     expect(classifyAttachment(makeFile("a.zip", "text/plain"), none)).toBeNull();
+  });
+});
+
+describe("attachmentAccept", () => {
+  it("lists inline types plus the policy's filesystem extensions", () => {
+    expect(attachmentAccept()).toBe(
+      "image/*,application/pdf,text/*,application/json,.zip,.docx,.xlsx,.pptx,.db,.sqlite,.sqlite3",
+    );
+    expect(attachmentAccept({ extensions: [".gz"], all_types: false })).toBe(
+      "image/*,application/pdf,text/*,application/json,.gz",
+    );
+    expect(attachmentAccept({ extensions: [".zip"], all_types: true })).toBeUndefined();
   });
 });
 

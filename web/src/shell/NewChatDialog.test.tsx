@@ -8182,6 +8182,18 @@ describe("NewChatLandingScreen attachments", () => {
     );
   });
 
+  it("offers the server's filesystem attachment types in the file picker", () => {
+    renderLanding({ filesystem_attachments: { extensions: [".gz", ".har"], all_types: false } });
+    const accept = screen.getByTestId("new-chat-landing-file-input").getAttribute("accept");
+    expect(accept?.split(",")).toEqual(expect.arrayContaining([".gz", ".har"]));
+    expect(accept).not.toContain(".zip");
+  });
+
+  it("offers every file when the server delivers all types as files", () => {
+    renderLanding({ filesystem_attachments: { extensions: [".zip"], all_types: true } });
+    expect(screen.getByTestId("new-chat-landing-file-input").hasAttribute("accept")).toBe(false);
+  });
+
   it("keeps the supported files from a mixed drop and names the rejected one", () => {
     renderLanding();
     const composer = screen.getByTestId("new-chat-landing-composer");
