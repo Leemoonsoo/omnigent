@@ -248,6 +248,12 @@ describe("MarkdownLinkBubble", () => {
     expect((bubble() as HTMLElement).style.left).toBe(`${moved.left}px`);
   });
 
+  it("does not show for a query-only link", () => {
+    const ed = renderBubble({ content: "See [raw](?raw=true) here." });
+    placeCaret(ed, posInText(ed, "raw"));
+    expect(bubble()).toBeNull();
+  });
+
   it("does not show for an in-page # link", () => {
     const ed = renderBubble();
     placeCaret(ed, posInText(ed, "top"));

@@ -92,8 +92,9 @@ function linkBubbleAt(
     // while the mark keeps it as written.
     const rendered = elementOf(view.domAtPos(range?.from ?? selection.from, 1).node);
     href = rendered?.closest("a")?.getAttribute("href") ?? "";
-    // An in-page `#` link has nothing to open: editor headings carry no ids.
-    if (!href || href.startsWith("#")) return null;
+    // An in-page `#` link has nothing to open, as editor headings carry no
+    // ids, and a query-only `?` link names no file.
+    if (!href || /^[?#]/.test(href)) return null;
     caret = view.coordsAtPos(selection.from);
     start = range ? view.coordsAtPos(range.from) : caret;
     node = view.domAtPos(selection.from).node;
