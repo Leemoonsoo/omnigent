@@ -553,6 +553,28 @@ async def test_info_reports_the_filesystem_attachment_policy(
     assert info["filesystem_attachments"] == expected
 
 
+async def test_info_evaluates_a_callable_policy_per_request(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+) -> None:
+    """A callable policy can change while the server runs, e.g. behind a feature flag."""
+    policies = iter([[".gz"], ["*"]])
+    app = _build_branding_app(
+        db_uri,
+        tmp_path,
+        "attachments",
+        filesystem_attachment_allowed_extensions=lambda: next(policies),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = (await client.get("/v1/info")).json()["filesystem_attachments"]
+        second = (await client.get("/v1/info")).json()["filesystem_attachments"]
+
+    assert first == {"extensions": [".gz"], "all_types": False}
+    assert second["all_types"] is True
+
+
 def test_session_title_instructions_are_wired_into_coordinator(
     db_uri: str,
     runtime_init: None,

@@ -2652,6 +2652,7 @@ def test_fork_attachment_checks_paginate_before_mutation(
 
 
 @pytest.mark.parametrize("cutoff", [None, "resp_before"])
+@pytest.mark.parametrize("second_file", ["unsent.docx", "recorded.gz"])
 @pytest.mark.parametrize(
     "policy,expected_status,message",
     [
@@ -2673,19 +2674,29 @@ def test_fork_attachment_checks_paginate_before_mutation(
 def test_fork_enforces_current_policy_before_creating_destination(
     monkeypatch: pytest.MonkeyPatch,
     cutoff: str | None,
+    second_file: str,
     policy: dict[str, Any],
     expected_status: int,
     message: str,
 ) -> None:
-    """All copied files count, including unsent uploads and files beyond the cutoff."""
+    """All copied files count, including unsent uploads and files beyond the cutoff.
+
+    A file outside the default extensions counts when it was recorded for filesystem delivery.
+    """
     client, conv_store, file_store = _attachment_fork_client(
         monkeypatch, "sample.zip", "codex-native"
     )
     source_id = "e9f8f58523cec9a57d3bdf93be543e8c"
     for index, (filename, size) in enumerate(
-        [("unsent.docx", 4), ("ordinary.txt", 100), ("image.png", 100)]
+        [(second_file, 4), ("ordinary.txt", 100), ("image.png", 100)]
     ):
-        file_store.create(filename, bytes=size, session_id=source_id, file_id=f"{index:032x}")
+        file_store.create(
+            filename,
+            bytes=size,
+            session_id=source_id,
+            file_id=f"{index:032x}",
+            source_metadata={"delivery": "filesystem"} if filename.endswith(".gz") else None,
+        )
     original_files = dict(file_store.files)
     monkeypatch.setattr("omnigent.server.server_config.load_server_config", lambda: policy)
 
