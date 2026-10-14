@@ -970,12 +970,12 @@ async def test_health_unbound_imported_session_reads_offline(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("host_sharded", "status", "code"),
-    [(True, 400, "wrong_replica"), (False, 409, "conflict")],
+    [(True, 400, "wrong_replica"), (None, 409, "conflict")],
 )
 async def test_host_route_for_live_host_on_another_replica(
     db_uri: str,
     tmp_path: Path,
-    host_sharded: bool,
+    host_sharded: bool | None,
     status: int,
     code: str,
 ) -> None:
@@ -985,6 +985,7 @@ async def test_host_route_for_live_host_on_another_replica(
     The web client retries a host-keyed request without its routing key only
     on 400 ``wrong_replica``. A 409 on a sharded deployment leaves the new-chat
     model picker loading for a host that is online on another replica.
+    ``None`` omits ``host_sharded`` to cover the constructor default.
     """
     from omnigent.server.app import create_app
     from omnigent.server.routes._host_launch import configure_host_sharding
@@ -999,6 +1000,7 @@ async def test_host_route_for_live_host_on_another_replica(
     # Online and freshly seen, but its tunnel never registered on this replica.
     host_store.upsert_on_connect(host_id, "laptop", "local")
     artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    sharding = {} if host_sharded is None else {"host_sharded": host_sharded}
     try:
         app = create_app(
             agent_store=SqlAlchemyAgentStore(db_uri),
@@ -1007,7 +1009,7 @@ async def test_host_route_for_live_host_on_another_replica(
             artifact_store=artifact_store,
             host_store=host_store,
             agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
-            host_sharded=host_sharded,
+            **sharding,
         )
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:

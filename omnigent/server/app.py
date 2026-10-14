@@ -1488,8 +1488,10 @@ def create_app(
     :param host_sharded: Whether replicas sit behind a router that keys host
         and runner tunnels by host_id. When ``True``, a host-scoped request
         for a live host whose tunnel is on another replica returns 400
-        ``wrong_replica`` so the client retries without the routing key;
-        otherwise it returns 409 "host is offline".
+        ``wrong_replica``; otherwise it returns 409 "host is offline". The
+        400 recovers only for a client that sent the slice-key header and
+        retries without it, which the web client does only for requests it
+        keyed itself.
     :returns: A fully configured :class:`FastAPI` application.
     :raises ValueError: If ``permission_store`` is provided
         without an ``auth_provider``.
