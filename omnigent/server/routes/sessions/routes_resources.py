@@ -79,6 +79,7 @@ from omnigent.server.routes._sessions.helpers import (
     _await_settled_managed_launch,
     _enforce_filesystem_attachment_policy,
     _file_content_etag,
+    _filesystem_attachment_policy,
     _get_runner_client_for_resource_access,
     _if_none_match_matches,
     _load_agent_spec_for_session,
@@ -180,7 +181,7 @@ def register_resources_routes(
     """Register the resources routes on router."""
 
     async def _require_filesystem_attachment_support(
-        request: Request, conv: Conversation, filename: str
+        request: Request, conv: Conversation, filename: str, capability: str
     ) -> None:
         await _require_filesystem_attachment_harness(conv, filename)
         tracker = getattr(request.app.state, "managed_launches", None)
@@ -221,6 +222,7 @@ def register_resources_routes(
             host_registry=host_registry,
             tunnel_registry=tunnel_registry,
             runner_router=runner_router,
+            capability=capability,
         )
 
     @router.get(
@@ -1710,12 +1712,19 @@ def register_resources_routes(
                 "filename is required",
                 code=ErrorCode.INVALID_INPUT,
             )
-        from omnigent.inner.native_attachments import requires_filesystem
+        from omnigent.inner.native_attachments import (
+            DELIVERY_KEY,
+            FILESYSTEM_DELIVERY,
+            INLINE_DELIVERY,
+            filesystem_attachment_capability,
+            requires_filesystem,
+        )
         from omnigent.runtime.content_resolver import (
             _COMPRESSIBLE_IMAGE_MIMES,
             MAX_ATTACHMENT_UPLOAD_BYTES,
             ImageCompressionError,
             _resolve_content_type,
+            attachment_delivery,
             attachment_text_type_for_extension,
             attachment_upload_limit,
             compress_image_attachment,
@@ -1728,13 +1737,21 @@ def register_resources_routes(
             file.content_type,
             file.filename,
         )
-        # Check the filename first so a misleading MIME cannot skip the
-        # harness requirement or the quotas for files that need local tools.
-        filesystem_required = requires_filesystem(file.filename)
+        # Listed extensions are checked by name first so a misleading MIME cannot
+        # skip the harness requirement or the quotas for files that need local tools.
+        delivery = attachment_delivery(
+            file.filename, file.content_type, _filesystem_attachment_policy(request.app.state)
+        )
+        filesystem_required = delivery == "filesystem"
         if filesystem_required:
             # Drop the declared type so the file is never stored as text.
             content_type = _resolve_content_type("application/octet-stream", file.filename)
-            await _require_filesystem_attachment_support(request, conv, file.filename)
+            await _require_filesystem_attachment_support(
+                request,
+                conv,
+                file.filename,
+                filesystem_attachment_capability([file.filename]),
+            )
         # Hold the quota check through the store below, so parallel uploads can't
         # all spend the same remaining allowance.
         attachment_lock = (
@@ -1802,14 +1819,20 @@ def register_resources_routes(
                 # PDF/text/SVG and other non-compressed types use their smaller
                 # per-type caps and aren't decoded, so they read outside the gate.
                 content = await _read_upload_capped(file, read_limit)
+            source_metadata: dict[str, Any] | None = (
+                {"width": source_dims[0], "height": source_dims[1]} if source_dims else None
+            )
+            # Record the decision so delivery doesn't change if the policy does.
+            if filesystem_required:
+                source_metadata = {DELIVERY_KEY: FILESYSTEM_DELIVERY}
+            elif requires_filesystem(file.filename):
+                source_metadata = {**(source_metadata or {}), DELIVERY_KEY: INLINE_DELIVERY}
             stored = file_store.create(
                 session_id=session_id,
                 filename=filename,
                 bytes=len(content),
                 content_type=content_type,
-                source_metadata=(
-                    {"width": source_dims[0], "height": source_dims[1]} if source_dims else None
-                ),
+                source_metadata=source_metadata,
             )
             try:
                 artifact_store.put(stored.id, content)
@@ -2103,16 +2126,23 @@ def register_resources_routes(
 
         # Files requiring filesystem tools entering a session pass the same checks as an upload,
         # held under the same lock, so a copy can't skip the harness or quotas.
-        from omnigent.inner.native_attachments import requires_filesystem
+        from omnigent.inner.native_attachments import (
+            filesystem_attachment_capability,
+            uses_filesystem_delivery,
+        )
 
         filesystem_sources = [
             stored
             for stored in sources
-            if stored.filename and requires_filesystem(stored.filename)
+            if stored.filename
+            and uses_filesystem_delivery(stored.filename, stored.source_metadata)
         ]
         if filesystem_sources:
             await _require_filesystem_attachment_support(
-                request, conv, filesystem_sources[0].filename or ""
+                request,
+                conv,
+                filesystem_sources[0].filename or "",
+                filesystem_attachment_capability(stored.filename for stored in filesystem_sources),
             )
         attachment_lock = (
             _attachment_upload_lock(session_id) if filesystem_sources else contextlib.nullcontext()

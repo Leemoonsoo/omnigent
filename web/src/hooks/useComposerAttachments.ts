@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { validateAttachments } from "@/lib/attachments";
+import { getCachedServerInfo } from "@/lib/capabilities";
 
 export interface UseComposerAttachmentsOptions {
   /**
@@ -44,6 +45,11 @@ export interface ComposerAttachmentsApi {
   clear: () => void;
 }
 
+/** The server's filesystem attachment policy, read when files are added. */
+function filesystemAttachmentPolicy() {
+  return getCachedServerInfo()?.filesystem_attachments ?? null;
+}
+
 /**
  * Attachment state for a composer: the accepted files plus the rejection
  * notice from client-side validation (`@/lib/attachments`). Every returned
@@ -66,7 +72,7 @@ export function useComposerAttachments({
   onRemovedRef.current = onRemoved;
 
   const addFiles = useCallback((incoming: File[]) => {
-    const { accepted, errors } = validateAttachments(incoming);
+    const { accepted, errors } = validateAttachments(incoming, filesystemAttachmentPolicy());
     if (accepted.length > 0) {
       setFiles((prev) => [...prev, ...accepted]);
       onAcceptedRef.current?.(accepted);
@@ -81,7 +87,7 @@ export function useComposerAttachments({
   }, []);
 
   const replaceFiles = useCallback((incoming: File[]) => {
-    const { accepted, errors } = validateAttachments(incoming);
+    const { accepted, errors } = validateAttachments(incoming, filesystemAttachmentPolicy());
     setFiles(accepted);
     setAttachmentError(errors.length > 0 ? errors.join("\n") : null);
   }, []);

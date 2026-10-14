@@ -10,6 +10,8 @@
  * UX only. Keep the limits in sync with the Python constants.
  */
 
+import type { FilesystemAttachmentsInfo } from "@/lib/capabilities";
+
 /**
  * Per-type upload size limits, in megabytes. Mirrors the server caps.
  *
@@ -138,9 +140,10 @@ const TEXT_CODE_EXTENSIONS = new Set([
   ".ipynb",
 ]);
 
-// Archives, Office documents, and databases require filesystem tools.
-// Mirrors _FILESYSTEM_ATTACHMENT_EXTENSIONS in omnigent/inner/native_attachments.py.
-const FILESYSTEM_ATTACHMENT_EXTENSIONS = new Set([
+// Archives, Office documents, and databases require filesystem tools unless the
+// server reports its own policy. Mirrors DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS
+// in omnigent/inner/native_attachments.py.
+const DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS = new Set([
   ".zip",
   ".docx",
   ".xlsx",
@@ -159,13 +162,20 @@ function extensionOf(filename: string): string {
  * Classify a file into an attachment category, or `null` if its type is not
  * supported (e.g. audio, video, unrecognised binaries). Files requiring local
  * tools are identified by extension; other types also use the browser MIME.
+ * `policy` is the server's filesystem attachment policy from `/v1/info`.
  */
-export function classifyAttachment(file: File): AttachmentCategory | null {
+export function classifyAttachment(
+  file: File,
+  policy?: FilesystemAttachmentsInfo | null,
+): AttachmentCategory | null {
   const type = file.type || "";
   const ext = extensionOf(file.name || "");
+  const filesystemExtensions = policy
+    ? new Set(policy.extensions)
+    : DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS;
 
   // Match the server even when a browser mislabels a ZIP as text/plain.
-  if (FILESYSTEM_ATTACHMENT_EXTENSIONS.has(ext)) return "file";
+  if (filesystemExtensions.has(ext)) return "file";
   if (type.startsWith("image/")) return "image";
   if (type === "application/pdf" || ext === ".pdf") return "pdf";
   if (
@@ -175,7 +185,7 @@ export function classifyAttachment(file: File): AttachmentCategory | null {
   ) {
     return "text";
   }
-  return null;
+  return policy?.all_types ? "file" : null;
 }
 
 export interface AttachmentValidation {
@@ -190,13 +200,16 @@ export interface AttachmentValidation {
  * rejected when its type is unsupported, or when it exceeds the per-type
  * size limit.
  */
-export function validateAttachments(files: File[]): AttachmentValidation {
+export function validateAttachments(
+  files: File[],
+  policy?: FilesystemAttachmentsInfo | null,
+): AttachmentValidation {
   const accepted: File[] = [];
   const errors: string[] = [];
 
   for (const file of files) {
     const name = file.name || "file";
-    const category = classifyAttachment(file);
+    const category = classifyAttachment(file, policy);
     if (category === null) {
       errors.push(
         `"${name}" can't be attached: only images, PDF, text/code, archives, ` +

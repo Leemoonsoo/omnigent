@@ -81,6 +81,21 @@ describe("classifyAttachment", () => {
     // .csv tagged as an office MIME still uses the text size limit.
     expect(classifyAttachment(makeFile("data.csv", "application/vnd.ms-excel"))).toBe("text");
   });
+
+  it("follows the server's filesystem attachment policy", () => {
+    const allTypes = { extensions: [".zip"], all_types: true };
+    // Inline types stay inline; anything else becomes a file.
+    expect(classifyAttachment(makeFile("notes.txt", "text/plain"), allTypes)).toBe("text");
+    expect(classifyAttachment(makeFile("a.png", "image/png"), allTypes)).toBe("image");
+    expect(classifyAttachment(makeFile("trace.gz", "application/gzip"), allTypes)).toBe("file");
+    expect(classifyAttachment(makeFile("site.har", ""), allTypes)).toBe("file");
+
+    // A listed extension is a file even when it would otherwise be text.
+    const logs = { extensions: [".log"], all_types: false };
+    expect(classifyAttachment(makeFile("big.log", "text/plain"), logs)).toBe("file");
+    // A list replaces the defaults.
+    expect(classifyAttachment(makeFile("a.zip", "application/zip"), logs)).toBeNull();
+  });
 });
 
 describe("validateAttachments", () => {
@@ -96,6 +111,17 @@ describe("validateAttachments", () => {
     expect(accepted).toHaveLength(0);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("clip.mp4");
+  });
+
+  it("accepts other files under the file limit when the server allows all types", () => {
+    const trace = makeFile("trace.gz", "application/gzip", 30 * MB);
+    expect(validateAttachments([trace]).accepted).toHaveLength(0);
+    const { accepted, errors } = validateAttachments([trace], {
+      extensions: [".zip"],
+      all_types: true,
+    });
+    expect(accepted).toEqual([trace]);
+    expect(errors).toHaveLength(0);
   });
 
   it("accepts an archive up to its larger limit", () => {

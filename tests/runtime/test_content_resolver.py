@@ -13,6 +13,10 @@ from omnigent.entities.conversation import (
     FunctionCallData,
     MessageData,
 )
+from omnigent.inner.native_attachments import (
+    DEFAULT_FILESYSTEM_ATTACHMENT_POLICY,
+    FilesystemAttachmentPolicy,
+)
 from omnigent.runtime.content_resolver import (
     extract_text_attachments,
     resolve_content_references,
@@ -707,6 +711,65 @@ def test_native_forward_defers_filesystem_files_and_resolves_the_rest() -> None:
     assert "file_id" not in resolved[1]
 
 
+def test_recorded_filesystem_delivery_routes_any_type_to_disk() -> None:
+    """The upload's recorded decision, not the default extensions, sends a file to disk."""
+    from dataclasses import replace
+
+    from omnigent.runtime.content_resolver import _resolve_message_content
+
+    store, artifacts = _stores_with("file_gz", "trace.gz", "application/gzip", b"\x1f\x8b")
+    store.files["file_gz"] = replace(
+        store.files["file_gz"], source_metadata={"delivery": "filesystem"}
+    )
+    block = {"type": "input_file", "file_id": "file_gz", "filename": "trace.gz"}
+
+    deferred = _resolve_message_content(
+        [block],
+        store,
+        artifacts,  # type: ignore[arg-type]
+        defer_filesystem_files=True,
+    )
+    assert deferred == [block]
+    with pytest.raises(ValueError, match="filesystem-capable harness"):
+        _resolve_message_content([block], store, artifacts)  # type: ignore[arg-type]
+
+
+_ALL_TYPES = FilesystemAttachmentPolicy(all_types=True)
+
+
+@pytest.mark.parametrize(
+    ("filename", "declared_type", "policy", "delivery"),
+    [
+        # Default policy: inline types stay inline; listed names win over the MIME.
+        ("notes.txt", "text/plain", DEFAULT_FILESYSTEM_ATTACHMENT_POLICY, "inline"),
+        ("photo.png", "image/png", DEFAULT_FILESYSTEM_ATTACHMENT_POLICY, "inline"),
+        ("data.csv", "application/vnd.ms-excel", DEFAULT_FILESYSTEM_ATTACHMENT_POLICY, "inline"),
+        ("bundle.zip", "text/plain", DEFAULT_FILESYSTEM_ATTACHMENT_POLICY, "filesystem"),
+        ("trace.gz", "application/gzip", DEFAULT_FILESYSTEM_ATTACHMENT_POLICY, None),
+        # All types: whatever can't be inlined goes to disk, including untyped compressed text.
+        ("notes.txt", "text/plain", _ALL_TYPES, "inline"),
+        ("photo.png", "image/png", _ALL_TYPES, "inline"),
+        ("trace.gz", "application/gzip", _ALL_TYPES, "filesystem"),
+        ("trace.json.gz", None, _ALL_TYPES, "filesystem"),
+        ("site.har", "", _ALL_TYPES, "filesystem"),
+        ("Makefile", None, _ALL_TYPES, "filesystem"),
+        # A list replaces the defaults, so a listed text type moves to disk.
+        ("big.log", "text/plain", FilesystemAttachmentPolicy(frozenset({".log"})), "filesystem"),
+        ("bundle.zip", "application/zip", FilesystemAttachmentPolicy(frozenset()), None),
+    ],
+)
+def test_attachment_delivery(
+    filename: str,
+    declared_type: str | None,
+    policy: FilesystemAttachmentPolicy,
+    delivery: str | None,
+) -> None:
+    """Uploads are inlined, delivered as files, or refused according to the policy."""
+    from omnigent.runtime.content_resolver import attachment_delivery
+
+    assert attachment_delivery(filename, declared_type, policy) == delivery
+
+
 # ── _resolve_content_type tests ───────────────────────────────────────
 
 
@@ -723,6 +786,21 @@ def test_resolve_content_type_strips_mime_parameters() -> None:
     from omnigent.runtime.content_resolver import _resolve_content_type
 
     assert _resolve_content_type("image/png;charset=binary", "photo.png") == "image/png"
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("trace.json.gz", "application/gzip"),
+        ("logs.csv.bz2", "application/x-bzip2"),
+        ("perf.tar.xz", "application/x-xz"),
+    ],
+)
+def test_resolve_content_type_names_the_compression(filename: str, expected: str) -> None:
+    """A compressed name resolves to its compressed type, not the inner file's."""
+    from omnigent.runtime.content_resolver import _resolve_content_type
+
+    assert _resolve_content_type(None, filename) == expected
 
 
 def test_resolve_content_type_ignores_octet_stream() -> None:

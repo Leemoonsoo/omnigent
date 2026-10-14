@@ -6,7 +6,10 @@ import pytest
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import HostHelloFrame, decode_host_frame, encode_host_frame
-from omnigent.inner.native_attachments import CAP_FILESYSTEM_ATTACHMENTS
+from omnigent.inner.native_attachments import (
+    CAP_FILESYSTEM_ATTACHMENT_DELIVERY,
+    CAP_FILESYSTEM_ATTACHMENTS,
+)
 from omnigent.runner.transports.ws_tunnel.frames import HelloFrame, decode_frame, encode_frame
 from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.server.host_registry import HostRegistry
@@ -86,3 +89,36 @@ def test_attachment_check_on_wrong_replica_keeps_retry_signal() -> None:
         )
     assert error.value.code == ErrorCode.WRONG_REPLICA
     router.host_is_on_another_replica.assert_called_once_with("host_remote")
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "allowed"),
+    [
+        ([CAP_FILESYSTEM_ATTACHMENTS], False),
+        ([CAP_FILESYSTEM_ATTACHMENTS, CAP_FILESYSTEM_ATTACHMENT_DELIVERY], True),
+    ],
+)
+def test_new_file_types_need_delivery_support(capabilities: list[str], allowed: bool) -> None:
+    """Types beyond the defaults need a build that follows the recorded delivery."""
+    hosts = HostRegistry()
+    hosts.register(
+        "host_test",
+        Mock(),
+        HostHelloFrame(
+            version="0.20.0", frame_protocol_version=1, name="host", capabilities=capabilities
+        ),
+        owner=None,
+    )
+    kwargs = {
+        "host_id": "host_test",
+        "runner_id": None,
+        "host_registry": hosts,
+        "tunnel_registry": TunnelRegistry(),
+        "capability": CAP_FILESYSTEM_ATTACHMENT_DELIVERY,
+    }
+    if allowed:
+        require_filesystem_attachment_runtime(**kwargs)
+    else:
+        with pytest.raises(OmnigentError, match="this file type") as error:
+            require_filesystem_attachment_runtime(**kwargs)
+        assert error.value.code == ErrorCode.CONFLICT
