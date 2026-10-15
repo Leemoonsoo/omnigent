@@ -121,11 +121,24 @@ describe("resolveIdentity transient failures", () => {
     vi.useRealTimers();
   });
 
-  it.each([
+  const failWithStatus = (status: number) => () =>
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({}, { ok: false, status }));
+
+  it.each<[string, () => void]>([
     ["a network error", () => fetchMock.mockRejectedValueOnce(new Error("network"))],
+    ["a gateway 503", failWithStatus(503)],
+    ["a 408", failWithStatus(408)],
+    ["a 429", failWithStatus(429)],
     [
-      "a gateway 503",
-      () => fetchMock.mockResolvedValueOnce(mockJsonResponse({}, { ok: false, status: 503 })),
+      "a 200 whose body cannot be parsed",
+      () =>
+        fetchMock.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new SyntaxError("Unexpected end of JSON input");
+          },
+        } as unknown as Response),
     ],
   ])("probes again after %s instead of caching null", async (_label, failOnce) => {
     failOnce();
@@ -167,23 +180,28 @@ describe("resolveIdentity transient failures", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("backs off between retries and stops when the last listener leaves", async () => {
+  it("backs off up to the cap and stops when the last listener leaves", async () => {
     vi.useFakeTimers();
     fetchMock.mockResolvedValue(mockJsonResponse({}, { ok: false, status: 502 }));
     const { resolveIdentity, subscribeIdentity } = await import("./identity");
     const unsubscribe = subscribeIdentity(() => {});
 
     await resolveIdentity();
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(1_999);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    let calls = 1;
+    // Each retry's timer exists only after the previous probe settles, so the
+    // clock must advance one delay at a time.
+    /* oxlint-disable no-await-in-loop */
+    for (const delayMs of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]) {
+      await vi.advanceTimersByTimeAsync(delayMs - 1);
+      expect(fetchMock).toHaveBeenCalledTimes(calls);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchMock).toHaveBeenCalledTimes(++calls);
+    }
+    /* oxlint-enable no-await-in-loop */
 
     unsubscribe();
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(calls);
   });
 
   it("does not retry without a listener", async () => {

@@ -292,12 +292,9 @@ function isBodyHostKeyedRequest(url: string, body: BodyInit | null | undefined):
 let currentIsAdmin = false;
 let identityResolved = false;
 let identityPromise: Promise<string | null> | null = null;
-// A `/v1/me` that fails in transit (network error, gateway or server 5xx)
-// says nothing about who the viewer is, so it is retried rather than cached.
-// A cached null made every owned session render as someone else's (no
-// rename, archive, or delete) until the page was reloaded. Retries run only
-// while a hook watches identity via `subscribeIdentity`, so a probe that no
-// UI depends on never leaves a timer behind.
+// A `/v1/me` that fails in transit says nothing about the viewer, so it is
+// retried rather than cached. Retries run only while `subscribeIdentity` has
+// listeners, so an unwatched probe never leaves a timer behind.
 const IDENTITY_RETRY_INITIAL_MS = 1_000;
 const IDENTITY_RETRY_MAX_MS = 30_000;
 const identityListeners = new Set<() => void>();
