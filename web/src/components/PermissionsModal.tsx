@@ -445,7 +445,9 @@ function AddUserCombobox({ value, onChange, disabled }: AddUserFieldProps) {
   const [activeIndex, setActiveIndex] = useState(-1);
   const { suggestions, isLoading } = useUserSearch(value);
   const hasQuery = value.trim().length > 0;
-  const isOpen = open && hasQuery;
+  // `disabled` can flip on while the list is open (the sharing policy resolves
+  // after the dialog mounts), so close it rather than leave it clickable.
+  const isOpen = open && hasQuery && !disabled;
 
   const listId = useId();
   const listRef = useRef<HTMLDivElement>(null);
