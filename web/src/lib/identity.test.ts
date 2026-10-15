@@ -220,6 +220,24 @@ describe("resolveIdentity transient failures", () => {
     expect(fetchMock).toHaveBeenCalledTimes(calls);
   });
 
+  it("keeps the retry delay when the listener leaves before the retry runs", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(mockJsonResponse({}, { ok: false, status: 502 }));
+    const { resolveIdentity, subscribeIdentity } = await import("./identity");
+    const unsubscribe = subscribeIdentity(() => {});
+    await resolveIdentity();
+
+    await vi.advanceTimersByTimeAsync(500);
+    unsubscribe();
+    const resubscribe = subscribeIdentity(() => {});
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    resubscribe();
+  });
+
   it("does not retry without a listener", async () => {
     vi.useFakeTimers();
     fetchMock.mockRejectedValue(new Error("network"));

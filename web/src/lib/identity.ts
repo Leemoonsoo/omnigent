@@ -428,12 +428,12 @@ function scheduleIdentityRetry(): void {
   if (!identityRetryPending || identityRetryTimer !== null || identityListeners.size === 0) {
     return;
   }
-  const delayMs = identityRetryDelayMs;
-  identityRetryDelayMs = Math.min(delayMs * 2, IDENTITY_RETRY_MAX_MS);
   identityRetryTimer = setTimeout(() => {
     identityRetryTimer = null;
+    // Grow the delay only when a retry runs; a cancelled timer made no request.
+    identityRetryDelayMs = Math.min(identityRetryDelayMs * 2, IDENTITY_RETRY_MAX_MS);
     void resolveIdentity();
-  }, delayMs);
+  }, identityRetryDelayMs);
 }
 
 /**
