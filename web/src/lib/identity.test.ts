@@ -116,6 +116,88 @@ describe("resolveIdentity", () => {
   });
 });
 
+describe("resolveIdentity transient failures", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ["a network error", () => fetchMock.mockRejectedValueOnce(new Error("network"))],
+    [
+      "a gateway 503",
+      () => fetchMock.mockResolvedValueOnce(mockJsonResponse({}, { ok: false, status: 503 })),
+    ],
+  ])("probes again after %s instead of caching null", async (_label, failOnce) => {
+    failOnce();
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ user_id: "alice@example.com" }));
+    const { resolveIdentity, getCurrentUserId } = await import("./identity");
+
+    expect(await resolveIdentity()).toBeNull();
+    expect(await resolveIdentity()).toBe("alice@example.com");
+    expect(await resolveIdentity()).toBe("alice@example.com");
+
+    expect(getCurrentUserId()).toBe("alice@example.com");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("caches a 4xx answer without probing again", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({}, { ok: false, status: 403 }));
+    const { resolveIdentity } = await import("./identity");
+
+    expect(await resolveIdentity()).toBeNull();
+    expect(await resolveIdentity()).toBeNull();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("retries in the background while a listener is subscribed", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockRejectedValueOnce(new Error("network"));
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ user_id: "alice@example.com" }));
+    const { resolveIdentity, getCurrentUserId, subscribeIdentity } = await import("./identity");
+    const listener = vi.fn();
+    subscribeIdentity(listener);
+
+    expect(await resolveIdentity()).toBeNull();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(getCurrentUserId()).toBe("alice@example.com");
+    expect(listener).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("backs off between retries and stops when the last listener leaves", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(mockJsonResponse({}, { ok: false, status: 502 }));
+    const { resolveIdentity, subscribeIdentity } = await import("./identity");
+    const unsubscribe = subscribeIdentity(() => {});
+
+    await resolveIdentity();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    unsubscribe();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry without a listener", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockRejectedValue(new Error("network"));
+    const { resolveIdentity } = await import("./identity");
+
+    await resolveIdentity();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});
+
 describe("getCurrentUserId", () => {
   it("returns null before resolveIdentity has been called", async () => {
     const { getCurrentUserId } = await import("./identity");
