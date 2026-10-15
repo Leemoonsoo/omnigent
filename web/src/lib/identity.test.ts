@@ -163,6 +163,22 @@ describe("resolveIdentity transient failures", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it("caches a 401 answer even when its body is unreadable", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => {
+        throw new SyntaxError("Unexpected token <");
+      },
+    } as unknown as Response);
+    const { resolveIdentity } = await import("./identity");
+
+    expect(await resolveIdentity()).toBeNull();
+    expect(await resolveIdentity()).toBeNull();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("retries in the background while a listener is subscribed", async () => {
     vi.useFakeTimers();
     fetchMock.mockRejectedValueOnce(new Error("network"));
