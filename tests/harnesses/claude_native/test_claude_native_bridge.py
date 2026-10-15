@@ -2157,9 +2157,10 @@ def test_read_transcript_items_since_ignores_observed_status_records(tmp_path: P
 
     The local transcript audit found status/UI records such as
     ``queue-operation``, ``branch-update``, ``progress``,
-    ``pr-link``, and non-prompt attachments alongside normal
-    message records. They must not show up as chat items or reset
-    the active response id for following assistant output.
+    ``pr-link``, non-prompt attachments, and ``api-request-blob``
+    request copies alongside normal message records. They must not
+    show up as chat items or reset the active response id for
+    following assistant output, even when they carry a ``message``.
     """
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text(
@@ -2214,6 +2215,23 @@ def test_read_transcript_items_since_ignores_observed_status_records(tmp_path: P
                 ),
                 json.dumps(
                     {
+                        "type": "api-request-blob",
+                        "hash": "blob-1",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "<system-reminder>\nProject instructions.\n"
+                                    "</system-reminder>",
+                                },
+                                {"type": "text", "text": "Run sleep 1."},
+                            ],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
                         "type": "user",
                         "uuid": "tool-result-1",
                         "parentUuid": "assistant-tool-1",
@@ -2251,7 +2269,7 @@ def test_read_transcript_items_since_ignores_observed_status_records(tmp_path: P
         agent_name="claude-native-ui",
     )
 
-    assert cursor == 8, "cursor should advance past ignored status/UI records"
+    assert cursor == 9, "cursor should advance past ignored status/UI records"
     assert [item.item_type for item in items] == [
         "function_call",
         "function_call_output",
