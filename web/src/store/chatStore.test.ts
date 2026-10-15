@@ -3564,9 +3564,11 @@ describe("chatStore — first message during native model startup", () => {
   const sessionId = "conv_native_startup";
   const original = "unfinished first prompt";
   let harness = "claude-native";
+  let snapshotModel: string | null = null;
 
   beforeEach(() => {
     harness = "claude-native";
+    snapshotModel = null;
     clearSessionDrafts();
     seedSession(sessionId);
     fetchMock.mockImplementation((input, init) => {
@@ -3581,7 +3583,7 @@ describe("chatStore — first message during native model startup", () => {
             "omnigent.wrapper":
               harness === "claude-native" ? "claude-code-native-ui" : "codex-native-ui",
           },
-          llm_model: null,
+          llm_model: snapshotModel,
         });
       }
       return defaultFetchHandler(input, init);
@@ -3838,6 +3840,54 @@ describe("chatStore — first message during native model startup", () => {
         }),
       ]),
     );
+  });
+
+  it("sends the draft once a status snapshot carries the model report the stream missed", async () => {
+    vi.useFakeTimers();
+    begin();
+    await vi.advanceTimersByTimeAsync(0);
+    snapshotModel = "haiku";
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(eventBodies()).toEqual([
+      {
+        type: "message",
+        data: expect.objectContaining({ content: [{ type: "input_text", text: original }] }),
+      },
+    ]);
+    expect(useChatStore.getState()).toMatchObject({ llmModel: "haiku", sessionModelSeeded: false });
+  });
+
+  it("re-reads the snapshot at the model-wait deadline before failing the draft", async () => {
+    vi.useFakeTimers();
+    const baseFetch = fetchMock.getMockImplementation()!;
+    // Keep the stream unopened so only the deadline can learn the model.
+    fetchMock.mockImplementation((input, init) =>
+      String(input) === `/v1/sessions/${sessionId}/stream`
+        ? new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          })
+        : baseFetch(input, init),
+    );
+    begin();
+    await vi.advanceTimersByTimeAsync(0);
+    seedSession("conv_other");
+    const switching = useChatStore.getState().switchTo("conv_other");
+    await vi.advanceTimersByTimeAsync(0);
+    await switching;
+    snapshotModel = "haiku";
+    await vi.advanceTimersByTimeAsync(179_000);
+    expect(eventBodies()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(eventBodies()).toHaveLength(1);
+    expect(conversationRegistry.peek(sessionId)?.getState()).toMatchObject({
+      llmModel: "haiku",
+      sessionModelSeeded: false,
+    });
+    expect(useChatStore.getState().failedSendDraft).toBeNull();
   });
 
   it("abandons the waiting send when its conversation is disposed", async () => {
