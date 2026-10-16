@@ -830,12 +830,12 @@ describe("Codex compaction on the previous model", () => {
   const gatewayError =
     'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":"Budget \\"example-budget\\" has reached its limit of $100."}';
 
-  it("explains the cause and forks without expanding the card", () => {
+  it("leads with the provider's error, then explains and forks without expanding", () => {
     const openForkDialog = vi.fn();
     render(
       <ForkDialogContextProvider value={{ canFork: true, openForkDialog }}>
         <ErrorBanner
-          message="unexpected status 403 Forbidden"
+          message={gatewayError}
           source="execution"
           code="codex_compaction_model_failed"
           title="gpt-6-astra is over its AI gateway budget"
@@ -844,12 +844,14 @@ describe("Codex compaction on the previous model", () => {
       </ForkDialogContextProvider>,
     );
 
-    expect(screen.getByTestId("error-compaction-model-hint")).toHaveTextContent(cause);
+    const hint = screen.getByTestId("error-compaction-model-hint");
+    expect(hint.textContent?.startsWith(`${gatewayError}${cause}`)).toBe(true);
+    expect(hint).toHaveTextContent(/Fork session…$/);
     fireEvent.click(screen.getByRole("button", { name: "Fork session…" }));
     expect(openForkDialog).toHaveBeenCalledExactlyOnceWith({ sourceSessionId: "conv_parent" });
   });
 
-  it("keeps the provider's own error in the expanded card", () => {
+  it("leads the expanded card with the provider's own error", () => {
     render(
       <ErrorBanner
         message={gatewayError}
@@ -862,10 +864,9 @@ describe("Codex compaction on the previous model", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: /over its AI gateway budget/i }));
-    const content = screen.getByTestId("error-message-content");
-    expect(content).toHaveTextContent(cause);
-    expect(content).toHaveTextContent("Try this: Fork this session to continue on gpt-6-1-sol.");
-    expect(content).toHaveTextContent(`Original error: ${gatewayError}`);
+    expect(screen.getByTestId("error-message-content").textContent).toBe(
+      `${gatewayError}\n\n${cause}\n\nTry this: Fork this session to continue on gpt-6-1-sol.`,
+    );
   });
 
   it.each([

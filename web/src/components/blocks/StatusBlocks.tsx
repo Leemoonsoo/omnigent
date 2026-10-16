@@ -305,10 +305,6 @@ export function ErrorBanner({
   const workspaceMissing =
     code === "workspace_missing" ||
     relatedErrors.some((error) => error.code === "workspace_missing");
-  // Codex keeps compacting on its previous model, so only a rebuilt fork continues.
-  const compactionModelError = [{ code, cause }, ...relatedErrors].find(
-    (error) => error.code === COMPACTION_MODEL_FAILED_CODE,
-  );
   const notice = level === "info" && relatedErrors.every((error) => error.level === "info");
   const tone = notice ? "var(--muted-foreground)" : "var(--destructive)";
   const headline = errorHeadline({ message, source: "", code, title, cause, remediation, level });
@@ -322,15 +318,19 @@ export function ErrorBanner({
     [relatedErrors],
   );
   const parsed = useMemo(() => parseErrorMessage(message), [message]);
+  // Codex keeps compacting on its previous model, so only a rebuilt fork continues.
+  const compactionModelError = [{ code, cause, message: parsed.message }, ...relatedErrors].find(
+    (error) => error.code === COMPACTION_MODEL_FAILED_CODE,
+  );
   const messageText = useMemo(() => {
     const parts: string[] = [];
+    // The provider's own error leads, so the failure doesn't read as Omnigent's.
+    if (cause && code === COMPACTION_MODEL_FAILED_CODE && parsed.message) {
+      parts.push(parsed.message);
+    }
     if (cause) parts.push(cause);
     if (remediation) parts.push(`Try this: ${remediation}`);
     if (!cause && parsed.message && parsed.message !== headline) parts.push(parsed.message);
-    // The provider's own error shows that the failure didn't come from Omnigent.
-    if (cause && code === COMPACTION_MODEL_FAILED_CODE && parsed.message) {
-      parts.push(`Original error: ${parsed.message}`);
-    }
     if (parts.length === 0) parts.push(parsed.message || code || headline);
     return parts.join("\n\n");
   }, [cause, code, headline, parsed.message, remediation]);
@@ -575,6 +575,14 @@ export function ErrorBanner({
             className="mx-[4px] mt-[6px] flex flex-col items-start gap-[6px]"
             onClick={(event) => event.stopPropagation()}
           >
+            {compactionModelError.message ? (
+              <p
+                data-testid="error-compaction-model-original"
+                className="ml-[18px] cursor-auto font-mono text-sm leading-6 break-words text-foreground [overflow-wrap:anywhere]"
+              >
+                {compactionModelError.message}
+              </p>
+            ) : null}
             {compactionModelError.cause ? (
               <p className="ml-[18px] cursor-auto text-sm leading-6 text-muted-foreground">
                 {compactionModelError.cause}
