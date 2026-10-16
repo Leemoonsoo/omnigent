@@ -1332,6 +1332,42 @@ describe("routing decision — harness / scope / raw pick", () => {
   });
 });
 
+describe("ErrorBanner — budget tone", () => {
+  it.each(["budget_exhausted", "codex_compaction_model_failed"])(
+    "renders %s in the neutral tone",
+    (code) => {
+      render(
+        <ErrorBanner message="Budget has reached its limit." source="execution" code={code} />,
+      );
+      const pill = screen.getByTestId("error-pill");
+      // Still a failed turn, only without the failure color.
+      expect(pill).toHaveAttribute("data-level", "error");
+      expect(pill.getAttribute("style")).toContain("--muted-foreground");
+      expect(screen.getByTestId("error-headline")).not.toHaveClass("text-destructive");
+    },
+  );
+
+  it("keeps the failure tone when another failure is grouped with it", () => {
+    render(
+      <ErrorBanner
+        message="Budget has reached its limit."
+        source="execution"
+        code="budget_exhausted"
+        relatedErrors={[
+          {
+            itemId: "related-disconnect",
+            message: "Runner disconnected.",
+            source: "execution",
+            code: "runner_disconnected",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("error-pill").getAttribute("style")).toContain("--destructive");
+    expect(screen.getByTestId("error-headline")).toHaveClass("text-destructive");
+  });
+});
+
 describe("ErrorBanner — info level", () => {
   it("renders a neutral notice pill with the code's headline and an info icon", () => {
     render(

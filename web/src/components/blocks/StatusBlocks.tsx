@@ -110,6 +110,8 @@ const FAILURE_CODE_DESCRIPTIONS: Record<string, string> = {
 };
 
 const COMPACTION_MODEL_FAILED_CODE = "codex_compaction_model_failed";
+// A spent budget, and the compaction it blocks, is an account limit rather than a failure.
+const NEUTRAL_TONE_CODES = new Set(["budget_exhausted", COMPACTION_MODEL_FAILED_CODE]);
 
 const RETRYABLE_ERROR_CODES = new Set([
   "required_terminal_exited",
@@ -306,7 +308,10 @@ export function ErrorBanner({
     code === "workspace_missing" ||
     relatedErrors.some((error) => error.code === "workspace_missing");
   const notice = level === "info" && relatedErrors.every((error) => error.level === "info");
-  const tone = notice ? "var(--muted-foreground)" : "var(--destructive)";
+  const neutral = [{ code, level }, ...relatedErrors].every(
+    (error) => error.level === "info" || NEUTRAL_TONE_CODES.has(error.code),
+  );
+  const tone = neutral ? "var(--muted-foreground)" : "var(--destructive)";
   const headline = errorHeadline({ message, source: "", code, title, cause, remediation, level });
   const relatedDetails = useMemo(
     () =>
@@ -530,7 +535,7 @@ export function ErrorBanner({
                 title={headline}
                 className={cn(
                   "min-w-0 truncate whitespace-nowrap leading-6",
-                  notice ? "text-foreground" : "text-destructive",
+                  neutral ? "text-foreground" : "text-destructive",
                 )}
               >
                 {headline}

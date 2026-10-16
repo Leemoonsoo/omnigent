@@ -62,11 +62,13 @@ the header menu), and each place is a separate entry point.
   directory…**. Choose an existing host directory to fork the conversation into
   a new session; the original remains available and missing files are not restored.
 - `compaction-model-recovery`: a Codex turn that failed while compacting on the
-  previous model shows the provider's error and why on the error card, with
-  **Fork session…**. Rate-limit and transient failures keep **Retry** instead
-  and point to Fork in the session menu. A fork onto another model rebuilds the
-  conversation from its history instead of cloning Codex's rollout, and fails
-  rather than starting empty if that rebuild fails; the original is unchanged.
+  previous model shows the provider's error and why on a gray error card, with
+  **Fork session…**. A spent-budget card is gray for every harness, since it
+  isn't an Omnigent failure. Rate-limit and transient failures keep **Retry**
+  instead and point to Fork in the session menu. A fork onto another model
+  rebuilds the conversation from its history instead of cloning Codex's rollout,
+  and fails rather than starting empty if that rebuild fails; the original is
+  unchanged.
 - `message-recovery`: a message racing initial runner binding or replacement
   reaches the available runner without a false failed turn. Native sessions
   initialize before delivery; SDK sub-agents reuse their loaded session state.
