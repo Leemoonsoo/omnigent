@@ -505,6 +505,12 @@ plain `uv run pytest`, which starts a private server for the test.
   Resume relaunches the parent on its host and initializes the side chat on the
   replacement runner. A parent that already has a replacement is reused
   without another launch.
+- **`side-chat-lifecycle`, shared-runner recovery (real host, plain `uv run pytest`):**
+  `tests/e2e/test_host_e2e.py::test_host_side_chat_recovers_after_shared_runner_exits`
+  kills the shared runner while the host stays connected. The side chat's next
+  message relaunches the parent's runner and both continue on it; after a
+  second kill, Resume on the side chat does the same. Only model replies are
+  scripted.
 - **`side-chat-lifecycle`, creation entry points:**
   `tests/e2e_ui/chat/test_side_chat_entrypoints.py` covers `/side`, the Workspace
   menu, the composer add tray, selected text's Ask in side chat action, and the
