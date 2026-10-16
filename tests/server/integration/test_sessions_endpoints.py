@@ -5690,15 +5690,16 @@ _CODEX_COMPACTION_BUDGET_DETAIL = (
     '"Budget \\"example-budget\\" has reached its limit of $100."}'
 )
 _CODEX_COMPACTION_BUDGET_CARD = {
-    "title": "Codex can't compact on gpt-6-astra",
+    "title": "gpt-6-astra is over its AI gateway budget",
     "cause": (
-        "Codex compacts this conversation on the previous model, gpt-6-astra, before it can "
-        "switch to gpt-6-1-sol, and gpt-6-astra is over its budget. Every turn in this "
-        "session repeats that compaction, so switching models doesn't help."
+        "The AI gateway refused a request on gpt-6-astra because its budget is exhausted. "
+        "Codex repeats that request on every turn to compact on the previous model before "
+        "switching to gpt-6-1-sol, so switching models doesn't help."
     ),
     "remediation": (
         "Fork this session to continue on gpt-6-1-sol. The fork rebuilds the conversation "
-        "from its history, so it doesn't need gpt-6-astra."
+        "from its history, so it doesn't need gpt-6-astra. Or ask an admin to raise that "
+        "budget."
     ),
 }
 _CODEX_COMPACTION_RETRY_CARD = {

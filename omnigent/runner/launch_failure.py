@@ -407,18 +407,31 @@ def diagnose_codex_compaction_model_failure(
             remediation=f"Retry later, or fork this session to continue on {selected}.",
             category=ErrorCategory.UPSTREAM,
         )
-    reason = "is over its budget" if code == "budget_exhausted" else "rejected the request"
+    # Stored as a 256-character label, so the sentence stays short.
+    repeated = (
+        "Codex repeats that request on every turn to compact on the previous model "
+        f"before switching to {selected}, so switching models doesn't help."
+    )
+    fork = (
+        f"Fork this session to continue on {selected}. The fork rebuilds the "
+        f"conversation from its history, so it doesn't need {previous}."
+    )
+    if code == "budget_exhausted":
+        # Lead with the gateway's refusal: the budget, not Codex, is the root cause.
+        return FailureDiagnosis(
+            title=f"{previous} is over its AI gateway budget",
+            cause=(
+                f"The AI gateway refused a request on {previous} because its budget is "
+                f"exhausted. {repeated}"
+            ),
+            remediation=f"{fork} Or ask an admin to raise that budget.",
+            category=ErrorCategory.USER,
+        )
     return FailureDiagnosis(
         title=f"Codex can't compact on {previous}",
-        cause=(
-            f"{prefix}, and {previous} {reason}. Every turn in this session repeats "
-            "that compaction, so switching models doesn't help."
-        ),
-        remediation=(
-            f"Fork this session to continue on {selected}. The fork rebuilds the "
-            f"conversation from its history, so it doesn't need {previous}."
-        ),
-        category=ErrorCategory.USER if code == "budget_exhausted" else ErrorCategory.UPSTREAM,
+        cause=f"{previous} rejected a request. {repeated}",
+        remediation=fork,
+        category=ErrorCategory.UPSTREAM,
     )
 
 

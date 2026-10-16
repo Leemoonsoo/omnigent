@@ -826,8 +826,9 @@ describe("Codex compaction on the previous model", () => {
   beforeEach(() => useChatStore.setState({ conversationId: "conv_parent" }));
   afterEach(() => useChatStore.setState({ conversationId: null }));
 
-  const cause =
-    "Codex compacts this conversation on the previous model, gpt-6-astra, before it can switch to gpt-6-1-sol, and gpt-6-astra is over its budget.";
+  const cause = "The AI gateway refused a request on gpt-6-astra because its budget is exhausted.";
+  const gatewayError =
+    'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":"Budget \\"example-budget\\" has reached its limit of $100."}';
 
   it("explains the cause and forks without expanding the card", () => {
     const openForkDialog = vi.fn();
@@ -837,7 +838,7 @@ describe("Codex compaction on the previous model", () => {
           message="unexpected status 403 Forbidden"
           source="execution"
           code="codex_compaction_model_failed"
-          title="Codex can't compact on gpt-6-astra"
+          title="gpt-6-astra is over its AI gateway budget"
           cause={cause}
         />
       </ForkDialogContextProvider>,
@@ -846,6 +847,25 @@ describe("Codex compaction on the previous model", () => {
     expect(screen.getByTestId("error-compaction-model-hint")).toHaveTextContent(cause);
     fireEvent.click(screen.getByRole("button", { name: "Fork session…" }));
     expect(openForkDialog).toHaveBeenCalledExactlyOnceWith({ sourceSessionId: "conv_parent" });
+  });
+
+  it("keeps the provider's own error in the expanded card", () => {
+    render(
+      <ErrorBanner
+        message={gatewayError}
+        source="execution"
+        code="codex_compaction_model_failed"
+        title="gpt-6-astra is over its AI gateway budget"
+        cause={cause}
+        remediation="Fork this session to continue on gpt-6-1-sol."
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /over its AI gateway budget/i }));
+    const content = screen.getByTestId("error-message-content");
+    expect(content).toHaveTextContent(cause);
+    expect(content).toHaveTextContent("Try this: Fork this session to continue on gpt-6-1-sol.");
+    expect(content).toHaveTextContent(`Original error: ${gatewayError}`);
   });
 
   it.each([

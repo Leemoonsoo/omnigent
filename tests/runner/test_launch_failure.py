@@ -516,36 +516,60 @@ def test_model_unavailable_ignores_unrelated_errors(message: str) -> None:
     assert diagnose_model_unavailable(message) is None
 
 
+_COMPACTION_PREFIX = (
+    "Codex compacts this conversation on the previous model, gpt-6-astra, "
+    "before it can switch to gpt-6-1-sol"
+)
+
+
 @pytest.mark.parametrize(
-    ("code", "reason", "remediation_start", "category"),
+    ("code", "title", "cause_start", "remediation_start", "category"),
     [
-        ("budget_exhausted", "is over its budget", "Fork this session", ErrorCategory.USER),
-        ("codex_turn_error", "rejected the request", "Fork this session", ErrorCategory.UPSTREAM),
-        ("rate_limit_exceeded", "temporarily unavailable", "Retry later", ErrorCategory.UPSTREAM),
+        (
+            "budget_exhausted",
+            "gpt-6-astra is over its AI gateway budget",
+            "The AI gateway refused a request on gpt-6-astra because its budget is exhausted.",
+            "Fork this session",
+            ErrorCategory.USER,
+        ),
+        (
+            "codex_turn_error",
+            "Codex can't compact on gpt-6-astra",
+            "gpt-6-astra rejected a request. Codex repeats that request on every turn",
+            "Fork this session",
+            ErrorCategory.UPSTREAM,
+        ),
+        (
+            "rate_limit_exceeded",
+            "Codex can't compact on gpt-6-astra right now",
+            f"{_COMPACTION_PREFIX}, and gpt-6-astra is temporarily unavailable.",
+            "Retry later",
+            ErrorCategory.UPSTREAM,
+        ),
         (
             "transient_upstream_error",
-            "temporarily unavailable",
+            "Codex can't compact on gpt-6-astra right now",
+            f"{_COMPACTION_PREFIX}, and gpt-6-astra is temporarily unavailable.",
             "Retry later",
             ErrorCategory.UPSTREAM,
         ),
     ],
 )
 def test_codex_compaction_model_failure_names_both_models_and_the_way_out(
-    code: str, reason: str, remediation_start: str, category: ErrorCategory
+    code: str, title: str, cause_start: str, remediation_start: str, category: ErrorCategory
 ) -> None:
     diagnosis = diagnose_codex_compaction_model_failure(
         code, compaction_model="system.ai.gpt-6-astra", selected_model="system.ai.gpt-6-1-sol"
     )
 
-    assert diagnosis.title.startswith("Codex can't compact on gpt-6-astra")
-    assert diagnosis.cause.startswith(
-        "Codex compacts this conversation on the previous model, gpt-6-astra, "
-        "before it can switch to gpt-6-1-sol, and gpt-6-astra"
-    )
-    assert reason in diagnosis.cause
+    assert diagnosis.title == title
+    assert diagnosis.cause.startswith(cause_start)
+    assert "gpt-6-1-sol" in diagnosis.cause
     assert diagnosis.remediation is not None
     assert diagnosis.remediation.startswith(remediation_start)
     assert "fork this session to continue on gpt-6-1-sol" in diagnosis.remediation.lower()
+    # Only a budget can be raised; the other failures clear on their own or not at all.
+    assert ("raise that budget" in diagnosis.remediation) is (code == "budget_exhausted")
     assert diagnosis.category is category
 
 

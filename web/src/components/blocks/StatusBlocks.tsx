@@ -327,6 +327,10 @@ export function ErrorBanner({
     if (cause) parts.push(cause);
     if (remediation) parts.push(`Try this: ${remediation}`);
     if (!cause && parsed.message && parsed.message !== headline) parts.push(parsed.message);
+    // The provider's own error shows that the failure didn't come from Omnigent.
+    if (cause && code === COMPACTION_MODEL_FAILED_CODE && parsed.message) {
+      parts.push(`Original error: ${parsed.message}`);
+    }
     if (parts.length === 0) parts.push(parsed.message || code || headline);
     return parts.join("\n\n");
   }, [cause, code, headline, parsed.message, remediation]);
