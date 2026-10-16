@@ -1434,15 +1434,18 @@ def test_host_status_selects_daemon_on_another_url_for_the_workspace(
     assert daemon["same_workspace_as"] == _VANITY_API
 
 
+@pytest.mark.parametrize("registered_late", [False, True])
 def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    registered_late: bool,
 ) -> None:
     """
     A spawned daemon that finds the workspace already served exits; that's a reuse.
 
     The daemon itself makes the final check, so a launch on another URL that
-    raced the first daemon's start still ends with one daemon.
+    raced the first daemon's start still ends with one daemon. The winner's
+    record can appear a few polls later; the requested URL is probed once.
     """
     from omnigent.cli import _SpawnedDaemonProcess
     from omnigent.cli_auth import store_databricks_auth
@@ -1466,12 +1469,19 @@ def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
         lambda spawned: stopped.append(spawned.pid),
     )
 
+    probed: list[str] = []
+
+    def _probe(url: str, *, org_id: str | None = None) -> str:
+        probed.append(url)
+        return "1"
+
+    monkeypatch.setattr("omnigent.host.daemon_lifecycle.probe_workspace_id", _probe)
+
     class _ExitedChild:
         def poll(self) -> int:
             return 0
 
-    def _spawn(*, args: list[str], env: dict[str, str]) -> _SpawnedDaemonProcess:
-        # The workspace's daemon registered after the pre-spawn check ran.
+    def _register_winner() -> None:
         cli_module._write_daemon_record(
             cli_module._HostDaemonRecord(
                 pid=_SAME_WORKSPACE_PID,
@@ -1484,6 +1494,20 @@ def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
                 workspace_id="1",
             )
         )
+
+    sleeps: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if registered_late and len(sleeps) == 3:
+            _register_winner()
+
+    monkeypatch.setattr("omnigent.cli.time.sleep", _sleep)
+
+    def _spawn(*, args: list[str], env: dict[str, str]) -> _SpawnedDaemonProcess:
+        # The workspace's daemon registered after the pre-spawn check ran.
+        if not registered_late:
+            _register_winner()
         return _SpawnedDaemonProcess(
             pid=_SAME_WORKSPACE_PID + 1,
             log_path=str(tmp_path / "yielded.log"),
@@ -1497,6 +1521,7 @@ def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
     assert cli_module._find_daemon_record(_VANITY_API) is None
     kept = cli_module._find_daemon_record(_WORKSPACE_API)
     assert kept is not None and kept.pid == _SAME_WORKSPACE_PID
+    assert probed.count(_VANITY_API) == 1
 
 
 # ── omnigent start ────────────────────────────────────────────────

@@ -99,7 +99,7 @@ def main() -> None:
                 server_url=args.server, daemon_target=daemon_target, host_id=identity.host_id
             )
             if workspace_id is not None and workspace_lock is None:
-                _drop_unwritten_record(lifecycle_lock)
+                _drop_own_record(lifecycle_lock)
                 return
         record = HostDaemonRecord(
             pid=os.getpid(),
@@ -165,7 +165,8 @@ def _claim_workspace(
     if workspace_id is None:
         return None, None
     lock = DaemonLifecycleLock.for_workspace(host_id, workspace_id)
-    if lock.try_acquire() is False:
+    acquired = lock.try_acquire()
+    if acquired is False:
         logger.info(
             "Another host daemon already serves workspace %s for this host; %s exits",
             workspace_id,
@@ -174,6 +175,7 @@ def _claim_workspace(
         return workspace_id, None
     # Daemons from versions without the workspace lock still hold their
     # record; yield to a live one rather than take over its connection.
+    # Without a working lock (no flock), any live record on the workspace counts.
     older = find_same_workspace_daemon(
         read_daemon_records(),
         server_url=server_url,
@@ -183,7 +185,7 @@ def _claim_workspace(
         # Older daemons record no workspace id, and a sign-in through a
         # Databricks CLI profile leaves no login record to read it from.
         probe=probe_workspace_id,
-        legacy_only=True,
+        legacy_only=acquired is True,
     )
     if older is not None:
         logger.info(
@@ -198,14 +200,24 @@ def _claim_workspace(
     return workspace_id, lock
 
 
-def _drop_unwritten_record(lifecycle_lock: DaemonLifecycleLock) -> None:
-    """Remove the empty record file a yielding daemon created for its flock."""
-    from omnigent.host.daemon_lifecycle import daemon_record_path
+def _drop_own_record(lifecycle_lock: DaemonLifecycleLock) -> None:
+    """Remove a yielding daemon's own record and legacy pidfile.
+
+    That is the empty file its flock created, or, after a daily-restart exec
+    into this process, the record it wrote before the exec.
+    """
+    from omnigent.host.daemon_lifecycle import daemon_record_path, read_daemon_record
+    from omnigent.process_logging import data_dir
 
     path = daemon_record_path(lifecycle_lock.target)
     with contextlib.suppress(OSError):
-        if path.stat().st_size == 0:
+        record = None if path.stat().st_size == 0 else read_daemon_record(path)
+        if record is None or record.pid == os.getpid():
             path.unlink()
+    pidfile = data_dir() / "host.pid"
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        if int(pidfile.read_text().split()[0]) == os.getpid():
+            pidfile.unlink()
 
 
 if __name__ == "__main__":

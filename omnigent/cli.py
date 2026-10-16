@@ -3082,7 +3082,11 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
 
 
 def _same_workspace_daemon(
-    server_url: str | None, *, host_id: str | None = None
+    server_url: str | None,
+    *,
+    host_id: str | None = None,
+    workspace_id: str | None = None,
+    probe: Callable[..., str | None] | None = None,
 ) -> _HostDaemonRecord | None:
     """
     Find the live daemon that already hosts this machine on *server_url*'s workspace.
@@ -3095,6 +3099,10 @@ def _same_workspace_daemon(
         empty (local mode) never matches.
     :param host_id: Host id the caller would advertise; defaults to the local
         host identity.
+    :param workspace_id: *server_url*'s workspace id when already resolved,
+        e.g. ``"123"``.
+    :param probe: Server lookup for unknown workspace ids; defaults to
+        :func:`omnigent.host.daemon_lifecycle.probe_workspace_id`.
     :returns: The live daemon's record, or ``None``.
     """
     if not server_url:
@@ -3106,7 +3114,8 @@ def _same_workspace_daemon(
         server_url=server_url,
         host_id=host_id if host_id is not None else _load_existing_host_id(),
         is_live=_daemon_owner_is_live,
-        probe=probe_workspace_id,
+        workspace_id=workspace_id,
+        probe=probe or probe_workspace_id,
     )
 
 
@@ -3219,13 +3228,27 @@ def _wait_for_daemon_claim(
     without claiming; the record returned then is that daemon's, under
     another target.
     """
+    import functools
+
+    from omnigent.host.daemon_lifecycle import probe_workspace_id, resolve_daemon_workspace_id
+
+    # Resolved once per wait: each lookup would otherwise repeat the server
+    # probe, while the records themselves are reread on every poll.
+    probe = functools.cache(probe_workspace_id)
+    requested_workspace: str | None = None
     deadline = time.monotonic() + timeout_s
     while True:
         record = _find_daemon_record(target)
         if record is not None and _daemon_owner_is_live(record):
             return record
-        if spawned.process is not None and spawned.process.poll() is not None:
-            sibling = _same_workspace_daemon(server_url)
+        if server_url and spawned.process is not None and spawned.process.poll() is not None:
+            if requested_workspace is None:
+                requested_workspace = resolve_daemon_workspace_id(server_url, probe=probe)
+            sibling = (
+                _same_workspace_daemon(server_url, workspace_id=requested_workspace, probe=probe)
+                if requested_workspace is not None
+                else None
+            )
             if sibling is not None:
                 return sibling
         if time.monotonic() >= deadline:
