@@ -12907,6 +12907,8 @@ def test_rollout_records_use_terminal_launch_permission_args(
     turn_context = next(r for r in records if r["type"] == "turn_context")["payload"]
     assert turn_context["approval_policy"] == "never"
     assert turn_context["sandbox_policy"] == {"type": "danger-full-access"}
+    # A recorded model would make Codex compact on it before a turn on another model.
+    assert "model" not in turn_context
 
 
 # --- #2745: routing summary surfaced in the startup-timeout error ---

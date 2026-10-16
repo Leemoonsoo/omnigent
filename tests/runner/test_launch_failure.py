@@ -567,7 +567,8 @@ def test_codex_compaction_model_failure_names_both_models_and_the_way_out(
     assert "gpt-6-1-sol" in diagnosis.cause
     assert diagnosis.remediation is not None
     assert diagnosis.remediation.startswith(remediation_start)
-    assert "fork this session to continue on gpt-6-1-sol" in diagnosis.remediation.lower()
+    assert "fork" in diagnosis.remediation.lower()
+    assert "continue on gpt-6-1-sol" in diagnosis.remediation
     # Only a budget can be raised; the other failures clear on their own or not at all.
     assert ("raise that budget" in diagnosis.remediation) is (code == "budget_exhausted")
     assert diagnosis.category is category

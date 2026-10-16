@@ -7269,11 +7269,9 @@ def _codex_compacts_on_previous_model(
         return True
     previous_window = _usable_context_window(previous)
     selected_window = _usable_context_window(selected)
-    return (
-        previous_window is not None
-        and selected_window is not None
-        and previous_window > selected_window
-    )
+    if previous_window is None or selected_window is None:
+        return True
+    return previous_window > selected_window
 
 
 def _usable_context_window(entry: dict[str, object]) -> float | None:

@@ -404,7 +404,10 @@ def diagnose_codex_compaction_model_failure(
         return FailureDiagnosis(
             title=f"Codex can't compact on {previous} right now",
             cause=f"{prefix}, and {previous} is temporarily unavailable.",
-            remediation=f"Retry later, or fork this session to continue on {selected}.",
+            # These keep their Retry action, so Fork is only in the session menu.
+            remediation=(
+                f"Retry later, or choose Fork in the session menu to continue on {selected}."
+            ),
             category=ErrorCategory.UPSTREAM,
         )
     # Stored as a 256-character label, so the sentence stays short.

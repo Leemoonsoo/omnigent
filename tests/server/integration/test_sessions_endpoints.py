@@ -5708,7 +5708,7 @@ _CODEX_COMPACTION_RETRY_CARD = {
         "Codex compacts this conversation on the previous model, gpt-6-astra, before it can "
         "switch to gpt-6-1-sol, and gpt-6-astra is temporarily unavailable."
     ),
-    "remediation": "Retry later, or fork this session to continue on gpt-6-1-sol.",
+    "remediation": "Retry later, or choose Fork in the session menu to continue on gpt-6-1-sol.",
 }
 _CODEX_LOGIN_EXPIRED_DETAIL = (
     "unexpected status 401 Unauthorized: Provided authentication token is expired."

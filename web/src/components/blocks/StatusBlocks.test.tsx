@@ -869,6 +869,33 @@ describe("Codex compaction on the previous model", () => {
     );
   });
 
+  it("offers the fork when the compaction failure is grouped under another error", () => {
+    const openForkDialog = vi.fn();
+    render(
+      <ForkDialogContextProvider value={{ canFork: true, openForkDialog }}>
+        <ErrorBanner
+          message="Runner disconnected."
+          source="execution"
+          code="runner_disconnected"
+          relatedErrors={[
+            {
+              itemId: "related-compaction",
+              message: gatewayError,
+              source: "execution",
+              code: "codex_compaction_model_failed",
+              cause,
+            },
+          ]}
+        />
+      </ForkDialogContextProvider>,
+    );
+
+    const hint = screen.getByTestId("error-compaction-model-hint");
+    expect(hint.textContent?.startsWith(`${gatewayError}${cause}`)).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Fork session…" }));
+    expect(openForkDialog).toHaveBeenCalledExactlyOnceWith({ sourceSessionId: "conv_parent" });
+  });
+
   it.each([
     { canFork: false, code: "codex_compaction_model_failed" },
     { canFork: true, code: "budget_exhausted" },

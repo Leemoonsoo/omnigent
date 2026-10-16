@@ -430,6 +430,13 @@ _NO_COMPACTION_MODELS = {"compaction_model": None, "selected_model": None}
             ),
             False,
         ),
+        # Without both windows, the catalog can't rule the compaction out.
+        (
+            "system.ai.gpt-6-astra",
+            "in_progress",
+            ({"comp_hash": "3000", "context_window": None}, {"comp_hash": "3000"}),
+            True,
+        ),
         # Gateway and Codex spellings of the selected model compare equal.
         ("gpt-6.1-sol", "in_progress", None, False),
         ("system.ai.gpt-6-astra", "completed", None, False),
@@ -441,6 +448,7 @@ _NO_COMPACTION_MODELS = {"compaction_model": None, "selected_model": None}
         "catalog-rules-it-out",
         "previous-usable-window-larger",
         "selected-usable-window-larger",
+        "catalog-window-unknown",
         "selected-model",
         "outside-compaction",
         "no-recorded-model",
