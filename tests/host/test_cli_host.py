@@ -1362,6 +1362,8 @@ def _stub_host_status_by_url(
         (60, _HOST_OFFLINE, _HOST_REJECTED, "its server rejected its sign-in (HTTP 401)"),
         (60, _HOST_OFFLINE, _HOST_UNREACHABLE, "it can't reach its server"),
         (60, _HOST_OFFLINE, _HOST_OFFLINE, "its host is not connected to the server"),
+        # Only its own URL answers, and the server has it offline.
+        (60, _HOST_REJECTED, _HOST_OFFLINE, "its host is not connected to the server"),
         # The server has no row for it: it never registered.
         (60, _HOST_NOT_FOUND, _HOST_UNREACHABLE, "it can't reach its server"),
         # Online through the requested URL even though its own credentials fail.
@@ -1481,17 +1483,20 @@ def _same_workspace_sibling(*, age_s: int = 60) -> cli_module._HostDaemonRecord:
 
 
 @pytest.mark.parametrize(
-    ("via_requested_url", "refusal"),
+    ("via_requested_url", "via_own_url", "refusal"),
     [
-        (_HOST_OFFLINE, "its server rejected its sign-in (HTTP 401)"),
-        # The requested URL sees it online, so registration is confirmed there.
-        (_HOST_ONLINE, None),
+        # Its own sign-in expired and the server has it offline.
+        (_HOST_OFFLINE, _HOST_REJECTED, "its server rejected its sign-in (HTTP 401)"),
+        # Only one URL can see it online; registration is confirmed through that one.
+        (_HOST_ONLINE, _HOST_REJECTED, None),
+        (_HOST_REJECTED, _HOST_ONLINE, None),
     ],
 )
 def test_host_background_reuses_same_workspace_daemon_only_when_online(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     via_requested_url: cli_module._HostHttpResult,
+    via_own_url: cli_module._HostHttpResult,
     refusal: str | None,
 ) -> None:
     """
@@ -1506,9 +1511,8 @@ def test_host_background_reuses_same_workspace_daemon_only_when_online(
         "omnigent.cli._pid_alive", lambda checked: checked in {4242, _SAME_WORKSPACE_PID}
     )
     _seed_same_workspace_daemon(monkeypatch, tmp_path, age_s=60)
-    # The daemon's own sign-in expired.
     _stub_host_status_by_url(
-        monkeypatch, {_VANITY_API: via_requested_url, _WORKSPACE_API: _HOST_REJECTED}
+        monkeypatch, {_VANITY_API: via_requested_url, _WORKSPACE_API: via_own_url}
     )
     terminated: list[int] = []
     monkeypatch.setattr(

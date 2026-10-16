@@ -9190,24 +9190,34 @@ def _background_registration_timeout(
     )
 
 
-def _confirm_background_host_registered(record: _HostDaemonRecord) -> None:
-    """Wait until the detached daemon completes server registration."""
+def _confirm_background_host_registered(
+    record: _HostDaemonRecord, *, also_via: _HostDaemonRecord | None = None
+) -> None:
+    """Wait until the detached daemon completes server registration.
+
+    :param record: Daemon record whose registration to wait for.
+    :param also_via: The same daemon probed through another URL for its
+        workspace, e.g. from :func:`_record_probed_through`; either URL
+        reporting it online confirms registration.
+    """
     deadline = time.monotonic() + _BACKGROUND_HOST_REGISTRATION_GRACE_S
     announced = False
     server_responded = False
     last_transport_error: str | None = None
+    probes = [record] if also_via is None else [record, also_via]
     while True:
         if not _pid_alive(record.pid):
             raise click.ClickException(
                 "The host daemon exited before registering with the server."
                 f"{_background_host_log_detail(record.log_path)}"
             )
-        result = _daemon_host_status_probe(record, timeout_s=1.0)
-        if result is not None and result.status_code == 0:
-            last_transport_error = str(result.body)
-        elif result is not None:
-            server_responded = True
-        if _host_status_reports_online(result):
+        results = [_daemon_host_status_probe(probe, timeout_s=1.0) for probe in probes]
+        for result in results:
+            if result is not None and result.status_code == 0:
+                last_transport_error = str(result.body)
+            elif result is not None:
+                server_responded = True
+        if any(_host_status_reports_online(result) for result in results):
             return
         if not announced:
             # Not registered on the first probe: name what the otherwise
@@ -9335,10 +9345,13 @@ def _run_background_host(
             record = _find_daemon_record(target) or record
         else:
             server_url = _normalize_daemon_target(record.target)
-        # This command just signed in to the requested URL; the reused
-        # daemon's own credentials may be the ones that stopped working.
+        # A reused same-workspace daemon may be visible through only one of the
+        # two URLs, whichever this machine's credentials still work for.
         _confirm_background_host_registered(
-            _record_probed_through(record, target) if same_workspace is not None else record
+            record,
+            also_via=_record_probed_through(record, target)
+            if same_workspace is not None
+            else None,
         )
     except click.ClickException:
         if not reused:
