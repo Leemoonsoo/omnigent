@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1332,6 +1332,9 @@ _HOST_OFFLINE = cli_module._HostHttpResult(status_code=200, body={"status": "off
 _HOST_NOT_FOUND = cli_module._HostHttpResult(status_code=404, body={"detail": "host not found"})
 _HOST_REJECTED = cli_module._HostHttpResult(status_code=401, body="unauthorized")
 _HOST_UNREACHABLE = cli_module._HostHttpResult(status_code=0, body="connection refused")
+_HOST_HTML_PAGE = cli_module._HostHttpResult(status_code=200, body="<html>Sign in</html>")
+_HOST_UNKNOWN_STATE = cli_module._HostHttpResult(status_code=200, body={"status": "draining"})
+_HOST_PROXY_NOT_FOUND = cli_module._HostHttpResult(status_code=404, body="<html>Not Found</html>")
 
 
 def _stub_host_status_by_url(
@@ -1367,6 +1370,10 @@ def _stub_host_status_by_url(
         # Neither URL can be asked, so its state is unknown: reuse it as before.
         (60, _HOST_REJECTED, _HOST_REJECTED, None),
         (60, _HOST_UNREACHABLE, _HOST_UNREACHABLE, None),
+        # A 200 or 404 that isn't the server's host answer proves nothing either.
+        (60, _HOST_HTML_PAGE, _HOST_REJECTED, None),
+        (60, _HOST_UNKNOWN_STATE, _HOST_REJECTED, None),
+        (60, _HOST_PROXY_NOT_FOUND, _HOST_UNREACHABLE, None),
         # Just started and still connecting: no verdict yet.
         (0, _HOST_OFFLINE, _HOST_OFFLINE, None),
     ],
@@ -1436,6 +1443,21 @@ def test_same_workspace_daemon_offline_reason_waits_out_a_reconnect(
     assert probed.count(_VANITY_API) == probe_rounds
 
 
+def test_offline_same_workspace_daemon_error_drops_url_credentials() -> None:
+    """The refusal reaches terminal output and logs, so recorded userinfo is dropped."""
+    target = "https://user:secret-token@omnigent.example.com"
+    sibling = replace(_same_workspace_sibling(), target=target, server_url=target)
+
+    message = cli_module._offline_same_workspace_daemon_error(
+        sibling, "its host is not connected to the server"
+    ).format_message()
+
+    assert "secret-token" not in message
+    assert "user:" not in message
+    assert "login https://omnigent.example.com`" in message
+    assert "host stop --server https://omnigent.example.com`" in message
+
+
 def _same_workspace_sibling(*, age_s: int = 60) -> cli_module._HostDaemonRecord:
     """
     Build a live-looking daemon record on the workspace host.
@@ -1501,7 +1523,7 @@ def test_host_background_reuses_same_workspace_daemon_only_when_online(
     assert result.exit_code == 1, result.output
     assert refusal in result.output
     assert "login https://dbc-1.cloud.databricks.com/omnigent?o=1" in result.output
-    assert f"host stop --server {_WORKSPACE_API}" in result.output
+    assert "host stop --server https://dbc-1.cloud.databricks.com/omnigent?o=1" in result.output
 
 
 def test_host_background_reuses_daemon_on_another_url_for_the_workspace(
@@ -1613,7 +1635,7 @@ def test_foreground_host_points_at_fixing_an_offline_daemon_for_the_workspace(
     message = result.exception.format_message()
     assert "rejected its sign-in (HTTP 401)" in message
     assert "nothing more to do" not in message
-    assert f"host stop --server {_WORKSPACE_API}" in message
+    assert "host stop --server https://dbc-1.cloud.databricks.com/omnigent?o=1" in message
     assert not suppresses_recovery_hint(result.exception)
     assert runs == []
     assert cli_module._find_daemon_record(_VANITY_API) is None

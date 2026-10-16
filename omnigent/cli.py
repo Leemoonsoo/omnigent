@@ -2701,6 +2701,23 @@ def _host_status_reports_online(result: _HostHttpResult | None) -> bool:
     return result.body.get("status") == "online"
 
 
+def _host_status_reports_offline(result: _HostHttpResult | None) -> bool:
+    """
+    Report whether a host-row probe result is the server saying the host is offline.
+
+    :param result: Probe result from :func:`_daemon_host_status_probe`.
+    :returns: ``True`` on a 200 whose body reports ``"offline"``, or on the
+        server's JSON 404 for a host that never registered. Transport failures,
+        auth rejections, and unrecognized bodies (an HTML error page, say) are
+        not proof either way.
+    """
+    if result is None or not isinstance(result.body, dict):
+        return False
+    if result.status_code == 200:
+        return result.body.get("status") == "offline"
+    return result.status_code == 404
+
+
 def _daemon_host_online(record: _HostDaemonRecord, *, timeout_s: float = 2.0) -> bool:
     """
     Probe whether a daemon's host is currently online on its server.
@@ -3192,10 +3209,9 @@ def _same_workspace_daemon_offline_reason(
         if time.monotonic() >= deadline:
             break
         time.sleep(0.5)
-    # Only the server's own answer (a host row, or 404 for a host that never
-    # registered) proves the host is offline; failed probes may just mean this
-    # command can't sign in to either URL.
-    if not any(result is not None and result.status_code in (200, 404) for result in results):
+    # Failed or unrecognized probes may just mean this command can't sign in to
+    # either URL, so only the server's own answer counts.
+    if not any(_host_status_reports_offline(result) for result in results):
         return None
     own = results[-1]
     if own is not None and own.status_code in (401, 403):
@@ -3216,13 +3232,14 @@ def _offline_same_workspace_daemon_error(
         :func:`_same_workspace_daemon_offline_reason`.
     :returns: An exception naming the daemon and how to recover it.
     """
-    display = _host_display_url(sibling.server_url or sibling.target)
+    # The recorded URL may carry userinfo credentials; never echo them.
+    display = _registration_target_display(sibling)
     return click.ClickException(
         "A host daemon is already running for this workspace under another URL "
-        f"({_describe_pid(sibling.pid)}, target={sibling.target}), but {reason}. "
+        f"({_describe_pid(sibling.pid)}, target={display}), but {reason}. "
         "A second one would take over its connection once it reconnects. If its "
         f"sign-in expired, run `{cli_invocation()} login {display}`; otherwise stop "
-        f"it with `{_host_stop_command(sibling.server_url or '')}` and retry."
+        f"it with `{_host_stop_command(display)}` and retry."
     )
 
 
