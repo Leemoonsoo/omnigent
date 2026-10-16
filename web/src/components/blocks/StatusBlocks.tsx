@@ -22,6 +22,7 @@ import {
   ShrinkIcon,
   SplitIcon,
   XIcon,
+  type LucideIcon,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -234,6 +235,50 @@ function parseErrorMessage(rawMessage: string): ParsedErrorMessage {
   return { message, terminal, lastOutput };
 }
 
+/** An error card's fork action, shown only when this conversation can be forked. */
+function ErrorForkAction({
+  label,
+  icon: Icon,
+  workspaceRecovery = false,
+  className,
+}: {
+  label: string;
+  icon: LucideIcon;
+  workspaceRecovery?: boolean;
+  className?: string;
+}) {
+  const forkDialog = useForkDialog();
+  const conversationId = useScopedConversationId();
+  if (!forkDialog || !conversationId) return null;
+  // Side-chat sources resolve their own capabilities in the fork form.
+  const scopedForkSource =
+    forkDialog.currentSessionId != null && conversationId !== forkDialog.currentSessionId;
+  if (!scopedForkSource && !forkDialog.canFork) return null;
+  const disabledReason = scopedForkSource ? undefined : forkDialog.disabledReason;
+  return (
+    <div className={className} onClick={(event) => event.stopPropagation()}>
+      <DisabledActionTooltip reason={disabledReason} label={label} className="max-w-full">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-auto max-w-full whitespace-normal text-left"
+          disabled={!!disabledReason}
+          onClick={() =>
+            forkDialog.openForkDialog({
+              sourceSessionId: conversationId,
+              ...(workspaceRecovery ? { workspaceRecovery: true } : {}),
+            })
+          }
+        >
+          <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+          {label}
+        </Button>
+      </DisabledActionTooltip>
+    </div>
+  );
+}
+
 /**
  * Centered destructive pill for `error` blocks: a truncated headline row over
  * a dashed rule; the whole pill toggles the expanded message body.
@@ -257,15 +302,9 @@ export function ErrorBanner({
   onRetry,
   relatedErrors = EMPTY_RELATED_ERRORS,
 }: ErrorBannerProps) {
-  const forkDialog = useForkDialog();
-  const conversationId = useScopedConversationId();
   const workspaceMissing =
     code === "workspace_missing" ||
     relatedErrors.some((error) => error.code === "workspace_missing");
-  // Side-chat sources resolve their own capabilities in the fork form.
-  const scopedForkSource =
-    forkDialog?.currentSessionId != null && conversationId !== forkDialog.currentSessionId;
-  const recoveryDisabledReason = scopedForkSource ? undefined : forkDialog?.disabledReason;
   // Codex keeps compacting on its previous model, so only a rebuilt fork continues.
   const compactionModelError = [{ code, cause }, ...relatedErrors].find(
     (error) => error.code === COMPACTION_MODEL_FAILED_CODE,
@@ -518,35 +557,14 @@ export function ErrorBanner({
             <XIcon className="size-4" aria-hidden="true" />
           </Button>
         </div>
-        {workspaceMissing &&
-          forkDialog &&
-          conversationId &&
-          (scopedForkSource || forkDialog.canFork) && (
-            <div className="mx-[4px] mt-[8px]" onClick={(event) => event.stopPropagation()}>
-              <DisabledActionTooltip
-                reason={recoveryDisabledReason}
-                label="Continue in another directory…"
-                className="max-w-full"
-              >
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-auto max-w-full whitespace-normal text-left"
-                  disabled={!!recoveryDisabledReason}
-                  onClick={() =>
-                    forkDialog.openForkDialog({
-                      sourceSessionId: conversationId,
-                      workspaceRecovery: true,
-                    })
-                  }
-                >
-                  <FolderOpenIcon className="size-3.5 shrink-0" aria-hidden="true" />
-                  Continue in another directory…
-                </Button>
-              </DisabledActionTooltip>
-            </div>
-          )}
+        {workspaceMissing ? (
+          <ErrorForkAction
+            label="Continue in another directory…"
+            icon={FolderOpenIcon}
+            workspaceRecovery
+            className="mx-[4px] mt-[8px]"
+          />
+        ) : null}
         {compactionModelError ? (
           <div
             data-testid="error-compaction-model-hint"
@@ -558,25 +576,7 @@ export function ErrorBanner({
                 {compactionModelError.cause}
               </p>
             ) : null}
-            {forkDialog && conversationId && (scopedForkSource || forkDialog.canFork) ? (
-              <DisabledActionTooltip
-                reason={recoveryDisabledReason}
-                label="Fork session…"
-                className="max-w-full"
-              >
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-auto max-w-full whitespace-normal text-left"
-                  disabled={!!recoveryDisabledReason}
-                  onClick={() => forkDialog.openForkDialog({ sourceSessionId: conversationId })}
-                >
-                  <SplitIcon className="size-3.5 shrink-0" aria-hidden="true" />
-                  Fork session…
-                </Button>
-              </DisabledActionTooltip>
-            ) : null}
+            <ErrorForkAction label="Fork session…" icon={SplitIcon} />
           </div>
         ) : null}
         {signInComplete && parsed.message ? (

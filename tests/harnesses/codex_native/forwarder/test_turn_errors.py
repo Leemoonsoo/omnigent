@@ -343,12 +343,45 @@ async def test_error_without_usable_detail_leaves_the_turn_to_turn_completed(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("rollout_model", "compaction_status", "catalog_hashes", "reported"),
+    ("rollout_model", "compaction_status", "catalog_entries", "reported"),
     [
         ("system.ai.gpt-6-astra", "in_progress", None, True),
-        ("system.ai.gpt-6-astra", "in_progress", ("3000", "2911"), True),
+        (
+            "system.ai.gpt-6-astra",
+            "in_progress",
+            ({"comp_hash": "3000"}, {"comp_hash": "2911"}),
+            True,
+        ),
         # Matching catalog entries mean Codex compacted on the selected model itself.
-        ("system.ai.gpt-6-astra", "in_progress", ("3000", "3000"), False),
+        (
+            "system.ai.gpt-6-astra",
+            "in_progress",
+            ({"comp_hash": "3000"}, {"comp_hash": "3000"}),
+            False,
+        ),
+        # With matching hashes, Codex compacts on the model with the larger usable window.
+        (
+            "system.ai.gpt-6-astra",
+            "in_progress",
+            (
+                {"comp_hash": "3000", "effective_context_window_percent": 95},
+                {"comp_hash": "3000", "effective_context_window_percent": 90},
+            ),
+            True,
+        ),
+        (
+            "system.ai.gpt-6-astra",
+            "in_progress",
+            (
+                {
+                    "comp_hash": "3000",
+                    "context_window": 300000,
+                    "effective_context_window_percent": 80,
+                },
+                {"comp_hash": "3000", "effective_context_window_percent": 95},
+            ),
+            False,
+        ),
         # Gateway and Codex spellings of the selected model compare equal.
         ("gpt-6.1-sol", "in_progress", None, False),
         ("system.ai.gpt-6-astra", "completed", None, False),
@@ -358,6 +391,8 @@ async def test_error_without_usable_detail_leaves_the_turn_to_turn_completed(
         "previous-model",
         "catalog-hash-changed",
         "catalog-rules-it-out",
+        "previous-usable-window-larger",
+        "selected-usable-window-larger",
         "selected-model",
         "outside-compaction",
         "no-recorded-model",
@@ -367,21 +402,21 @@ async def test_error_during_compaction_reports_the_previous_model_it_ran_on(
     tmp_path: Path,
     rollout_model: str | None,
     compaction_status: str,
-    catalog_hashes: tuple[str, str] | None,
+    catalog_entries: tuple[dict[str, object], dict[str, object]] | None,
     reported: bool,
 ) -> None:
     """A compaction failure names the rollout's previous model when Codex compacts on it."""
     _seed_active_turn(tmp_path, "turn_123")
-    if catalog_hashes is not None:
+    if catalog_entries is not None:
         catalog = tmp_path / "catalog.json"
         catalog.write_text(
             json.dumps(
                 {
                     "models": [
-                        {"slug": slug, "comp_hash": comp_hash, "context_window": 272000}
-                        for slug, comp_hash in zip(
+                        {"slug": slug, "context_window": 272000, **entry}
+                        for slug, entry in zip(
                             ("system.ai.gpt-6-astra", "system.ai.gpt-6-1-sol"),
-                            catalog_hashes,
+                            catalog_entries,
                             strict=True,
                         )
                     ]

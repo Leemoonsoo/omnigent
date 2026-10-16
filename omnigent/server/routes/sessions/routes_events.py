@@ -1987,6 +1987,8 @@ def register_events_routes(
                 selected_model = data.get("selected_model")
                 if (
                     harness == "codex-native"
+                    # A fork doesn't renew an expired login, so keep its sign-in recovery.
+                    and classified_code != "codex_reauth_required"
                     and isinstance(compaction_model, str)
                     and compaction_model
                     and isinstance(selected_model, str)

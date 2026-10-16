@@ -5701,6 +5701,17 @@ _CODEX_COMPACTION_BUDGET_CARD = {
         "from its history, so it doesn't need gpt-6-astra."
     ),
 }
+_CODEX_COMPACTION_RETRY_CARD = {
+    "title": "Codex can't compact on gpt-6-astra right now",
+    "cause": (
+        "Codex compacts this conversation on the previous model, gpt-6-astra, before it can "
+        "switch to gpt-6-1-sol, and gpt-6-astra is temporarily unavailable."
+    ),
+    "remediation": "Retry later, or fork this session to continue on gpt-6-1-sol.",
+}
+_CODEX_LOGIN_EXPIRED_DETAIL = (
+    "unexpected status 401 Unauthorized: Provided authentication token is expired."
+)
 
 
 @pytest.mark.parametrize("wire_output", [False, True])
@@ -5732,6 +5743,32 @@ _CODEX_COMPACTION_BUDGET_CARD = {
             _CODEX_COMPACTION_BUDGET_CARD,
             "codex-native-ui",
             False,
+            _CODEX_COMPACTION_MODELS,
+        ),
+        # A retry can clear a temporary failure, so its retryable code stays.
+        (
+            "unexpected status 429 Too Many Requests: rate limit exceeded",
+            "rate_limit_exceeded",
+            _CODEX_COMPACTION_RETRY_CARD,
+            "codex-native-ui",
+            False,
+            _CODEX_COMPACTION_MODELS,
+        ),
+        (
+            "unexpected status 503 Service Unavailable",
+            "transient_upstream_error",
+            _CODEX_COMPACTION_RETRY_CARD,
+            "codex-native-ui",
+            False,
+            _CODEX_COMPACTION_MODELS,
+        ),
+        # A fork doesn't renew an expired login, so the sign-in recovery stays.
+        (
+            _CODEX_LOGIN_EXPIRED_DETAIL,
+            "codex_reauth_required",
+            {},
+            "codex-native-ui",
+            True,
             _CODEX_COMPACTION_MODELS,
         ),
         # Only a Codex session's compaction runs on its previous model.
