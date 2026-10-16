@@ -1434,6 +1434,71 @@ def test_host_status_selects_daemon_on_another_url_for_the_workspace(
     assert daemon["same_workspace_as"] == _VANITY_API
 
 
+def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A spawned daemon that finds the workspace already served exits; that's a reuse.
+
+    The daemon itself makes the final check, so a launch on another URL that
+    raced the first daemon's start still ends with one daemon.
+    """
+    from omnigent.cli import _SpawnedDaemonProcess
+    from omnigent.cli_auth import store_databricks_auth
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_HOST_ID", "a" * 32)
+    monkeypatch.setenv("OMNIGENT_HOST_NAME", "test-host")
+    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    monkeypatch.setattr(
+        "omnigent.cli._pid_is_recorded_daemon",
+        lambda record: record.pid == _SAME_WORKSPACE_PID,
+    )
+    store_databricks_auth(_WORKSPACE_API, "https://dbc-1.cloud.databricks.com", org_id="1")
+    store_databricks_auth(_VANITY_API, "https://dbc-1.cloud.databricks.com", org_id="1")
+    stopped: list[int] = []
+    monkeypatch.setattr(
+        "omnigent.cli._stop_spawned_host_daemon_process",
+        lambda spawned: stopped.append(spawned.pid),
+    )
+
+    class _ExitedChild:
+        def poll(self) -> int:
+            return 0
+
+    def _spawn(*, args: list[str], env: dict[str, str]) -> _SpawnedDaemonProcess:
+        # The workspace's daemon registered after the pre-spawn check ran.
+        cli_module._write_daemon_record(
+            cli_module._HostDaemonRecord(
+                pid=_SAME_WORKSPACE_PID,
+                target=_WORKSPACE_API,
+                mode="server",
+                server_url=_WORKSPACE_API,
+                log_path=str(tmp_path / "existing.log"),
+                started_at=int(time.time()),
+                host_id="a" * 32,
+                workspace_id="1",
+            )
+        )
+        return _SpawnedDaemonProcess(
+            pid=_SAME_WORKSPACE_PID + 1,
+            log_path=str(tmp_path / "yielded.log"),
+            process=_ExitedChild(),  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr("omnigent.cli._spawn_host_daemon_process", _spawn)
+
+    assert _ensure_host_daemon(_VANITY_API) is False
+    assert stopped == []
+    assert cli_module._find_daemon_record(_VANITY_API) is None
+    kept = cli_module._find_daemon_record(_WORKSPACE_API)
+    assert kept is not None and kept.pid == _SAME_WORKSPACE_PID
+
+
 # ── omnigent start ────────────────────────────────────────────────
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import sys
@@ -19,6 +20,7 @@ from omnigent.host.daemon_lifecycle import (
     find_same_workspace_daemon,
     normalize_daemon_target,
     record_flock_is_held,
+    write_daemon_record,
 )
 from omnigent.host.identity import HostIdentity
 
@@ -535,3 +537,224 @@ def test_find_same_workspace_daemon_skips_local_records(
         )
         is None
     )
+
+
+def test_find_same_workspace_daemon_uses_recorded_and_probed_workspace_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record's own workspace id, or a server probe, stands in for a missing login record."""
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    recorded = dataclasses.replace(_server_record(_WORKSPACE_HOST), workspace_id="1")
+    dead = dataclasses.replace(
+        _server_record("https://dead.databricks.com/api/2.0/omnigent"), pid=7
+    )
+    probed: list[str] = []
+
+    def _probe(url: str) -> str | None:
+        probed.append(url)
+        return "1"
+
+    found = find_same_workspace_daemon(
+        [dead, recorded],
+        server_url=_VANITY,
+        host_id=_HOST_ID,
+        is_live=lambda record: record.pid != 7,
+        probe=_probe,
+    )
+
+    assert found == recorded
+    # Only the requested URL needed the server; the dead record cost nothing.
+    assert probed == [_VANITY]
+
+
+def test_find_same_workspace_daemon_matches_host_id_spellings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server canonicalizes host ids, so a dashed spelling is the same host."""
+    import uuid
+
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    dashed = str(uuid.UUID(_HOST_ID)).upper()
+    record = dataclasses.replace(_server_record(_WORKSPACE_HOST, host_id=dashed), workspace_id="1")
+
+    found = find_same_workspace_daemon(
+        [record],
+        server_url=_VANITY,
+        host_id=_HOST_ID,
+        is_live=lambda _record: True,
+        workspace_id="1",
+    )
+
+    assert found == record
+
+
+def test_find_same_workspace_daemon_legacy_only_skips_lock_holders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.cli_auth import store_databricks_auth
+
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    store_databricks_auth(_WORKSPACE_HOST, "https://dbc-1.cloud.databricks.com", org_id="1")
+    holder = dataclasses.replace(_server_record(_WORKSPACE_HOST), workspace_id="1")
+    legacy = _server_record(_WORKSPACE_HOST)
+
+    def _find(record: HostDaemonRecord) -> HostDaemonRecord | None:
+        return find_same_workspace_daemon(
+            [record],
+            server_url=_VANITY,
+            host_id=_HOST_ID,
+            is_live=lambda _record: True,
+            workspace_id="1",
+            legacy_only=True,
+        )
+
+    assert _find(holder) is None
+    assert _find(legacy) == legacy
+
+
+def test_resolve_daemon_workspace_id_prefers_the_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server's answer beats a stale login record; the record covers a silent server."""
+    from omnigent.cli_auth import store_databricks_auth
+    from omnigent.host.daemon_lifecycle import resolve_daemon_workspace_id
+
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    store_databricks_auth(_VANITY, "https://dbc-1.cloud.databricks.com", org_id="2")
+    sent: list[str | None] = []
+
+    def _answers(answer: str | None):
+        def _probe(url: str, *, org_id: str | None = None) -> str | None:
+            sent.append(org_id)
+            return answer
+
+        return _probe
+
+    assert resolve_daemon_workspace_id(_VANITY, probe=_answers("1")) == "1"
+    assert resolve_daemon_workspace_id(_VANITY, probe=_answers(None)) == "2"
+    # The known selector is sent, so a shared host can name the workspace.
+    assert sent == ["2", "2"]
+
+
+def test_workspace_lock_admits_one_daemon_per_host_and_workspace(tmp_path: Path) -> None:
+    import uuid
+
+    first = DaemonLifecycleLock.for_workspace(_HOST_ID, "1", base_dir=tmp_path)
+    second = DaemonLifecycleLock.for_workspace(str(uuid.UUID(_HOST_ID)), "1", base_dir=tmp_path)
+    other_workspace = DaemonLifecycleLock.for_workspace(_HOST_ID, "2", base_dir=tmp_path)
+    try:
+        assert first.try_acquire() is True
+        assert second.try_acquire() is False
+        assert other_workspace.try_acquire() is True
+        first.release()
+        assert second.try_acquire() is True
+    finally:
+        for lock in (first, second, other_workspace):
+            lock.release()
+
+
+@pytest.fixture
+def _daemon_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the daemon registry and login records at *tmp_path*."""
+    monkeypatch.setattr("omnigent.host.daemon_lifecycle.data_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    monkeypatch.setattr(
+        "omnigent.host.daemon_lifecycle.probe_workspace_id",
+        lambda url, *, org_id=None: "1",
+    )
+    return tmp_path
+
+
+def test_daemon_yields_when_another_daemon_holds_the_workspace(_daemon_registry: Path) -> None:
+    from omnigent.host._daemon_entry import _claim_workspace
+
+    holder = DaemonLifecycleLock.for_workspace(_HOST_ID, "1")
+    assert holder.try_acquire() is True
+    try:
+        workspace_id, lock = _claim_workspace(
+            server_url=_VANITY, daemon_target=_VANITY, host_id=_HOST_ID
+        )
+    finally:
+        holder.release()
+
+    assert (workspace_id, lock) == ("1", None)
+
+
+def test_daemon_yields_to_an_older_version_daemon_on_the_workspace(
+    _daemon_registry: Path,
+) -> None:
+    """A live daemon without the workspace lock still owns the workspace."""
+    from omnigent.host._daemon_entry import _claim_workspace
+
+    legacy = _server_record(_WORKSPACE_HOST, pid=os.getpid())
+    legacy_lock = DaemonLifecycleLock.for_target(legacy.target)
+    assert legacy_lock.try_acquire() is True
+    write_daemon_record(legacy)
+    try:
+        workspace_id, lock = _claim_workspace(
+            server_url=_VANITY, daemon_target=_VANITY, host_id=_HOST_ID
+        )
+    finally:
+        legacy_lock.release()
+
+    assert (workspace_id, lock) == ("1", None)
+    # The yielding daemon released the workspace lock it briefly took.
+    assert DaemonLifecycleLock.for_workspace(_HOST_ID, "1").try_acquire() is True
+
+
+def test_daemon_claims_the_workspace_when_alone(_daemon_registry: Path) -> None:
+    from omnigent.host._daemon_entry import _claim_workspace
+
+    workspace_id, lock = _claim_workspace(
+        server_url=_VANITY, daemon_target=_VANITY, host_id=_HOST_ID
+    )
+    try:
+        assert workspace_id == "1"
+        assert lock is not None
+        assert DaemonLifecycleLock.for_workspace(_HOST_ID, "1").try_acquire() is False
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def test_daemon_skips_the_workspace_check_when_the_workspace_is_unknown(
+    _daemon_registry: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.host._daemon_entry import _claim_workspace
+
+    monkeypatch.setattr(
+        "omnigent.host.daemon_lifecycle.probe_workspace_id",
+        lambda url, *, org_id=None: None,
+    )
+
+    assert _claim_workspace(server_url=_VANITY, daemon_target=_VANITY, host_id=_HOST_ID) == (
+        None,
+        None,
+    )
+
+
+def test_read_daemon_records_loads_old_records_and_skips_lock_files(
+    _daemon_registry: Path,
+) -> None:
+    from omnigent.host.daemon_lifecycle import read_daemon_records
+
+    old = _server_record(_WORKSPACE_HOST)
+    path = daemon_record_path(old.target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {k: v for k, v in dataclasses.asdict(old).items() if k != "workspace_id"}
+    path.write_text(json.dumps(payload))
+    # A yielding daemon's empty record file and a workspace lock file.
+    daemon_record_path(_VANITY).write_text("")
+    DaemonLifecycleLock.for_workspace(_HOST_ID, "1").try_acquire()
+
+    assert read_daemon_records() == [old]

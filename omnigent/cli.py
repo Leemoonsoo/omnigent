@@ -115,6 +115,7 @@ from omnigent.util.server_url import org_id_from_url as _org_id_from_url
 if TYPE_CHECKING:
     import httpx
 
+    from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
     from omnigent.install_ledger import InstallLedger
     from omnigent.onboarding.acp_auth import AcpAgentEntry
     from omnigent.server.smart_routing import LLMRoutingClient
@@ -2775,6 +2776,7 @@ def _record_from_json(raw: _HostJsonObject) -> _HostDaemonRecord | None:
     host_id = raw.get("host_id")
     resolved_server_url = raw.get("resolved_server_url")
     config_sig = raw.get("config_sig")
+    workspace_id = raw.get("workspace_id")
     return _HostDaemonRecord(
         pid=pid,
         target=target,
@@ -2789,6 +2791,7 @@ def _record_from_json(raw: _HostJsonObject) -> _HostDaemonRecord | None:
             else None
         ),
         config_sig=config_sig if isinstance(config_sig, str) and config_sig else None,
+        workspace_id=workspace_id if isinstance(workspace_id, str) and workspace_id else None,
     )
 
 
@@ -3134,11 +3137,14 @@ def _same_workspace_daemon(
     """
     if not server_url:
         return None
+    from omnigent.host.daemon_lifecycle import probe_workspace_id
+
     return _find_same_workspace_daemon(
         _list_daemon_records(),
         server_url=server_url,
         host_id=host_id if host_id is not None else _load_existing_host_id(),
         is_live=_daemon_owner_is_live,
+        probe=probe_workspace_id,
     )
 
 
@@ -3243,13 +3249,23 @@ def _wait_for_daemon_claim(
     spawned: _SpawnedDaemonProcess,
     *,
     timeout_s: float = _DAEMON_CLAIM_TIMEOUT_S,
+    server_url: str | None = None,
 ) -> _HostDaemonRecord | None:
-    """Wait for a spawned daemon (or its concurrent winner) to claim *target*."""
+    """Wait for a spawned daemon (or its concurrent winner) to claim *target*.
+
+    A daemon that found another one already serving its workspace exits
+    without claiming; the record returned then is that daemon's, under
+    another target.
+    """
     deadline = time.monotonic() + timeout_s
     while True:
         record = _find_daemon_record(target)
         if record is not None and _daemon_owner_is_live(record):
             return record
+        if spawned.process is not None and spawned.process.poll() is not None:
+            sibling = _same_workspace_daemon(server_url)
+            if sibling is not None:
+                return sibling
         if time.monotonic() >= deadline:
             return None
         # A losing child exits promptly, but the winner's process may still be
@@ -3482,6 +3498,47 @@ def _raise_live_daemon_conflict(
     )
 
 
+def _claim_foreground_workspace(
+    record: _HostDaemonRecord, server_url: str
+) -> DaemonLifecycleLock | None:
+    """
+    Hold the one-daemon-per-workspace lock for a foreground host.
+
+    :param record: Foreground record this process claimed.
+    :param server_url: Server URL the host connects to.
+    :returns: The held lock, or ``None`` when the workspace is unknown.
+    :raises click.ClickException: If another daemon holds the workspace.
+    """
+    from omnigent.host.daemon_lifecycle import (
+        DaemonLifecycleLock,
+        find_same_workspace_daemon,
+        resolve_daemon_workspace_id,
+    )
+
+    if record.host_id is None:
+        return None
+    workspace_id = resolve_daemon_workspace_id(server_url)
+    if workspace_id is None:
+        return None
+    lock = DaemonLifecycleLock.for_workspace(record.host_id, workspace_id)
+    if lock.try_acquire() is False:
+        holder = find_same_workspace_daemon(
+            _list_daemon_records(),
+            server_url=server_url,
+            host_id=record.host_id,
+            is_live=_daemon_owner_is_live,
+            workspace_id=workspace_id,
+        )
+        if holder is not None:
+            _raise_live_daemon_conflict(record, holder)
+        raise click.ClickException(
+            f"Another host daemon on this machine already serves workspace {workspace_id}. "
+            f"Run `{cli_invocation()} host status --all` to see it."
+        )
+    _write_daemon_record(_HostDaemonRecord(**{**asdict(record), "workspace_id": workspace_id}))
+    return lock
+
+
 def _restore_replaced_daemon_record(
     record: _HostDaemonRecord,
     previous: _HostDaemonRecord | None,
@@ -3580,7 +3637,10 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     if spawned is None:
         _record_host_state("start_failed")
         return False
-    claimed = _wait_for_daemon_claim(target, spawned)
+    claimed = _wait_for_daemon_claim(target, spawned, server_url=server_url)
+    if claimed is not None and claimed.target != target:
+        _record_host_state("reused_same_workspace_daemon", running_before=True)
+        return False
     if claimed is None:
         _record_host_state("start_timeout")
         _stop_spawned_host_daemon_process(spawned)
@@ -9415,6 +9475,7 @@ def host(
     # exit). A connection failure (SystemExit) leaves this False so we don't
     # prompt over an error.
     stopped_cleanly = False
+    workspace_lock = None
     try:
         # Sign in first when the remote server is Databricks-fronted and we
         # hold no usable credentials — otherwise the tunnel upgrade is
@@ -9428,6 +9489,7 @@ def host(
             sibling = _same_workspace_daemon(server, host_id=record.host_id)
             if sibling is not None:
                 _raise_live_daemon_conflict(record, sibling)
+            workspace_lock = _claim_foreground_workspace(record, server)
         _maybe_open_host_web_ui(server, non_interactive=non_interactive, no_open=no_open, cfg=cfg)
         run_host_process(server_url=server, daemon_target=target)
         stopped_cleanly = True
@@ -9436,6 +9498,8 @@ def host(
         # so we can prompt below instead of exiting with an "Aborted!" trace.
         stopped_cleanly = True
     finally:
+        if workspace_lock is not None:
+            workspace_lock.release()
         _restore_replaced_daemon_record(record, previous)
         # Offer to stop the local server only when WE spawned it this run.
         # Not in --server mode (someone else's server), and not when we reused

@@ -54,6 +54,9 @@ class HostDaemonRecord:
     :param host_id: Stable host id advertised to the server.
     :param resolved_server_url: Concrete URL owned by a local-mode daemon.
     :param config_sig: Signature of server-affecting launch configuration.
+    :param workspace_id: Databricks workspace id the daemon connects to, as
+        the server reported it at startup, e.g. ``"123"``; ``None`` when
+        unknown or for records written by older daemons.
     """
 
     pid: int
@@ -65,6 +68,7 @@ class HostDaemonRecord:
     host_id: str | None = None
     resolved_server_url: str | None = None
     config_sig: str | None = None
+    workspace_id: str | None = None
 
 
 def normalize_daemon_target(server_url: str | None) -> str:
@@ -121,12 +125,87 @@ def daemon_workspace_id(server_url: str) -> str | None:
     return ServerUrl.from_api_base(server_url).org_id
 
 
+# Databricks answers every request with the workspace it routed to, even
+# unauthenticated ones, so this header names a URL's workspace without a token.
+_ORG_ID_RESPONSE_HEADER = "x-databricks-org-id"
+_WORKSPACE_PROBE_TIMEOUT_S = 3.0
+
+
+def probe_workspace_id(server_url: str, *, org_id: str | None = None) -> str | None:
+    """Ask the server which Databricks workspace *server_url* reaches.
+
+    :param server_url: Server API base, e.g.
+        ``"https://example.databricks.com/api/2.0/omnigent"``.
+    :param org_id: Workspace selector to send, e.g. ``"123"``. A host shared
+        by several workspaces names one only when the request selects it.
+    :returns: The workspace id the server reported, e.g. ``"123"``, or
+        ``None`` when the server is unreachable or names none (non-Databricks
+        servers, a shared host without a selector).
+    """
+    import httpx
+
+    from omnigent.cli_auth import DATABRICKS_ORG_ID_HEADER
+
+    headers = {DATABRICKS_ORG_ID_HEADER: org_id} if org_id else {}
+    try:
+        response = httpx.get(
+            f"{server_url.rstrip('/')}/v1/me",
+            headers=headers,
+            timeout=_WORKSPACE_PROBE_TIMEOUT_S,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError:
+        return None
+    value = response.headers.get(_ORG_ID_RESPONSE_HEADER, "").strip()
+    return value if value.isdecimal() else None
+
+
+def resolve_daemon_workspace_id(
+    server_url: str,
+    *,
+    probe: Callable[..., str | None] | None = None,
+) -> str | None:
+    """Return the workspace id a daemon for *server_url* will connect to.
+
+    The server's answer wins over the login record, which can be missing (a
+    sign-in through a Databricks CLI profile writes none) or stale.
+
+    :param server_url: Server API base, e.g.
+        ``"https://example.databricks.com/api/2.0/omnigent"``.
+    :param probe: Server lookup, :func:`probe_workspace_id` by default.
+    :returns: The workspace id, e.g. ``"123"``, or ``None`` when unknown.
+    """
+    known = daemon_workspace_id(server_url)
+    return (probe or probe_workspace_id)(server_url, org_id=known) or known
+
+
+def normalize_host_id(host_id: str | None) -> str | None:
+    """Return *host_id* in the bare-hex form the server keys hosts by.
+
+    :param host_id: Host id in any accepted spelling (bare, dashed,
+        ``host_``-prefixed), or ``None``.
+    :returns: Bare lowercase hex, *host_id* unchanged when it is not
+        uuid-shaped, or ``None``.
+    """
+    if host_id is None:
+        return None
+    from omnigent.util.uuid import InvalidUuidError, uuid_to_bytes
+
+    try:
+        return uuid_to_bytes(host_id).hex()
+    except InvalidUuidError:
+        return host_id
+
+
 def find_same_workspace_daemon(
     records: Iterable[HostDaemonRecord],
     *,
     server_url: str,
     host_id: str | None,
     is_live: Callable[[HostDaemonRecord], bool],
+    workspace_id: str | None = None,
+    probe: Callable[..., str | None] | None = None,
+    legacy_only: bool = False,
 ) -> HostDaemonRecord | None:
     """Find a live daemon serving *server_url*'s workspace under another URL.
 
@@ -142,26 +221,100 @@ def find_same_workspace_daemon(
     :param host_id: Host id the caller would advertise, e.g.
         ``"9eb97e60d38b43919d996b4918f63493"``. ``None`` never matches.
     :param is_live: Liveness check for a record's owner.
+    :param workspace_id: *server_url*'s workspace id when the caller already
+        knows it, e.g. ``"123"``.
+    :param probe: Server lookup (see :func:`probe_workspace_id`) used only
+        when a candidate's workspace id is otherwise unknown; ``None`` keeps
+        the lookup offline.
+    :param legacy_only: Consider only records without a ``workspace_id``,
+        i.e. daemons from versions that don't take the workspace lock.
     :returns: The live record, or ``None``.
     """
-    if host_id is None:
+    wanted_host = normalize_host_id(host_id)
+    if wanted_host is None:
         return None
     target = normalize_daemon_target(server_url)
-    workspace_id: str | None = None
+    probed: dict[str, str | None] = {}
+
+    def _lookup(url: str, recorded: str | None) -> str | None:
+        if recorded:
+            return recorded
+        known = daemon_workspace_id(url)
+        if known is not None or probe is None:
+            return known
+        if url not in probed:
+            probed[url] = probe(url)
+        return probed[url]
+
     for record in records:
-        if record.mode != "server" or record.server_url is None or record.host_id != host_id:
+        if record.mode != "server" or record.server_url is None:
+            continue
+        if normalize_host_id(record.host_id) != wanted_host:
             continue
         if normalize_daemon_target(record.target) == target:
             continue
+        if legacy_only and record.workspace_id:
+            continue
+        # Liveness first: a dead record must not cost a server probe.
+        if not is_live(record):
+            continue
         if workspace_id is None:
-            workspace_id = daemon_workspace_id(server_url)
+            workspace_id = _lookup(server_url, None)
             if workspace_id is None:
                 return None
-        if daemon_workspace_id(record.server_url) != workspace_id:
-            continue
-        if is_live(record):
+        if _lookup(record.server_url, record.workspace_id) == workspace_id:
             return record
     return None
+
+
+def workspace_lock_path(host_id: str, workspace_id: str, *, base_dir: Path | None = None) -> Path:
+    """Return the lock file one daemon per (host id, workspace) holds.
+
+    :param host_id: Host id in any accepted spelling.
+    :param workspace_id: Databricks workspace id, e.g. ``"123"``.
+    :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+    :returns: ``<base>/daemons/workspace-<digest>.lock``.
+    """
+    key = f"{normalize_host_id(host_id)}:{workspace_id}"
+    return daemon_registry_dir(base_dir) / f"workspace-{_target_digest(key)}.lock"
+
+
+def read_daemon_records(base_dir: Path | None = None) -> list[HostDaemonRecord]:
+    """Read every well-formed per-target record, for daemon-side checks.
+
+    :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+    :returns: Records in no particular order; malformed files are skipped.
+    """
+    names = set(HostDaemonRecord.__dataclass_fields__)
+    records: list[HostDaemonRecord] = []
+    registry = daemon_registry_dir(base_dir)
+    for path in registry.glob("*.json") if registry.exists() else ():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            records.append(HostDaemonRecord(**{k: v for k, v in raw.items() if k in names}))
+        except (OSError, UnicodeDecodeError, ValueError, TypeError, AttributeError):
+            continue
+    return records
+
+
+def record_owner_is_live(record: HostDaemonRecord, *, base_dir: Path | None = None) -> bool:
+    """Whether *record*'s daemon is alive: its record flock, else its pid.
+
+    :param record: Record to check.
+    :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+    :returns: ``True`` when the owner holds the record flock, or the lock
+        can't be probed and the pid is alive.
+    """
+    held = record_flock_is_held(daemon_record_path(record.target, base_dir=base_dir))
+    if held is not None:
+        return held
+    try:
+        os.kill(record.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _target_digest(target: str) -> str:
@@ -279,6 +432,30 @@ class DaemonLifecycleLock:
             target=target,
             record_path=daemon_record_path(target, base_dir=base_dir),
             pid=pid if pid is not None else os.getpid(),
+        )
+
+    @classmethod
+    def for_workspace(
+        cls,
+        host_id: str,
+        workspace_id: str,
+        *,
+        base_dir: Path | None = None,
+    ) -> DaemonLifecycleLock:
+        """Build the lock that admits one daemon per (host id, workspace).
+
+        Two URLs can reach one workspace; the per-target lock can't tell them
+        apart, so a daemon also holds this one for its whole life.
+
+        :param host_id: Host id the daemon advertises.
+        :param workspace_id: Databricks workspace id, e.g. ``"123"``.
+        :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+        :returns: An unacquired :class:`DaemonLifecycleLock`.
+        """
+        return cls(
+            target=f"workspace:{workspace_id}",
+            record_path=workspace_lock_path(host_id, workspace_id, base_dir=base_dir),
+            pid=os.getpid(),
         )
 
     @property
