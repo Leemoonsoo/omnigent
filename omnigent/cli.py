@@ -3142,6 +3142,90 @@ def _same_workspace_daemon(
     )
 
 
+def _record_probed_through(record: _HostDaemonRecord, server_url: str) -> _HostDaemonRecord:
+    """
+    Copy *record* so host-status probes go through *server_url* instead.
+
+    Another URL for the same workspace reaches the same host row, and its
+    credentials may work where the daemon's own no longer do.
+
+    :param record: Daemon record to probe, e.g. one on the workspace host.
+    :param server_url: Server URL to probe through, e.g.
+        ``"https://example.databricks.com/api/2.0/omnigent"``.
+    :returns: The copied record, targeting *server_url*.
+    """
+    target = _normalize_daemon_target(server_url)
+    return _HostDaemonRecord(**{**asdict(record), "target": target, "server_url": target})
+
+
+def _same_workspace_daemon_offline_reason(
+    sibling: _HostDaemonRecord, server_url: str | None
+) -> str | None:
+    """
+    Explain why a same-workspace daemon can't serve this machine, if it can't.
+
+    A live daemon whose tunnel is down (its sign-in expired, say) can't be
+    reused, and a second daemon would take over its connection once it
+    reconnects. The server is asked through the requested URL first, since
+    the sibling's own credentials may be what stopped working. A daemon still
+    starting up gets the same grace as :func:`_reuse_existing_daemon_record`,
+    and one the server can't be asked about through either URL is reused as
+    before rather than refused.
+
+    :param sibling: Live daemon found by :func:`_same_workspace_daemon`.
+    :param server_url: Requested server URL, e.g.
+        ``"https://example.databricks.com/api/2.0/omnigent"``.
+    :returns: ``None`` when the sibling's host is online, still starting, or
+        its status is unknown, else a short reason, e.g.
+        ``"its server rejected its sign-in (HTTP 401)"``.
+    """
+    if time.time() - sibling.started_at < _DAEMON_REUSE_MIN_AGE_S:
+        return None
+    probes = [sibling]
+    if server_url:
+        probes.insert(0, _record_probed_through(sibling, server_url))
+    deadline = time.monotonic() + _DAEMON_RECONNECT_GRACE_S
+    while True:
+        results = [_daemon_host_status_probe(probe) for probe in probes]
+        if any(_host_status_reports_online(result) for result in results):
+            return None
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    # Only the server's own answer (a host row, or 404 for a host that never
+    # registered) proves the host is offline; failed probes may just mean this
+    # command can't sign in to either URL.
+    if not any(result is not None and result.status_code in (200, 404) for result in results):
+        return None
+    own = results[-1]
+    if own is not None and own.status_code in (401, 403):
+        return f"its server rejected its sign-in (HTTP {own.status_code})"
+    if own is not None and own.status_code == 0:
+        return "it can't reach its server"
+    return "its host is not connected to the server"
+
+
+def _offline_same_workspace_daemon_error(
+    sibling: _HostDaemonRecord, reason: str
+) -> click.ClickException:
+    """
+    Build the refusal for a same-workspace daemon that isn't connected.
+
+    :param sibling: Live daemon found by :func:`_same_workspace_daemon`.
+    :param reason: Why it can't serve, from
+        :func:`_same_workspace_daemon_offline_reason`.
+    :returns: An exception naming the daemon and how to recover it.
+    """
+    display = _host_display_url(sibling.server_url or sibling.target)
+    return click.ClickException(
+        "A host daemon is already running for this workspace under another URL "
+        f"({_describe_pid(sibling.pid)}, target={sibling.target}), but {reason}. "
+        "A second one would take over its connection once it reconnects. If its "
+        f"sign-in expired, run `{cli_invocation()} login {display}`; otherwise stop "
+        f"it with `{_host_stop_command(sibling.server_url or '')}` and retry."
+    )
+
+
 def _local_daemon_serves_target(target: str, server_url: str | None) -> bool:
     """
     Check whether the local daemon already serves a requested URL target.
@@ -3456,6 +3540,10 @@ def _raise_live_daemon_conflict(
             f"({_describe_pid(conflict.pid)}, target={conflict.target}). "
         )
     if same_workspace and not _pid_is_foreign(conflict.pid):
+        reason = _same_workspace_daemon_offline_reason(conflict, record.server_url)
+        if reason is not None:
+            # Keep the stale-host hint: the running daemon is what needs fixing.
+            raise _offline_same_workspace_daemon_error(conflict, reason)
         exc = click.ClickException(
             detail + "It already connects this machine to the workspace, so there is "
             f"nothing more to do. Run `{cli_invocation()} host status` to see it."
@@ -3563,7 +3651,12 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     if not decision.config_changed and _local_daemon_serves_target(target, server_url):
         _record_host_state("reused_local_daemon", running_before=True)
         return False
-    if _same_workspace_daemon(server_url) is not None:
+    sibling = _same_workspace_daemon(server_url)
+    if sibling is not None:
+        reason = _same_workspace_daemon_offline_reason(sibling, server_url)
+        if reason is not None:
+            _record_host_state("same_workspace_daemon_offline", running_before=True)
+            raise _offline_same_workspace_daemon_error(sibling, reason)
         _record_host_state("reused_same_workspace_daemon", running_before=True)
         return False
 
@@ -9229,7 +9322,11 @@ def _run_background_host(
             record = _find_daemon_record(target) or record
         else:
             server_url = _normalize_daemon_target(record.target)
-        _confirm_background_host_registered(record)
+        # This command just signed in to the requested URL; the reused
+        # daemon's own credentials may be the ones that stopped working.
+        _confirm_background_host_registered(
+            _record_probed_through(record, target) if same_workspace is not None else record
+        )
     except click.ClickException:
         if not reused:
             with contextlib.suppress(click.ClickException):
