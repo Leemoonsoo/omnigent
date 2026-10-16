@@ -587,6 +587,34 @@ async def test_resumed_fallback_resets_pick_only_if_preload_and_terminal_succeed
     )
 
 
+_FORK_PICK = "system.ai.gpt-6-1-sol"
+
+
+def _seed_fork_source(harness: _LaunchHarness, *, source_model: str, carry_history: bool) -> None:
+    """Make the launch a fork onto ``_FORK_PICK`` of a same-host source rollout."""
+    source_thread = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    harness.snapshot["model_override"] = _FORK_PICK
+    harness.snapshot["labels"] = {
+        "omnigent.fork.source_id": "conv_source",
+        "omnigent.fork.source_external_session_id": source_thread,
+        **({"omnigent.fork.carry_history": "1"} if carry_history else {}),
+    }
+    harness.seed_catalog([{"id": "gpt-6.1-sol", "isDefault": True}])
+    source_home = codex_native_bridge.codex_home_for_bridge_dir(
+        codex_native_bridge.bridge_dir_for_bridge_id("conv_source")
+    )
+    rollout_dir = source_home / "sessions" / "2026" / "10" / "15"
+    rollout_dir.mkdir(parents=True)
+    turn = {"turn_id": "turn_1", "cwd": "/repo", "model": source_model}
+    (rollout_dir / f"rollout-2026-10-15T16-28-06-{source_thread}.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": source_thread, "cwd": "/repo"}})
+        + "\n"
+        + json.dumps({"type": "turn_context", "payload": turn})
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("source_model", "carry_history", "rebuilt"),
@@ -607,28 +635,7 @@ async def test_fork_onto_another_model_rebuilds_history_instead_of_cloning(
 ) -> None:
     """A fork whose model differs from the source's last turn is rebuilt from items."""
     harness = codex_launch_harness
-    pick = "system.ai.gpt-6-1-sol"
-    source_thread = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    harness.snapshot["model_override"] = pick
-    harness.snapshot["labels"] = {
-        "omnigent.fork.source_id": "conv_source",
-        "omnigent.fork.source_external_session_id": source_thread,
-        **({"omnigent.fork.carry_history": "1"} if carry_history else {}),
-    }
-    harness.seed_catalog([{"id": "gpt-6.1-sol", "isDefault": True}])
-    source_home = codex_native_bridge.codex_home_for_bridge_dir(
-        codex_native_bridge.bridge_dir_for_bridge_id("conv_source")
-    )
-    rollout_dir = source_home / "sessions" / "2026" / "10" / "15"
-    rollout_dir.mkdir(parents=True)
-    turn = {"turn_id": "turn_1", "cwd": "/repo", "model": source_model}
-    (rollout_dir / f"rollout-2026-10-15T16-28-06-{source_thread}.jsonl").write_text(
-        json.dumps({"type": "session_meta", "payload": {"id": source_thread, "cwd": "/repo"}})
-        + "\n"
-        + json.dumps({"type": "turn_context", "payload": turn})
-        + "\n",
-        encoding="utf-8",
-    )
+    _seed_fork_source(harness, source_model=source_model, carry_history=carry_history)
     rebuild = AsyncMock(
         side_effect=lambda *_args, **kwargs: kwargs["codex_home"] / "rebuilt.jsonl"
     )
@@ -641,11 +648,31 @@ async def test_fork_onto_another_model_rebuilds_history_instead_of_cloning(
 
     await harness.launch()
 
-    assert harness.builds[0]["model"] == pick
+    assert harness.builds[0]["model"] == _FORK_PICK
     assert rebuild.await_count == (1 if rebuilt else 0)
     clone_home = harness.builds[0]["codex_home"]
     assert bool(list(clone_home.glob("sessions/**/rollout-*.jsonl"))) is not rebuilt
     preload.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fork_onto_another_model_fails_when_its_history_cannot_be_rebuilt(
+    codex_launch_harness: _LaunchHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declined clone leaves only the rebuild, so a fresh launch would drop the history."""
+    from omnigent.harnesses.codex_native.main import _CodexResumeHistoryUnavailableError
+
+    harness = codex_launch_harness
+    _seed_fork_source(harness, source_model="system.ai.gpt-6-astra", carry_history=True)
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.main._ensure_local_codex_resume_rollout",
+        AsyncMock(side_effect=_CodexResumeHistoryUnavailableError("history returned 503")),
+    )
+
+    with pytest.raises(_CodexResumeHistoryUnavailableError, match="503"):
+        await harness.launch()
+
+    harness.registry.launch_auxiliary_terminal.assert_not_awaited()
 
 
 @pytest.mark.asyncio

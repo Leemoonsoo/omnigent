@@ -11560,16 +11560,22 @@ def test_clone_codex_rollout_declines_source_whose_last_turn_used_another_model(
             handle.write(json.dumps({"type": "turn_context", "payload": turn}) + "\n")
     clone_home = codex_home_for_bridge_dir(bridge_dir_for_bridge_id("conv_clone"))
 
-    result = codex_native._clone_codex_rollout(
-        source_session_id="conv_source",
-        source_thread_id=source_thread,
-        target_thread_id="019eaa11-1111-7222-8333-444455556666",
-        clone_codex_home=clone_home,
-        clone_workspace=tmp_path / "clone",
-        clone_model=clone_model,
-    )
+    def clone() -> Path | None:
+        return codex_native._clone_codex_rollout(
+            source_session_id="conv_source",
+            source_thread_id=source_thread,
+            target_thread_id="019eaa11-1111-7222-8333-444455556666",
+            clone_codex_home=clone_home,
+            clone_workspace=tmp_path / "clone",
+            clone_model=clone_model,
+        )
 
-    assert (result is not None) is cloned
+    if cloned:
+        assert clone() is not None
+    else:
+        # A declined clone tells the caller that only an item rebuild carries the history.
+        with pytest.raises(codex_native._CodexForkModelMismatchError, match="gpt-6-astra"):
+            clone()
     assert bool(list(clone_home.glob("sessions/**/*.jsonl"))) is cloned
 
 

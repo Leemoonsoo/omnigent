@@ -1857,6 +1857,10 @@ def _copy_rollout_with_cwd(
             dst.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
+class _CodexForkModelMismatchError(Exception):
+    """A fork's source rollout last ran on a model other than the fork's."""
+
+
 def _clone_codex_rollout(
     *,
     source_session_id: str,
@@ -1904,9 +1908,10 @@ def _clone_codex_rollout(
         whenever that model is unavailable (for example, over budget).
         ``None`` skips the check.
     :returns: Path to the written clone rollout, or ``None`` when the ids
-        are unsafe, the source rollout can't be found on this host, or the
-        source's last turn used a model other than *clone_model* (the caller
-        rebuilds from Omnigent items or launches fresh in those cases).
+        are unsafe or the source rollout can't be found on this host (the
+        caller rebuilds from Omnigent items or launches fresh).
+    :raises _CodexForkModelMismatchError: If the source's last turn used a
+        model other than *clone_model*; the caller must rebuild the history.
     :raises click.ClickException: If the source rollout is malformed.
     """
     if not _CODEX_THREAD_ID_RE.fullmatch(source_thread_id):
@@ -1924,14 +1929,10 @@ def _clone_codex_rollout(
         if source_model is not None and comparable_model_id(source_model) != comparable_model_id(
             clone_model
         ):
-            _logger.info(
-                "Not cloning Codex rollout %s for fork: its last turn ran on %s, "
-                "but the fork launches on %s",
-                source.name,
-                source_model,
-                clone_model,
+            raise _CodexForkModelMismatchError(
+                f"Codex rollout {source.name} last ran on {source_model}, "
+                f"but the fork launches on {clone_model}"
             )
-            return None
     # Preserve the source's ``sessions/<YYYY>/<MM>/<DD>/`` layout; only swap
     # the thread id embedded in the rollout filename so the clone lands in
     # its own CODEX_HOME under the assigned id.
