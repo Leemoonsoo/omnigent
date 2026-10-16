@@ -2707,15 +2707,15 @@ def _host_status_reports_offline(result: _HostHttpResult | None) -> bool:
 
     :param result: Probe result from :func:`_daemon_host_status_probe`.
     :returns: ``True`` on a 200 whose body reports ``"offline"``, or on the
-        server's JSON 404 for a host that never registered. Transport failures,
-        auth rejections, and unrecognized bodies (an HTML error page, say) are
-        not proof either way.
+        hosts route's own ``"host not found"`` 404 for a host that never
+        registered. Transport failures, auth rejections, and other bodies (an
+        unknown route's 404, an HTML error page) are not proof either way.
     """
     if result is None or not isinstance(result.body, dict):
         return False
     if result.status_code == 200:
         return result.body.get("status") == "offline"
-    return result.status_code == 404
+    return result.status_code == 404 and result.body.get("detail") == "host not found"
 
 
 def _daemon_host_online(record: _HostDaemonRecord, *, timeout_s: float = 2.0) -> bool:
@@ -3181,13 +3181,9 @@ def _same_workspace_daemon_offline_reason(
     """
     Explain why a same-workspace daemon can't serve this machine, if it can't.
 
-    A live daemon whose tunnel is down (its sign-in expired, say) can't be
-    reused, and a second daemon would take over its connection once it
-    reconnects. The server is asked through the requested URL first, since
-    the sibling's own credentials may be what stopped working. A daemon still
-    starting up gets the same grace as :func:`_reuse_existing_daemon_record`,
-    and one the server can't be asked about through either URL is reused as
-    before rather than refused.
+    The requested URL is probed first because the sibling's own credentials
+    may be what expired. A sibling that may still reconnect is not refused,
+    since a competing daemon would take over its connection.
 
     :param sibling: Live daemon found by :func:`_same_workspace_daemon`.
     :param server_url: Requested server URL, e.g.
@@ -3206,13 +3202,13 @@ def _same_workspace_daemon_offline_reason(
         results = [_daemon_host_status_probe(probe) for probe in probes]
         if any(_host_status_reports_online(result) for result in results):
             return None
+        # Failed or unrecognized probes may just mean this command can't sign
+        # in to either URL, so only the server's own answer counts.
+        if not any(_host_status_reports_offline(result) for result in results):
+            return None
         if time.monotonic() >= deadline:
             break
         time.sleep(0.5)
-    # Failed or unrecognized probes may just mean this command can't sign in to
-    # either URL, so only the server's own answer counts.
-    if not any(_host_status_reports_offline(result) for result in results):
-        return None
     own = results[-1]
     if own is not None and own.status_code in (401, 403):
         return f"its server rejected its sign-in (HTTP {own.status_code})"

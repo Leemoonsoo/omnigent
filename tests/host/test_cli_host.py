@@ -1335,6 +1335,7 @@ _HOST_UNREACHABLE = cli_module._HostHttpResult(status_code=0, body="connection r
 _HOST_HTML_PAGE = cli_module._HostHttpResult(status_code=200, body="<html>Sign in</html>")
 _HOST_UNKNOWN_STATE = cli_module._HostHttpResult(status_code=200, body={"status": "draining"})
 _HOST_PROXY_NOT_FOUND = cli_module._HostHttpResult(status_code=404, body="<html>Not Found</html>")
+_ROUTE_NOT_FOUND = cli_module._HostHttpResult(status_code=404, body={"detail": "Not Found"})
 
 
 def _stub_host_status_by_url(
@@ -1374,6 +1375,7 @@ def _stub_host_status_by_url(
         (60, _HOST_HTML_PAGE, _HOST_REJECTED, None),
         (60, _HOST_UNKNOWN_STATE, _HOST_REJECTED, None),
         (60, _HOST_PROXY_NOT_FOUND, _HOST_UNREACHABLE, None),
+        (60, _ROUTE_NOT_FOUND, _HOST_UNREACHABLE, None),
         # Just started and still connecting: no verdict yet.
         (0, _HOST_OFFLINE, _HOST_OFFLINE, None),
     ],
@@ -1404,6 +1406,8 @@ def test_same_workspace_daemon_offline_reason(
         ([_HOST_OFFLINE, _HOST_ONLINE], None, 2),
         # Still offline when the grace runs out.
         ([_HOST_OFFLINE] * 11, "its server rejected its sign-in (HTTP 401)", 11),
+        # No verdict from either URL: reused at once, without waiting out the grace.
+        ([_HOST_REJECTED], None, 1),
     ],
 )
 def test_same_workspace_daemon_offline_reason_waits_out_a_reconnect(
