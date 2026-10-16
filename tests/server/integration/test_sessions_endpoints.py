@@ -5692,9 +5692,9 @@ _CODEX_COMPACTION_BUDGET_DETAIL = (
 _CODEX_COMPACTION_BUDGET_CARD = {
     "title": "gpt-6-astra is over its AI gateway budget",
     "cause": (
-        "The AI gateway refused a request on gpt-6-astra because its budget is exhausted. "
-        "Codex repeats that request on every turn to compact on the previous model before "
-        "switching to gpt-6-1-sol, so switching models doesn't help."
+        "The AI gateway refused a compaction request on gpt-6-astra: its budget is exhausted. "
+        "Codex retries it every turn before switching to gpt-6-1-sol, so switching models "
+        "doesn't help."
     ),
     "remediation": (
         "Fork this session to continue on gpt-6-1-sol. The fork rebuilds the conversation "
@@ -5705,8 +5705,8 @@ _CODEX_COMPACTION_BUDGET_CARD = {
 _CODEX_COMPACTION_RETRY_CARD = {
     "title": "Codex can't compact on gpt-6-astra right now",
     "cause": (
-        "Codex compacts this conversation on the previous model, gpt-6-astra, before it can "
-        "switch to gpt-6-1-sol, and gpt-6-astra is temporarily unavailable."
+        "Codex compacts this conversation on the previous model, gpt-6-astra, before "
+        "switching to gpt-6-1-sol, and that model is temporarily unavailable."
     ),
     "remediation": "Retry later, or choose Fork in the session menu to continue on gpt-6-1-sol.",
 }

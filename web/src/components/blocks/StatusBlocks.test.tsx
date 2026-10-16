@@ -826,7 +826,8 @@ describe("Codex compaction on the previous model", () => {
   beforeEach(() => useChatStore.setState({ conversationId: "conv_parent" }));
   afterEach(() => useChatStore.setState({ conversationId: null }));
 
-  const cause = "The AI gateway refused a request on gpt-6-astra because its budget is exhausted.";
+  const cause =
+    "The AI gateway refused a compaction request on gpt-6-astra: its budget is exhausted.";
   const gatewayError =
     'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":"Budget \\"example-budget\\" has reached its limit of $100."}';
 
@@ -849,6 +850,23 @@ describe("Codex compaction on the previous model", () => {
     expect(hint).toHaveTextContent(/Fork session…$/);
     fireEvent.click(screen.getByRole("button", { name: "Fork session…" }));
     expect(openForkDialog).toHaveBeenCalledExactlyOnceWith({ sourceSessionId: "conv_parent" });
+  });
+
+  it("copies the provider's error from the hint", async () => {
+    render(
+      <ErrorBanner
+        message={gatewayError}
+        source="execution"
+        code="codex_compaction_model_failed"
+        title="gpt-6-astra is over its AI gateway budget"
+        cause={cause}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy error" }));
+
+    expect(copyText).toHaveBeenLastCalledWith(gatewayError);
+    expect(await screen.findByRole("button", { name: "Error copied" })).toBeInTheDocument();
   });
 
   it("does not repeat the hint in a Message section", () => {

@@ -396,24 +396,23 @@ def diagnose_codex_compaction_model_failure(
 
     previous = bare_model_id(compaction_model)
     selected = bare_model_id(selected_model)
-    prefix = (
-        f"Codex compacts this conversation on the previous model, {previous}, "
-        f"before it can switch to {selected}"
-    )
+    # Each cause is stored as a 256-character label, so it names each model once.
     if code in {"rate_limit_exceeded", "transient_upstream_error"}:
         return FailureDiagnosis(
             title=f"Codex can't compact on {previous} right now",
-            cause=f"{prefix}, and {previous} is temporarily unavailable.",
+            cause=(
+                f"Codex compacts this conversation on the previous model, {previous}, "
+                f"before switching to {selected}, and that model is temporarily unavailable."
+            ),
             # These keep their Retry action, so Fork is only in the session menu.
             remediation=(
                 f"Retry later, or choose Fork in the session menu to continue on {selected}."
             ),
             category=ErrorCategory.UPSTREAM,
         )
-    # Stored as a 256-character label, so the sentence stays short.
     repeated = (
-        "Codex repeats that request on every turn to compact on the previous model "
-        f"before switching to {selected}, so switching models doesn't help."
+        f"Codex retries it every turn before switching to {selected}, "
+        "so switching models doesn't help."
     )
     fork = (
         f"Fork this session to continue on {selected}. The fork rebuilds the "
@@ -424,7 +423,7 @@ def diagnose_codex_compaction_model_failure(
         return FailureDiagnosis(
             title=f"{previous} is over its AI gateway budget",
             cause=(
-                f"The AI gateway refused a request on {previous} because its budget is "
+                f"The AI gateway refused a compaction request on {previous}: its budget is "
                 f"exhausted. {repeated}"
             ),
             remediation=f"{fork} Or ask an admin to raise that budget.",
@@ -432,7 +431,7 @@ def diagnose_codex_compaction_model_failure(
         )
     return FailureDiagnosis(
         title=f"Codex can't compact on {previous}",
-        cause=f"{previous} rejected a request. {repeated}",
+        cause=f"{previous} rejected a compaction request. {repeated}",
         remediation=fork,
         category=ErrorCategory.UPSTREAM,
     )

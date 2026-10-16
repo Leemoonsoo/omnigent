@@ -518,7 +518,7 @@ def test_model_unavailable_ignores_unrelated_errors(message: str) -> None:
 
 _COMPACTION_PREFIX = (
     "Codex compacts this conversation on the previous model, gpt-6-astra, "
-    "before it can switch to gpt-6-1-sol"
+    "before switching to gpt-6-1-sol"
 )
 
 
@@ -528,28 +528,28 @@ _COMPACTION_PREFIX = (
         (
             "budget_exhausted",
             "gpt-6-astra is over its AI gateway budget",
-            "The AI gateway refused a request on gpt-6-astra because its budget is exhausted.",
+            "The AI gateway refused a compaction request on gpt-6-astra: its budget is exhausted.",
             "Fork this session",
             ErrorCategory.USER,
         ),
         (
             "codex_turn_error",
             "Codex can't compact on gpt-6-astra",
-            "gpt-6-astra rejected a request. Codex repeats that request on every turn",
+            "gpt-6-astra rejected a compaction request. Codex retries it every turn",
             "Fork this session",
             ErrorCategory.UPSTREAM,
         ),
         (
             "rate_limit_exceeded",
             "Codex can't compact on gpt-6-astra right now",
-            f"{_COMPACTION_PREFIX}, and gpt-6-astra is temporarily unavailable.",
+            f"{_COMPACTION_PREFIX}, and that model is temporarily unavailable.",
             "Retry later",
             ErrorCategory.UPSTREAM,
         ),
         (
             "transient_upstream_error",
             "Codex can't compact on gpt-6-astra right now",
-            f"{_COMPACTION_PREFIX}, and gpt-6-astra is temporarily unavailable.",
+            f"{_COMPACTION_PREFIX}, and that model is temporarily unavailable.",
             "Retry later",
             ErrorCategory.UPSTREAM,
         ),
@@ -572,6 +572,20 @@ def test_codex_compaction_model_failure_names_both_models_and_the_way_out(
     # Only a budget can be raised; the other failures clear on their own or not at all.
     assert ("raise that budget" in diagnosis.remediation) is (code == "budget_exhausted")
     assert diagnosis.category is category
+
+
+@pytest.mark.parametrize("code", ["budget_exhausted", "codex_turn_error", "rate_limit_exceeded"])
+def test_codex_compaction_model_failure_cause_fits_its_label(code: str) -> None:
+    """A reloaded card keeps the whole cause, even for long model names."""
+    from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
+
+    diagnosis = diagnose_codex_compaction_model_failure(
+        code,
+        compaction_model=f"system.ai.{'p' * 40}",
+        selected_model=f"system.ai.{'s' * 40}",
+    )
+
+    assert len(diagnosis.cause) <= LABEL_VALUE_MAX_LEN
 
 
 def test_compaction_model_failure_code_survives_its_budget_text() -> None:

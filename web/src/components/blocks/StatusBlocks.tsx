@@ -583,12 +583,29 @@ export function ErrorBanner({
             onClick={(event) => event.stopPropagation()}
           >
             {compactionModelError.message ? (
-              <p
-                data-testid="error-compaction-model-original"
-                className="ml-[18px] cursor-auto font-mono text-sm leading-6 break-words text-foreground [overflow-wrap:anywhere]"
-              >
-                {compactionModelError.message}
-              </p>
+              <div className="ml-[18px] flex min-w-0 items-start gap-2 self-stretch">
+                <p
+                  data-testid="error-compaction-model-original"
+                  className="min-w-0 flex-1 cursor-auto font-mono text-sm leading-6 break-words text-foreground [overflow-wrap:anywhere]"
+                >
+                  {compactionModelError.message}
+                </p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="size-6 shrink-0 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label={copiedTarget === "compaction" ? "Error copied" : "Copy error"}
+                  onClick={() => void copy("compaction", compactionModelError.message)}
+                  componentId="diagnostics.status.compaction_copy"
+                >
+                  {copiedTarget === "compaction" ? (
+                    <CheckIcon className="size-3.5" aria-hidden="true" />
+                  ) : (
+                    <CopyIcon className="size-3.5" aria-hidden="true" />
+                  )}
+                </Button>
+              </div>
             ) : null}
             {compactionModelError.cause ? (
               <p className="ml-[18px] cursor-auto text-sm leading-6 text-muted-foreground">
