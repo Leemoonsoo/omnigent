@@ -324,10 +324,6 @@ export function ErrorBanner({
   );
   const messageText = useMemo(() => {
     const parts: string[] = [];
-    // The provider's own error leads, so the failure doesn't read as Omnigent's.
-    if (cause && code === COMPACTION_MODEL_FAILED_CODE && parsed.message) {
-      parts.push(parsed.message);
-    }
     if (cause) parts.push(cause);
     if (remediation) parts.push(`Try this: ${remediation}`);
     if (!cause && parsed.message && parsed.message !== headline) parts.push(parsed.message);
@@ -346,6 +342,9 @@ export function ErrorBanner({
       ].filter((item): item is { id: string; label: string; content: string } => item !== null),
     [parsed.lastOutput, parsed.terminal],
   );
+  // The hint already shows this card's error and cause, so its Message section would repeat them.
+  const inlineMessage = code === COMPACTION_MODEL_FAILED_CODE && Boolean(cause);
+  const expandable = !inlineMessage || relatedDetails.length > 0 || diagnostics.length > 0;
   const [expanded, setExpanded] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [activeDiagnostics, setActiveDiagnostics] = useState(diagnostics[0]?.id ?? "terminal");
@@ -486,8 +485,11 @@ export function ErrorBanner({
       <div
         data-testid="error-pill"
         data-level={notice ? "info" : "error"}
-        onClick={() => setExpanded((value) => !value)}
-        className="group/error relative z-10 w-[560px] max-w-full cursor-pointer rounded-[12px] p-[8px] text-foreground"
+        onClick={() => expandable && setExpanded((value) => !value)}
+        className={cn(
+          "group/error relative z-10 w-[560px] max-w-full rounded-[12px] p-[8px] text-foreground",
+          expandable && "cursor-pointer",
+        )}
         style={{
           background: `color-mix(in srgb, ${tone} 4%, var(--app-shell-bg, var(--background)))`,
           border: `1px solid color-mix(in srgb, ${tone} 32%, transparent)`,
@@ -496,26 +498,31 @@ export function ErrorBanner({
         <div className="flex w-full min-w-0 items-start gap-[4px]">
           <button
             type="button"
-            aria-expanded={expanded}
-            aria-controls={expanded ? messageId : undefined}
+            aria-expanded={expandable ? expanded : undefined}
+            aria-controls={expandable && expanded ? messageId : undefined}
             onClick={(event) => {
               event.stopPropagation();
-              setExpanded((value) => !value);
+              if (expandable) setExpanded((value) => !value);
             }}
-            className="flex min-w-0 flex-1 cursor-pointer items-start rounded-lg bg-transparent text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            className={cn(
+              "flex min-w-0 flex-1 items-start rounded-lg bg-transparent text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+              expandable ? "cursor-pointer" : "cursor-default",
+            )}
           >
             <span
               data-testid="error-leading-slot"
               className="mt-[4px] mr-[4px] flex h-[18px] w-[18px] shrink-0 items-center justify-center"
             >
-              <ChevronRightIcon
-                data-testid="error-disclosure-icon"
-                className={cn(
-                  "size-4 text-muted-foreground transition-transform duration-150 group-hover/error:text-foreground",
-                  expanded && "rotate-90",
-                )}
-                aria-hidden="true"
-              />
+              {expandable ? (
+                <ChevronRightIcon
+                  data-testid="error-disclosure-icon"
+                  className={cn(
+                    "size-4 text-muted-foreground transition-transform duration-150 group-hover/error:text-foreground",
+                    expanded && "rotate-90",
+                  )}
+                  aria-hidden="true"
+                />
+              ) : null}
             </span>
             <span className="mr-[4px] flex min-w-0 flex-1 flex-col">
               <span
@@ -657,69 +664,71 @@ export function ErrorBanner({
             {retryError}
           </div>
         ) : null}
-        {expanded ? (
+        {expanded && expandable ? (
           <div
             id={messageId}
             onClick={(event) => event.stopPropagation()}
             className="mt-[12px] min-w-0 max-w-full cursor-auto overflow-hidden text-foreground [text-wrap:wrap]"
           >
-            <section aria-labelledby={`${messageId}-label`} className="min-w-0">
-              <div className="mx-[4px] flex items-center justify-between gap-2">
-                <h4
-                  id={`${messageId}-label`}
-                  className="text-sm leading-4 font-medium text-muted-foreground"
-                >
-                  Message
-                </h4>
-                <div className="flex items-center gap-1">
-                  {code === "PROVIDER_AUTH_REQUIRED" && remediation ? (
+            {inlineMessage ? null : (
+              <section aria-labelledby={`${messageId}-label`} className="min-w-0">
+                <div className="mx-[4px] flex items-center justify-between gap-2">
+                  <h4
+                    id={`${messageId}-label`}
+                    className="text-sm leading-4 font-medium text-muted-foreground"
+                  >
+                    Message
+                  </h4>
+                  <div className="flex items-center gap-1">
+                    {code === "PROVIDER_AUTH_REQUIRED" && remediation ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        className="h-6 gap-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        aria-label={
+                          copiedTarget === "recovery"
+                            ? "Recovery command copied"
+                            : "Copy recovery command"
+                        }
+                        onClick={() => void copy("recovery", remediation)}
+                        componentId="diagnostics.status.recovery_copy"
+                      >
+                        {copiedTarget === "recovery" ? (
+                          <CheckIcon className="size-3.5" aria-hidden="true" />
+                        ) : (
+                          <CopyIcon className="size-3.5" aria-hidden="true" />
+                        )}
+                        Copy command
+                      </Button>
+                    ) : null}
                     <Button
                       type="button"
                       variant="ghost"
-                      size="xs"
-                      className="h-6 gap-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                      size="icon-xs"
+                      className="size-6 text-muted-foreground hover:bg-muted hover:text-foreground"
                       aria-label={
-                        copiedTarget === "recovery"
-                          ? "Recovery command copied"
-                          : "Copy recovery command"
+                        copiedTarget === "message" ? "Error message copied" : "Copy error message"
                       }
-                      onClick={() => void copy("recovery", remediation)}
-                      componentId="diagnostics.status.recovery_copy"
+                      onClick={() => void copy("message", messageText)}
+                      componentId="diagnostics.status.copy"
                     >
-                      {copiedTarget === "recovery" ? (
+                      {copiedTarget === "message" ? (
                         <CheckIcon className="size-3.5" aria-hidden="true" />
                       ) : (
                         <CopyIcon className="size-3.5" aria-hidden="true" />
                       )}
-                      Copy command
                     </Button>
-                  ) : null}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    className="size-6 text-muted-foreground hover:bg-muted hover:text-foreground"
-                    aria-label={
-                      copiedTarget === "message" ? "Error message copied" : "Copy error message"
-                    }
-                    onClick={() => void copy("message", messageText)}
-                    componentId="diagnostics.status.copy"
-                  >
-                    {copiedTarget === "message" ? (
-                      <CheckIcon className="size-3.5" aria-hidden="true" />
-                    ) : (
-                      <CopyIcon className="size-3.5" aria-hidden="true" />
-                    )}
-                  </Button>
+                  </div>
                 </div>
-              </div>
-              <div
-                data-testid="error-message-content"
-                className="mx-[4px] mt-[4px] max-w-full min-w-0 font-mono text-sm leading-6 break-words whitespace-pre-wrap text-foreground [overflow-wrap:anywhere] [text-wrap:wrap]"
-              >
-                {linkify(messageText)}
-              </div>
-            </section>
+                <div
+                  data-testid="error-message-content"
+                  className="mx-[4px] mt-[4px] max-w-full min-w-0 font-mono text-sm leading-6 break-words whitespace-pre-wrap text-foreground [overflow-wrap:anywhere] [text-wrap:wrap]"
+                >
+                  {linkify(messageText)}
+                </div>
+              </section>
+            )}
             {relatedDetails.length > 0 ? (
               <section
                 aria-labelledby={`${messageId}-related-label`}

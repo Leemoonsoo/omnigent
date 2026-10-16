@@ -851,7 +851,7 @@ describe("Codex compaction on the previous model", () => {
     expect(openForkDialog).toHaveBeenCalledExactlyOnceWith({ sourceSessionId: "conv_parent" });
   });
 
-  it("leads the expanded card with the provider's own error", () => {
+  it("does not repeat the hint in a Message section", () => {
     render(
       <ErrorBanner
         message={gatewayError}
@@ -864,9 +864,10 @@ describe("Codex compaction on the previous model", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: /over its AI gateway budget/i }));
-    expect(screen.getByTestId("error-message-content").textContent).toBe(
-      `${gatewayError}\n\n${cause}\n\nTry this: Fork this session to continue on gpt-6-1-sol.`,
-    );
+    expect(screen.queryByTestId("error-disclosure-icon")).toBeNull();
+    expect(screen.queryByTestId("error-message-content")).toBeNull();
+    expect(screen.queryByText(/Try this:/)).toBeNull();
+    expect(screen.getAllByText(gatewayError)).toHaveLength(1);
   });
 
   it("offers the fork when the compaction failure is grouped under another error", () => {
