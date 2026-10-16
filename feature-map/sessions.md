@@ -226,7 +226,9 @@ conversation is open alongside it.
 while compacting on the model its last turn used, choose **Fork session…** on
 the error card. The fork dialog opens for that session; pick the model to
 continue on. A rate-limit or transient failure shows **Retry** instead; fork
-from the session header menu.
+from the session header menu. The action also appears on such a card inside a
+Canvas conversation or side chat, and forks that displayed conversation rather
+than the main session.
 
 **Mobile:** the header menu and the sidebar drawer offer the same actions; touch
 devices fold some row controls into the menu.
