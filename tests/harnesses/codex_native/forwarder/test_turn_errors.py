@@ -341,6 +341,54 @@ async def test_error_without_usable_detail_leaves_the_turn_to_turn_completed(
     assert state is not None and state.active_turn_id is None
 
 
+def _write_rollout(tmp_path: Path, content: bytes) -> None:
+    """Write the bridge thread's Codex rollout under the private ``CODEX_HOME``."""
+    rollout_dir = tmp_path / "codex-home" / "sessions" / "2026" / "10" / "15"
+    rollout_dir.mkdir(parents=True, exist_ok=True)
+    (rollout_dir / "rollout-2026-10-15T16-28-06-thread_123.jsonl").write_bytes(content)
+
+
+def _turn_context_line(model: str | None) -> bytes:
+    turn: dict[str, object] = {"turn_id": "turn_0", "cwd": "/repo"}
+    if model is not None:
+        turn["model"] = model
+    return (json.dumps({"type": "turn_context", "payload": turn}) + "\n").encode()
+
+
+async def _fail_turn(tmp_path: Path, compaction_status: str = "in_progress") -> dict[str, object]:
+    """Fail the active turn with a terminal error and return the posted status data."""
+    client = _RecordingClient()
+    forwarder_state = fwd._CodexForwarderState(
+        model="system.ai.gpt-6-1-sol", compaction_status_posted=compaction_status
+    )
+    await fwd._handle_event(
+        client,  # type: ignore[arg-type]
+        session_id="conv_x",
+        bridge_dir=tmp_path,
+        event={
+            "method": "error",
+            "params": {
+                "threadId": "thread_123",
+                "turnId": "turn_123",
+                "willRetry": False,
+                "error": {"message": "unexpected status 403 Forbidden: budget limit reached"},
+            },
+        },
+        usage_coalescer=fwd._SessionUsageCoalescer(client, "conv_x"),  # type: ignore[arg-type]
+        elicitation_tracker=fwd._CodexElicitationTaskTracker(),
+        expected_thread_id="thread_123",
+        forwarder_state=forwarder_state,
+    )
+    return client.posts[0][1]["data"]
+
+
+_COMPACTION_MODELS = {
+    "compaction_model": "system.ai.gpt-6-astra",
+    "selected_model": "system.ai.gpt-6-1-sol",
+}
+_NO_COMPACTION_MODELS = {"compaction_model": None, "selected_model": None}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("rollout_model", "compaction_status", "catalog_entries", "reported"),
@@ -428,45 +476,43 @@ async def test_error_during_compaction_reports_the_previous_model_it_ran_on(
         (tmp_path / "codex-home" / "config.toml").write_text(
             f'model_catalog_json = "{catalog}"\n', encoding="utf-8"
         )
-    rollout = tmp_path / "codex-home" / "sessions" / "2026" / "10" / "15"
-    rollout.mkdir(parents=True, exist_ok=True)
-    turn: dict[str, object] = {"turn_id": "turn_0", "cwd": "/repo"}
-    if rollout_model is not None:
-        turn["model"] = rollout_model
-    (rollout / "rollout-2026-10-15T16-28-06-thread_123.jsonl").write_text(
-        json.dumps({"type": "turn_context", "payload": turn}) + "\n", encoding="utf-8"
-    )
-    client = _RecordingClient()
-    forwarder_state = fwd._CodexForwarderState(
-        model="system.ai.gpt-6-1-sol", compaction_status_posted=compaction_status
-    )
+    _write_rollout(tmp_path, _turn_context_line(rollout_model))
 
-    await fwd._handle_event(
-        client,  # type: ignore[arg-type]
-        session_id="conv_x",
-        bridge_dir=tmp_path,
-        event={
-            "method": "error",
-            "params": {
-                "threadId": "thread_123",
-                "turnId": "turn_123",
-                "willRetry": False,
-                "error": {"message": "unexpected status 403 Forbidden: budget limit reached"},
-            },
-        },
-        usage_coalescer=fwd._SessionUsageCoalescer(client, "conv_x"),  # type: ignore[arg-type]
-        elicitation_tracker=fwd._CodexElicitationTaskTracker(),
-        expected_thread_id="thread_123",
-        forwarder_state=forwarder_state,
-    )
+    data = await _fail_turn(tmp_path, compaction_status)
 
-    data = client.posts[0][1]["data"]
     assert data["status"] == "failed"
-    assert {key: data.get(key) for key in ("compaction_model", "selected_model")} == (
-        {"compaction_model": "system.ai.gpt-6-astra", "selected_model": "system.ai.gpt-6-1-sol"}
-        if reported
-        else {"compaction_model": None, "selected_model": None}
+    assert {key: data.get(key) for key in _COMPACTION_MODELS} == (
+        _COMPACTION_MODELS if reported else _NO_COMPACTION_MODELS
     )
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_rollout_line_does_not_hide_the_previous_model(tmp_path: Path) -> None:
+    _seed_active_turn(tmp_path, "turn_123")
+    _write_rollout(tmp_path, b"\xff\xfe torn line\n" + _turn_context_line("system.ai.gpt-6-astra"))
+
+    data = await _fail_turn(tmp_path)
+
+    assert {key: data.get(key) for key in _COMPACTION_MODELS} == _COMPACTION_MODELS
+
+
+@pytest.mark.asyncio
+async def test_a_failed_diagnosis_still_posts_the_turn_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn is already marked surfaced, so a lost edge would leave no error card."""
+    _seed_active_turn(tmp_path, "turn_123")
+
+    def _unreadable(_bridge_dir: Path, _selected_model: str) -> str | None:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(fwd, "_failed_compaction_model", _unreadable)
+
+    data = await _fail_turn(tmp_path)
+
+    assert data["status"] == "failed"
+    assert "budget limit reached" in str(data["output"])
+    assert {key: data.get(key) for key in _COMPACTION_MODELS} == _NO_COMPACTION_MODELS
 
 
 @pytest.mark.asyncio

@@ -589,12 +589,18 @@ async def test_resumed_fallback_resets_pick_only_if_preload_and_terminal_succeed
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source_model", "rebuilt"),
-    [("system.ai.gpt-6-astra", True), ("gpt-6.1-sol", False)],
-    ids=["source-on-other-model", "source-on-fork-model"],
+    ("source_model", "carry_history", "rebuilt"),
+    [
+        ("system.ai.gpt-6-astra", True, True),
+        ("gpt-6.1-sol", True, False),
+        # Without the item rebuild, the clone is the only way to carry the history.
+        ("system.ai.gpt-6-astra", False, False),
+    ],
+    ids=["source-on-other-model", "source-on-fork-model", "no-history-rebuild"],
 )
 async def test_fork_onto_another_model_rebuilds_history_instead_of_cloning(
     source_model: str,
+    carry_history: bool,
     rebuilt: bool,
     codex_launch_harness: _LaunchHarness,
     monkeypatch: pytest.MonkeyPatch,
@@ -607,7 +613,7 @@ async def test_fork_onto_another_model_rebuilds_history_instead_of_cloning(
     harness.snapshot["labels"] = {
         "omnigent.fork.source_id": "conv_source",
         "omnigent.fork.source_external_session_id": source_thread,
-        "omnigent.fork.carry_history": "1",
+        **({"omnigent.fork.carry_history": "1"} if carry_history else {}),
     }
     harness.seed_catalog([{"id": "gpt-6.1-sol", "isDefault": True}])
     source_home = codex_native_bridge.codex_home_for_bridge_dir(

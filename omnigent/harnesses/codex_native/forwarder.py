@@ -3729,8 +3729,8 @@ async def _maybe_handle_turn_event(
                     compaction_model = await asyncio.to_thread(
                         _failed_compaction_model, bridge_dir, selected_model
                     )
-                except OSError:
-                    _logger.debug("Could not read the Codex rollout's last model", exc_info=True)
+                except Exception:  # noqa: BLE001 - the failure still posts, undiagnosed.
+                    _logger.warning("Could not read the Codex rollout's last model", exc_info=True)
             await _post_turn_status_edge(
                 client,
                 session_id,
@@ -7159,7 +7159,8 @@ async def _persist_codex_compaction_item(
     compacted = None
     if bridge_dir is not None:
         try:
-            rollout = _latest_thread_rollout(bridge_dir)
+            state = read_bridge_state(bridge_dir)
+            rollout = _latest_thread_rollout(state) if state is not None else None
             if rollout is not None:
                 compacted = _read_compacted_history(rollout)
         except Exception:  # noqa: BLE001
@@ -7187,15 +7188,12 @@ async def _persist_codex_compaction_item(
     resp.raise_for_status()
 
 
-def _latest_thread_rollout(bridge_dir: Path) -> Path | None:
+def _latest_thread_rollout(state: CodexNativeBridgeState) -> Path | None:
     """Return the newest rollout JSONL for the bridge's Codex thread.
 
-    :param bridge_dir: Native Codex bridge directory.
-    :returns: The rollout path, or ``None`` without bridge state or a rollout.
+    :param state: The native Codex bridge state.
+    :returns: The rollout path, or ``None`` when the thread has no rollout.
     """
-    state = read_bridge_state(bridge_dir)
-    if state is None:
-        return None
     rollout_files = sorted(
         Path(state.codex_home).glob(f"sessions/**/*rollout-*{state.thread_id}.jsonl"),
         key=lambda p: p.stat().st_mtime,
@@ -7215,7 +7213,8 @@ def codex_rollout_last_turn_model(rollout_path: Path) -> str | None:
         ``None`` when no ``turn_context`` names one.
     """
     model: str | None = None
-    with rollout_path.open(encoding="utf-8") as f:
+    # A torn or corrupt line must not hide the model recorded on the others.
+    with rollout_path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             # Skip the JSON parse for the history lines that make up most of a rollout.
             if '"turn_context"' not in line:
@@ -7298,7 +7297,7 @@ def _failed_compaction_model(bridge_dir: Path, selected_model: str) -> str | Non
     from omnigent.models.codex_model_vocabulary import comparable_model_id
 
     state = read_bridge_state(bridge_dir)
-    rollout = _latest_thread_rollout(bridge_dir)
+    rollout = _latest_thread_rollout(state) if state is not None else None
     if state is None or rollout is None:
         return None
     previous = codex_rollout_last_turn_model(rollout)
