@@ -62,9 +62,11 @@ the header menu), and each place is a separate entry point.
   directory…**. Choose an existing host directory to fork the conversation into
   a new session; the original remains available and missing files are not restored.
 - `compaction-model-recovery`: a Codex turn that failed while compacting on the
-  previous model explains why on the error card and offers **Fork session…**.
-  A fork onto another model rebuilds the conversation from its history instead
-  of cloning Codex's rollout; the original session is unchanged.
+  previous model shows the provider's error and why on the error card, with
+  **Fork session…**. Rate-limit and transient failures keep **Retry** instead
+  and point to Fork in the session menu. A fork onto another model rebuilds the
+  conversation from its history instead of cloning Codex's rollout, and fails
+  rather than starting empty if that rebuild fails; the original is unchanged.
 - `message-recovery`: a message racing initial runner binding or replacement
   reaches the available runner without a false failed turn. Native sessions
   initialize before delivery; SDK sub-agents reuse their loaded session state.
@@ -221,7 +223,8 @@ conversation is open alongside it.
 **Codex compaction on the previous model:** in a Codex session whose turn failed
 while compacting on the model its last turn used, choose **Fork session…** on
 the error card. The fork dialog opens for that session; pick the model to
-continue on.
+continue on. A rate-limit or transient failure shows **Retry** instead; fork
+from the session header menu.
 
 **Mobile:** the header menu and the sidebar drawer offer the same actions; touch
 devices fold some row controls into the menu.
@@ -374,7 +377,9 @@ plain `uv run pytest`, which starts a private server for the test.
   (plain `uv run pytest`) covers the card live and after reload, including
   retryable and expired-login failures that keep their own codes;
   `tests/runner/test_codex_model_pick_fallback.py::test_fork_onto_another_model_rebuilds_history_instead_of_cloning`
-  covers the rebuilt fork. The card's hint and **Fork session…** action have
+  covers the rebuilt fork, and
+  `tests/runner/test_codex_model_pick_fallback.py::test_fork_onto_another_model_fails_when_its_history_cannot_be_rebuilt`
+  its failed rebuild. The card's hint and **Fork session…** action have
   component coverage in `web/src/components/blocks/StatusBlocks.test.tsx`.
   No browser test drives the card into the fork dialog.
 - **`fork`, whole session and resources:**

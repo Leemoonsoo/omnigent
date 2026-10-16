@@ -430,6 +430,13 @@ _NO_COMPACTION_MODELS = {"compaction_model": None, "selected_model": None}
             ),
             False,
         ),
+        # A hash declared by only one model can't trigger it, so the windows decide.
+        (
+            "system.ai.gpt-6-astra",
+            "in_progress",
+            ({"comp_hash": "3000"}, {}),
+            False,
+        ),
         # Without both windows, the catalog can't rule the compaction out.
         (
             "system.ai.gpt-6-astra",
@@ -448,6 +455,7 @@ _NO_COMPACTION_MODELS = {"compaction_model": None, "selected_model": None}
         "catalog-rules-it-out",
         "previous-usable-window-larger",
         "selected-usable-window-larger",
+        "one-hash-missing",
         "catalog-window-unknown",
         "selected-model",
         "outside-compaction",

@@ -7265,6 +7265,7 @@ def _codex_compacts_on_previous_model(
     if previous is None or selected is None:
         return True
     previous_hash, selected_hash = previous.get("comp_hash"), selected.get("comp_hash")
+    # Like Codex, a hash change counts only when both models declare one.
     if previous_hash and selected_hash and previous_hash != selected_hash:
         return True
     previous_window = _usable_context_window(previous)
