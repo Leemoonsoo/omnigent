@@ -6,6 +6,7 @@ Resume uses the same verdict. Empty turns warn and stay idle, as do clean turns.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -338,6 +339,99 @@ async def test_error_without_usable_detail_leaves_the_turn_to_turn_completed(
     }
     state = read_bridge_state(tmp_path)
     assert state is not None and state.active_turn_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rollout_model", "compaction_status", "catalog_hashes", "reported"),
+    [
+        ("system.ai.gpt-6-astra", "in_progress", None, True),
+        ("system.ai.gpt-6-astra", "in_progress", ("3000", "2911"), True),
+        # Matching catalog entries mean Codex compacted on the selected model itself.
+        ("system.ai.gpt-6-astra", "in_progress", ("3000", "3000"), False),
+        # Gateway and Codex spellings of the selected model compare equal.
+        ("gpt-6.1-sol", "in_progress", None, False),
+        ("system.ai.gpt-6-astra", "completed", None, False),
+        (None, "in_progress", None, False),
+    ],
+    ids=[
+        "previous-model",
+        "catalog-hash-changed",
+        "catalog-rules-it-out",
+        "selected-model",
+        "outside-compaction",
+        "no-recorded-model",
+    ],
+)
+async def test_error_during_compaction_reports_the_previous_model_it_ran_on(
+    tmp_path: Path,
+    rollout_model: str | None,
+    compaction_status: str,
+    catalog_hashes: tuple[str, str] | None,
+    reported: bool,
+) -> None:
+    """A compaction failure names the rollout's previous model when Codex compacts on it."""
+    _seed_active_turn(tmp_path, "turn_123")
+    if catalog_hashes is not None:
+        catalog = tmp_path / "catalog.json"
+        catalog.write_text(
+            json.dumps(
+                {
+                    "models": [
+                        {"slug": slug, "comp_hash": comp_hash, "context_window": 272000}
+                        for slug, comp_hash in zip(
+                            ("system.ai.gpt-6-astra", "system.ai.gpt-6-1-sol"),
+                            catalog_hashes,
+                            strict=True,
+                        )
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "codex-home").mkdir()
+        (tmp_path / "codex-home" / "config.toml").write_text(
+            f'model_catalog_json = "{catalog}"\n', encoding="utf-8"
+        )
+    rollout = tmp_path / "codex-home" / "sessions" / "2026" / "10" / "15"
+    rollout.mkdir(parents=True, exist_ok=True)
+    turn: dict[str, object] = {"turn_id": "turn_0", "cwd": "/repo"}
+    if rollout_model is not None:
+        turn["model"] = rollout_model
+    (rollout / "rollout-2026-10-15T16-28-06-thread_123.jsonl").write_text(
+        json.dumps({"type": "turn_context", "payload": turn}) + "\n", encoding="utf-8"
+    )
+    client = _RecordingClient()
+    forwarder_state = fwd._CodexForwarderState(
+        model="system.ai.gpt-6-1-sol", compaction_status_posted=compaction_status
+    )
+
+    await fwd._handle_event(
+        client,  # type: ignore[arg-type]
+        session_id="conv_x",
+        bridge_dir=tmp_path,
+        event={
+            "method": "error",
+            "params": {
+                "threadId": "thread_123",
+                "turnId": "turn_123",
+                "willRetry": False,
+                "error": {"message": "unexpected status 403 Forbidden: budget limit reached"},
+            },
+        },
+        usage_coalescer=fwd._SessionUsageCoalescer(client, "conv_x"),  # type: ignore[arg-type]
+        elicitation_tracker=fwd._CodexElicitationTaskTracker(),
+        expected_thread_id="thread_123",
+        forwarder_state=forwarder_state,
+    )
+
+    data = client.posts[0][1]["data"]
+    assert data["status"] == "failed"
+    assert {key: data.get(key) for key in ("compaction_model", "selected_model")} == (
+        {"compaction_model": "system.ai.gpt-6-astra", "selected_model": "system.ai.gpt-6-1-sol"}
+        if reported
+        else {"compaction_model": None, "selected_model": None}
+    )
 
 
 @pytest.mark.asyncio

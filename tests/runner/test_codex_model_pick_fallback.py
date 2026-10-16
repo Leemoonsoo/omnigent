@@ -134,6 +134,11 @@ async def codex_launch_harness(
         if request.method == "GET":
             assert request.url.path == f"/v1/sessions/{_SESSION_ID}"
             return httpx.Response(200, json=snapshot)
+        if request.method == "PATCH" and set(json.loads(request.content)) == {
+            "external_session_id"
+        }:
+            # A fork records the Codex thread it minted.
+            return httpx.Response(200, json={})
         assert request.method == "POST", "fallback must never unconditionally PATCH the pick"
         assert request.url.path == f"/v1/sessions/{_SESSION_ID}/model-override/reset"
         reset = json.loads(request.content)
@@ -580,6 +585,61 @@ async def test_resumed_fallback_resets_pick_only_if_preload_and_terminal_succeed
     assert harness.resets == (
         [] if preload_fails else [{"expected_model_override": _RETIRED_PICK}]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_model", "rebuilt"),
+    [("system.ai.gpt-6-astra", True), ("gpt-6.1-sol", False)],
+    ids=["source-on-other-model", "source-on-fork-model"],
+)
+async def test_fork_onto_another_model_rebuilds_history_instead_of_cloning(
+    source_model: str,
+    rebuilt: bool,
+    codex_launch_harness: _LaunchHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fork whose model differs from the source's last turn is rebuilt from items."""
+    harness = codex_launch_harness
+    pick = "system.ai.gpt-6-1-sol"
+    source_thread = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    harness.snapshot["model_override"] = pick
+    harness.snapshot["labels"] = {
+        "omnigent.fork.source_id": "conv_source",
+        "omnigent.fork.source_external_session_id": source_thread,
+        "omnigent.fork.carry_history": "1",
+    }
+    harness.seed_catalog([{"id": "gpt-6.1-sol", "isDefault": True}])
+    source_home = codex_native_bridge.codex_home_for_bridge_dir(
+        codex_native_bridge.bridge_dir_for_bridge_id("conv_source")
+    )
+    rollout_dir = source_home / "sessions" / "2026" / "10" / "15"
+    rollout_dir.mkdir(parents=True)
+    turn = {"turn_id": "turn_1", "cwd": "/repo", "model": source_model}
+    (rollout_dir / f"rollout-2026-10-15T16-28-06-{source_thread}.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": source_thread, "cwd": "/repo"}})
+        + "\n"
+        + json.dumps({"type": "turn_context", "payload": turn})
+        + "\n",
+        encoding="utf-8",
+    )
+    rebuild = AsyncMock(
+        side_effect=lambda *_args, **kwargs: kwargs["codex_home"] / "rebuilt.jsonl"
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.main._ensure_local_codex_resume_rollout", rebuild
+    )
+    preload = AsyncMock()
+    monkeypatch.setattr(codex_app, "preload_codex_thread_for_resume", preload)
+    monkeypatch.setattr(runner_native, "_codex_forward_known_thread", AsyncMock())
+
+    await harness.launch()
+
+    assert harness.builds[0]["model"] == pick
+    assert rebuild.await_count == (1 if rebuilt else 0)
+    clone_home = harness.builds[0]["codex_home"]
+    assert bool(list(clone_home.glob("sessions/**/rollout-*.jsonl"))) is not rebuilt
+    preload.assert_awaited_once()
 
 
 @pytest.mark.asyncio

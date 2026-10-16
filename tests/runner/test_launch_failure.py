@@ -11,6 +11,7 @@ from omnigent.runner.launch_failure import (
     classify_terminal_failure,
     describe_failure_code,
     diagnose_client_update_required,
+    diagnose_codex_compaction_model_failure,
     diagnose_codex_model_rejection,
     diagnose_model_unavailable,
 )
@@ -516,6 +517,50 @@ def test_model_unavailable_ignores_unrelated_errors(message: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("code", "reason", "remediation_start", "category"),
+    [
+        ("budget_exhausted", "is over its budget", "Fork this session", ErrorCategory.USER),
+        ("codex_turn_error", "rejected the request", "Fork this session", ErrorCategory.UPSTREAM),
+        ("rate_limit_exceeded", "temporarily unavailable", "Retry later", ErrorCategory.UPSTREAM),
+        (
+            "transient_upstream_error",
+            "temporarily unavailable",
+            "Retry later",
+            ErrorCategory.UPSTREAM,
+        ),
+    ],
+)
+def test_codex_compaction_model_failure_names_both_models_and_the_way_out(
+    code: str, reason: str, remediation_start: str, category: ErrorCategory
+) -> None:
+    diagnosis = diagnose_codex_compaction_model_failure(
+        code, compaction_model="system.ai.gpt-6-astra", selected_model="system.ai.gpt-6-1-sol"
+    )
+
+    assert diagnosis.title.startswith("Codex can't compact on gpt-6-astra")
+    assert diagnosis.cause.startswith(
+        "Codex compacts this conversation on the previous model, gpt-6-astra, "
+        "before it can switch to gpt-6-1-sol, and gpt-6-astra"
+    )
+    assert reason in diagnosis.cause
+    assert diagnosis.remediation is not None
+    assert diagnosis.remediation.startswith(remediation_start)
+    assert "fork this session to continue on gpt-6-1-sol" in diagnosis.remediation.lower()
+    assert diagnosis.category is category
+
+
+def test_compaction_model_failure_code_survives_its_budget_text() -> None:
+    """A reloaded card keeps the code whose budget text names the previous model's limit."""
+    message = 'unexpected status 403 Forbidden: Budget "example" has reached its limit of $100.'
+
+    assert classify_native_turn_error("codex_turn_error", message) == "budget_exhausted"
+    assert (
+        classify_native_turn_error("codex_compaction_model_failed", message)
+        == "codex_compaction_model_failed"
+    )
+
+
+@pytest.mark.parametrize(
     ("code", "expected_substring"),
     [
         ("required_terminal_exited", "terminal exited"),
@@ -531,6 +576,7 @@ def test_model_unavailable_ignores_unrelated_errors(message: str) -> None:
         ("databricks_sign_in_pending", "Databricks sign-in"),
         ("agent_startup_pending", "still starting"),
         ("codex_thread_not_started", "never ran"),
+        ("codex_compaction_model_failed", "previous model"),
     ],
 )
 def test_describe_failure_code_known(code: str, expected_substring: str) -> None:

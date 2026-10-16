@@ -822,6 +822,45 @@ describe("ErrorBanner", () => {
   });
 });
 
+describe("Codex compaction on the previous model", () => {
+  beforeEach(() => useChatStore.setState({ conversationId: "conv_parent" }));
+  afterEach(() => useChatStore.setState({ conversationId: null }));
+
+  const cause =
+    "Codex compacts this conversation on the previous model, gpt-6-astra, before it can switch to gpt-6-1-sol, and gpt-6-astra is over its budget.";
+
+  it("explains the cause and forks without expanding the card", () => {
+    const openForkDialog = vi.fn();
+    render(
+      <ForkDialogContextProvider value={{ canFork: true, openForkDialog }}>
+        <ErrorBanner
+          message="unexpected status 403 Forbidden"
+          source="execution"
+          code="codex_compaction_model_failed"
+          title="Codex can't compact on gpt-6-astra"
+          cause={cause}
+        />
+      </ForkDialogContextProvider>,
+    );
+
+    expect(screen.getByTestId("error-compaction-model-hint")).toHaveTextContent(cause);
+    fireEvent.click(screen.getByRole("button", { name: "Fork session…" }));
+    expect(openForkDialog).toHaveBeenCalledExactlyOnceWith({ sourceSessionId: "conv_parent" });
+  });
+
+  it.each([
+    { canFork: false, code: "codex_compaction_model_failed" },
+    { canFork: true, code: "budget_exhausted" },
+  ])("does not offer the fork for $code with canFork=$canFork", ({ canFork, code }) => {
+    render(
+      <ForkDialogContextProvider value={{ canFork, openForkDialog: vi.fn() }}>
+        <ErrorBanner message="Error details" source="execution" code={code} />
+      </ForkDialogContextProvider>,
+    );
+    expect(screen.queryByRole("button", { name: "Fork session…" })).not.toBeInTheDocument();
+  });
+});
+
 describe("missing workspace recovery", () => {
   beforeEach(() => useChatStore.setState({ conversationId: "conv_parent" }));
   afterEach(() => useChatStore.setState({ conversationId: null }));

@@ -20,6 +20,7 @@ import {
   RotateCwIcon,
   ShieldXIcon,
   ShrinkIcon,
+  SplitIcon,
   XIcon,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -101,9 +102,13 @@ const FAILURE_CODE_DESCRIPTIONS: Record<string, string> = {
     "The model service hit a temporary error mid-response; retrying usually continues the turn.",
   budget_exhausted:
     "The AI gateway refused this turn because a spending budget or usage limit is exhausted. Contact an admin to raise it, or use a different budget.",
+  codex_compaction_model_failed:
+    "Codex couldn't compact the conversation on the previous model, so this turn didn't run.",
   client_update_required:
     "The agent CLI on the host is too old for the selected model. Update it on the host, then start a new session.",
 };
+
+const COMPACTION_MODEL_FAILED_CODE = "codex_compaction_model_failed";
 
 const RETRYABLE_ERROR_CODES = new Set([
   "required_terminal_exited",
@@ -261,6 +266,10 @@ export function ErrorBanner({
   const scopedForkSource =
     forkDialog?.currentSessionId != null && conversationId !== forkDialog.currentSessionId;
   const recoveryDisabledReason = scopedForkSource ? undefined : forkDialog?.disabledReason;
+  // Codex keeps compacting on its previous model, so only a rebuilt fork continues.
+  const compactionModelError = [{ code, cause }, ...relatedErrors].find(
+    (error) => error.code === COMPACTION_MODEL_FAILED_CODE,
+  );
   const notice = level === "info" && relatedErrors.every((error) => error.level === "info");
   const tone = notice ? "var(--muted-foreground)" : "var(--destructive)";
   const headline = errorHeadline({ message, source: "", code, title, cause, remediation, level });
@@ -538,6 +547,38 @@ export function ErrorBanner({
               </DisabledActionTooltip>
             </div>
           )}
+        {compactionModelError ? (
+          <div
+            data-testid="error-compaction-model-hint"
+            className="mx-[4px] mt-[6px] flex flex-col items-start gap-[6px]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {compactionModelError.cause ? (
+              <p className="ml-[18px] cursor-auto text-sm leading-6 text-muted-foreground">
+                {compactionModelError.cause}
+              </p>
+            ) : null}
+            {forkDialog && conversationId && (scopedForkSource || forkDialog.canFork) ? (
+              <DisabledActionTooltip
+                reason={recoveryDisabledReason}
+                label="Fork session…"
+                className="max-w-full"
+              >
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-auto max-w-full whitespace-normal text-left"
+                  disabled={!!recoveryDisabledReason}
+                  onClick={() => forkDialog.openForkDialog({ sourceSessionId: conversationId })}
+                >
+                  <SplitIcon className="size-3.5 shrink-0" aria-hidden="true" />
+                  Fork session…
+                </Button>
+              </DisabledActionTooltip>
+            ) : null}
+          </div>
+        ) : null}
         {signInComplete && parsed.message ? (
           <p
             data-testid="error-notice-body"
