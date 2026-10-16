@@ -10,6 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import click
@@ -1380,7 +1381,69 @@ def test_same_workspace_daemon_offline_reason(
     _stub_host_status_by_url(
         monkeypatch, {_VANITY_API: via_requested_url, _WORKSPACE_API: via_own_url}
     )
-    sibling = cli_module._HostDaemonRecord(
+
+    assert (
+        cli_module._same_workspace_daemon_offline_reason(
+            _same_workspace_sibling(age_s=age_s), _VANITY_API
+        )
+        == reason
+    )
+
+
+@pytest.mark.parametrize(
+    ("requested_url_replies", "reason", "probe_rounds"),
+    [
+        # Back online on the second round, within the reconnect grace.
+        ([_HOST_OFFLINE, _HOST_ONLINE], None, 2),
+        # Still offline when the grace runs out.
+        ([_HOST_OFFLINE] * 11, "its server rejected its sign-in (HTTP 401)", 11),
+    ],
+)
+def test_same_workspace_daemon_offline_reason_waits_out_a_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    requested_url_replies: list[cli_module._HostHttpResult],
+    reason: str | None,
+    probe_rounds: int,
+) -> None:
+    """A sibling mid-reconnect gets the grace window before it is judged offline."""
+    clock = [0.0]
+
+    def _advance(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(
+        cli_module,
+        "time",
+        SimpleNamespace(time=time.time, monotonic=lambda: clock[0], sleep=_advance),
+    )
+    monkeypatch.setattr("omnigent.cli._DAEMON_RECONNECT_GRACE_S", 5.0)
+    replies = iter(requested_url_replies)
+    probed: list[str | None] = []
+
+    def _probe(
+        record: cli_module._HostDaemonRecord, **kwargs: object
+    ) -> cli_module._HostHttpResult:
+        probed.append(record.server_url)
+        # The sibling's own sign-in stays rejected throughout.
+        return _HOST_REJECTED if record.server_url == _WORKSPACE_API else next(replies)
+
+    monkeypatch.setattr("omnigent.cli._daemon_host_status_probe", _probe)
+
+    assert (
+        cli_module._same_workspace_daemon_offline_reason(_same_workspace_sibling(), _VANITY_API)
+        == reason
+    )
+    assert probed.count(_VANITY_API) == probe_rounds
+
+
+def _same_workspace_sibling(*, age_s: int = 60) -> cli_module._HostDaemonRecord:
+    """
+    Build a live-looking daemon record on the workspace host.
+
+    :param age_s: How long ago it started, e.g. ``60``.
+    :returns: The record, as :func:`_same_workspace_daemon` would return it.
+    """
+    return cli_module._HostDaemonRecord(
         pid=_SAME_WORKSPACE_PID,
         target=_WORKSPACE_API,
         mode="server",
@@ -1389,8 +1452,6 @@ def test_same_workspace_daemon_offline_reason(
         started_at=int(time.time()) - age_s,
         host_id="a" * 32,
     )
-
-    assert cli_module._same_workspace_daemon_offline_reason(sibling, _VANITY_API) == reason
 
 
 @pytest.mark.parametrize(
