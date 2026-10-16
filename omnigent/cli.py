@@ -2756,43 +2756,9 @@ def _record_from_json(raw: _HostJsonObject) -> _HostDaemonRecord | None:
     :returns: Parsed :class:`_HostDaemonRecord`, or ``None`` if the
         record is malformed.
     """
-    try:
-        pid_raw = raw["pid"]
-        if not isinstance(pid_raw, str | int) or isinstance(pid_raw, bool):
-            return None
-        pid = int(pid_raw)
-        target = str(raw["target"])
-        mode = str(raw["mode"])
-        started_at_raw = raw["started_at"]
-        if not isinstance(started_at_raw, str | int) or isinstance(started_at_raw, bool):
-            return None
-        started_at = int(started_at_raw)
-    except (KeyError, TypeError, ValueError):
-        return None
-    if mode not in {"local", "server"} or not target:
-        return None
-    server_url = raw.get("server_url")
-    log_path = raw.get("log_path")
-    host_id = raw.get("host_id")
-    resolved_server_url = raw.get("resolved_server_url")
-    config_sig = raw.get("config_sig")
-    workspace_id = raw.get("workspace_id")
-    return _HostDaemonRecord(
-        pid=pid,
-        target=target,
-        mode=mode,
-        server_url=server_url if isinstance(server_url, str) and server_url else None,
-        log_path=log_path if isinstance(log_path, str) and log_path else None,
-        started_at=started_at,
-        host_id=host_id if isinstance(host_id, str) and host_id else None,
-        resolved_server_url=(
-            resolved_server_url
-            if isinstance(resolved_server_url, str) and resolved_server_url
-            else None
-        ),
-        config_sig=config_sig if isinstance(config_sig, str) and config_sig else None,
-        workspace_id=workspace_id if isinstance(workspace_id, str) and workspace_id else None,
-    )
+    from omnigent.host.daemon_lifecycle import record_from_json
+
+    return record_from_json(raw)
 
 
 def _read_daemon_record(path: Path) -> _HostDaemonRecord | None:
@@ -2803,13 +2769,9 @@ def _read_daemon_record(path: Path) -> _HostDaemonRecord | None:
         ``Path("~/.omnigent/daemons/abc.json")``.
     :returns: Parsed daemon record, or ``None`` if unreadable or malformed.
     """
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    return _record_from_json(cast(_HostJsonObject, raw))
+    from omnigent.host.daemon_lifecycle import read_daemon_record
+
+    return read_daemon_record(path)
 
 
 def _write_daemon_record(record: _HostDaemonRecord) -> None:
@@ -3303,9 +3265,6 @@ def _foreground_daemon_record(
     )
 
 
-_DAEMON_PID_START_TOLERANCE_S = 5.0
-
-
 def _describe_pid(pid: int) -> str:
     """Name what actually holds *pid* — user and command — for error copy.
 
@@ -3340,28 +3299,11 @@ def _pid_is_foreign(pid: int) -> bool:
 def _pid_is_recorded_daemon(record: _HostDaemonRecord) -> bool:
     """Whether *record*'s pid still names the recorded daemon, not a recycled pid.
 
-    A bare existence check keeps trusting the pid after a reboot: the kernel
-    recycles low pids, and a fresh system daemon can then hold the recorded
-    pid forever — the host refuses to start and ``host stop`` tries to signal
-    an unrelated process. The record's own ``started_at`` is the identity: a
-    process created *after* the record's start time (beyond a small clock
-    tolerance) cannot be the daemon that wrote it. The check is one-sided on
-    purpose — a daemon always exists before it writes its record, so a
-    creation time *earlier* than ``started_at`` (even by minutes of slow
-    startup or sign-in) is still ours. Legacy records without a start time,
-    and pids whose creation time can't be read, fall back to alive-only.
+    See :func:`omnigent.host.daemon_lifecycle.pid_is_recorded_daemon`.
     """
-    if not _pid_alive(record.pid):
-        return False
-    if record.started_at <= 0:
-        return True
-    try:
-        created = psutil.Process(record.pid).create_time()
-    except psutil.NoSuchProcess:
-        return False
-    except Exception:  # noqa: BLE001 — unreadable creation time: alive-only
-        return True
-    return created <= record.started_at + _DAEMON_PID_START_TOLERANCE_S
+    from omnigent.host.daemon_lifecycle import pid_is_recorded_daemon
+
+    return pid_is_recorded_daemon(record, pid_alive=_pid_alive)
 
 
 def _live_daemon_conflict(record: _HostDaemonRecord) -> _HostDaemonRecord | None:

@@ -650,14 +650,16 @@ def test_workspace_lock_admits_one_daemon_per_host_and_workspace(tmp_path: Path)
     first = DaemonLifecycleLock.for_workspace(_HOST_ID, "1", base_dir=tmp_path)
     second = DaemonLifecycleLock.for_workspace(str(uuid.UUID(_HOST_ID)), "1", base_dir=tmp_path)
     other_workspace = DaemonLifecycleLock.for_workspace(_HOST_ID, "2", base_dir=tmp_path)
+    other_host = DaemonLifecycleLock.for_workspace("b" * 32, "1", base_dir=tmp_path)
     try:
         assert first.try_acquire() is True
         assert second.try_acquire() is False
         assert other_workspace.try_acquire() is True
+        assert other_host.try_acquire() is True
         first.release()
         assert second.try_acquire() is True
     finally:
-        for lock in (first, second, other_workspace):
+        for lock in (first, second, other_workspace, other_host):
             lock.release()
 
 
@@ -756,5 +758,121 @@ def test_read_daemon_records_loads_old_records_and_skips_lock_files(
     # A yielding daemon's empty record file and a workspace lock file.
     daemon_record_path(_VANITY).write_text("")
     DaemonLifecycleLock.for_workspace(_HOST_ID, "1").try_acquire()
+    # Syntactically valid JSON with wrong-typed fields.
+    daemon_record_path("https://typo.example").write_text(
+        json.dumps({**payload, "target": "https://typo.example", "pid": [1]})
+    )
+    numeric_target = daemon_record_path("https://numeric.example")
+    numeric_target.write_text(json.dumps({**payload, "target": 123, "server_url": 7}))
 
-    assert read_daemon_records() == [old]
+    records = read_daemon_records()
+
+    assert old in records
+    assert all(record.pid != [1] for record in records)  # type: ignore[comparison-overlap]
+    numeric = next(record for record in records if record.target == "123")
+    assert numeric.server_url is None
+    # A malformed record never aborts the same-workspace lookup.
+    assert (
+        find_same_workspace_daemon(
+            records, server_url=_VANITY, host_id=_HOST_ID, is_live=lambda _record: True
+        )
+        is None
+    )
+
+
+def test_record_owner_is_live_without_flock_never_signals(
+    _daemon_registry: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a flock probe, liveness uses the process table, never a signal.
+
+    On Windows ``os.kill(pid, 0)`` terminates the process, so the fallback
+    must not call it.
+    """
+    import subprocess
+    import time
+
+    from omnigent.host import daemon_lifecycle
+    from omnigent.host.daemon_lifecycle import record_owner_is_live
+
+    monkeypatch.setattr(daemon_lifecycle, "record_flock_is_held", lambda _path: None)
+
+    def _no_signals(*_args: object) -> None:
+        raise AssertionError("liveness must not signal a process")
+
+    monkeypatch.setattr(os, "kill", _no_signals)
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait()
+    now = int(time.time())
+
+    assert record_owner_is_live(
+        dataclasses.replace(_server_record(_VANITY), pid=os.getpid(), started_at=now)
+    )
+    assert not record_owner_is_live(
+        dataclasses.replace(_server_record(_VANITY), pid=exited.pid, started_at=now)
+    )
+    # A pid created long after the record was written is a recycled pid.
+    assert not record_owner_is_live(
+        dataclasses.replace(_server_record(_VANITY), pid=os.getpid(), started_at=1)
+    )
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        # Databricks names the workspace even when it rejects the request.
+        ({"status": 401, "headers": {"x-databricks-org-id": "123"}}, "123"),
+        ({"status": 200, "headers": {"x-databricks-org-id": " 456 "}}, "456"),
+        ({"status": 401, "headers": {}}, None),
+        ({"status": 200, "headers": {"x-databricks-org-id": "not-a-number"}}, None),
+        (None, None),
+    ],
+)
+def test_probe_workspace_id_reads_the_org_header(
+    monkeypatch: pytest.MonkeyPatch,
+    response: dict[str, object] | None,
+    expected: str | None,
+) -> None:
+    import httpx
+
+    from omnigent.host.daemon_lifecycle import probe_workspace_id
+
+    calls: list[dict[str, object]] = []
+
+    def _get(url: str, **kwargs: object) -> httpx.Response:
+        calls.append({"url": url, **kwargs})
+        if response is None:
+            raise httpx.ConnectError("unreachable")
+        return httpx.Response(
+            response["status"],  # type: ignore[arg-type]
+            headers=response["headers"],  # type: ignore[arg-type]
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    assert probe_workspace_id(f"{_VANITY}/", org_id="789") == expected
+    (call,) = calls
+    assert call["url"] == f"{_VANITY}/v1/me"
+    # The selector is forwarded, no credentials are sent, and a login
+    # redirect is never followed.
+    assert call["headers"] == {"X-Databricks-Org-Id": "789"}
+    assert call["follow_redirects"] is False
+
+
+def test_probe_workspace_id_sends_no_selector_when_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from omnigent.host.daemon_lifecycle import probe_workspace_id
+
+    sent: list[object] = []
+
+    def _get(url: str, **kwargs: object) -> httpx.Response:
+        sent.append(kwargs["headers"])
+        return httpx.Response(401, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    assert probe_workspace_id(_VANITY) is None
+    assert sent == [{}]

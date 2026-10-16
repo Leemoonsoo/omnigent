@@ -23,7 +23,7 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -279,42 +279,126 @@ def workspace_lock_path(host_id: str, workspace_id: str, *, base_dir: Path | Non
     return daemon_registry_dir(base_dir) / f"workspace-{_target_digest(key)}.lock"
 
 
+def record_from_json(raw: Mapping[str, object]) -> HostDaemonRecord | None:
+    """Parse a daemon record from decoded JSON.
+
+    :param raw: Decoded JSON object, e.g.
+        ``{"pid": 4242, "target": "local", "mode": "local"}``.
+    :returns: The parsed record, or ``None`` if the record is malformed.
+    """
+    try:
+        pid_raw = raw["pid"]
+        if not isinstance(pid_raw, str | int) or isinstance(pid_raw, bool):
+            return None
+        pid = int(pid_raw)
+        target = str(raw["target"])
+        mode = str(raw["mode"])
+        started_at_raw = raw["started_at"]
+        if not isinstance(started_at_raw, str | int) or isinstance(started_at_raw, bool):
+            return None
+        started_at = int(started_at_raw)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if mode not in {"local", "server"} or not target:
+        return None
+
+    def _text(key: str) -> str | None:
+        value = raw.get(key)
+        return value if isinstance(value, str) and value else None
+
+    return HostDaemonRecord(
+        pid=pid,
+        target=target,
+        mode=mode,
+        server_url=_text("server_url"),
+        log_path=_text("log_path"),
+        started_at=started_at,
+        host_id=_text("host_id"),
+        resolved_server_url=_text("resolved_server_url"),
+        config_sig=_text("config_sig"),
+        workspace_id=_text("workspace_id"),
+    )
+
+
+def read_daemon_record(path: Path) -> HostDaemonRecord | None:
+    """Read one daemon registry record from disk.
+
+    :param path: JSON record path, e.g. ``Path("~/.omnigent/daemons/abc.json")``.
+    :returns: The parsed record, or ``None`` if unreadable or malformed.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return record_from_json(raw) if isinstance(raw, dict) else None
+
+
 def read_daemon_records(base_dir: Path | None = None) -> list[HostDaemonRecord]:
     """Read every well-formed per-target record, for daemon-side checks.
 
     :param base_dir: Data-directory override; defaults to :func:`data_dir`.
     :returns: Records in no particular order; malformed files are skipped.
     """
-    names = set(HostDaemonRecord.__dataclass_fields__)
-    records: list[HostDaemonRecord] = []
     registry = daemon_registry_dir(base_dir)
-    for path in registry.glob("*.json") if registry.exists() else ():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            records.append(HostDaemonRecord(**{k: v for k, v in raw.items() if k in names}))
-        except (OSError, UnicodeDecodeError, ValueError, TypeError, AttributeError):
-            continue
-    return records
+    paths = registry.glob("*.json") if registry.exists() else ()
+    return [record for path in paths if (record := read_daemon_record(path)) is not None]
+
+
+DAEMON_PID_START_TOLERANCE_S = 5.0
+
+
+def pid_is_recorded_daemon(
+    record: HostDaemonRecord, *, pid_alive: Callable[[int], bool] | None = None
+) -> bool:
+    """Whether *record*'s pid still names the recorded daemon, not a recycled pid.
+
+    A bare existence check keeps trusting the pid after a reboot: the kernel
+    recycles low pids, and a fresh system daemon can then hold the recorded
+    pid forever. The record's own ``started_at`` is the identity: a process
+    created *after* the record's start time (beyond a small clock tolerance)
+    cannot be the daemon that wrote it. The check is one-sided on purpose — a
+    daemon always exists before it writes its record, so a creation time
+    *earlier* than ``started_at`` (even by minutes of slow startup or sign-in)
+    is still ours. Legacy records without a start time, and pids whose
+    creation time can't be read, fall back to alive-only.
+
+    :param record: Record to check.
+    :param pid_alive: Existence check for a pid; defaults to a cross-platform
+        psutil check that never signals the process.
+    :returns: ``True`` if the pid is alive and can be the recorded daemon.
+    """
+    import psutil
+
+    if pid_alive is None:
+        from omnigent.host.local_server import _pid_alive as pid_alive
+    if not pid_alive(record.pid):
+        return False
+    if record.started_at <= 0:
+        return True
+    try:
+        created = psutil.Process(record.pid).create_time()
+    except psutil.NoSuchProcess:
+        return False
+    except Exception:  # noqa: BLE001 — unreadable creation time: alive-only
+        return True
+    return created <= record.started_at + DAEMON_PID_START_TOLERANCE_S
 
 
 def record_owner_is_live(record: HostDaemonRecord, *, base_dir: Path | None = None) -> bool:
-    """Whether *record*'s daemon is alive: its record flock, else its pid.
+    """Whether the daemon that wrote *record* is still alive.
+
+    A held record flock is a definitive live owner. When the lock is free or
+    can't be probed (no ``fcntl``), fall back to whether the pid still names
+    the recorded daemon, so a daemon still mid-startup (it hasn't taken the
+    lock yet) counts as live while a recycled pid does not.
 
     :param record: Record to check.
     :param base_dir: Data-directory override; defaults to :func:`data_dir`.
-    :returns: ``True`` when the owner holds the record flock, or the lock
-        can't be probed and the pid is alive.
+    :returns: ``True`` if the daemon should be treated as alive.
     """
-    held = record_flock_is_held(daemon_record_path(record.target, base_dir=base_dir))
-    if held is not None:
-        return held
-    try:
-        os.kill(record.pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+    if record_flock_is_held(daemon_record_path(record.target, base_dir=base_dir)) is True:
         return True
-    return True
+    return pid_is_recorded_daemon(record)
 
 
 def _target_digest(target: str) -> str:
