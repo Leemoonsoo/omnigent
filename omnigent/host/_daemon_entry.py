@@ -25,6 +25,11 @@ if TYPE_CHECKING:
     from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 
 
+# Total time a starting daemon spends asking servers which workspace a URL
+# reaches; the launcher waits about ten seconds for the daemon to claim.
+_WORKSPACE_DISCOVERY_BUDGET_S = 5.0
+
+
 def main() -> None:
     """Parse args and run the host process.
 
@@ -152,6 +157,7 @@ def _claim_workspace(
         unknown and no check applies.
     """
     from omnigent.host.daemon_lifecycle import (
+        WORKSPACE_PROBE_TIMEOUT_S,
         DaemonLifecycleLock,
         find_same_workspace_daemon,
         probe_workspace_id,
@@ -161,7 +167,19 @@ def _claim_workspace(
     )
 
     logger = logging.getLogger(__name__)
-    workspace_id = resolve_daemon_workspace_id(server_url)
+    # One budget for every probe here, so several older daemons with unknown
+    # workspaces can't push this daemon past the launcher's claim deadline.
+    deadline = time.monotonic() + _WORKSPACE_DISCOVERY_BUDGET_S
+
+    def _probe(url: str, *, org_id: str | None = None) -> str | None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        return probe_workspace_id(
+            url, org_id=org_id, timeout_s=min(remaining, WORKSPACE_PROBE_TIMEOUT_S)
+        )
+
+    workspace_id = resolve_daemon_workspace_id(server_url, probe=_probe)
     if workspace_id is None:
         return None, None
     lock = DaemonLifecycleLock.for_workspace(host_id, workspace_id)
@@ -184,7 +202,7 @@ def _claim_workspace(
         workspace_id=workspace_id,
         # Older daemons record no workspace id, and a sign-in through a
         # Databricks CLI profile leaves no login record to read it from.
-        probe=probe_workspace_id,
+        probe=_probe,
         legacy_only=acquired is True,
     )
     if older is not None:

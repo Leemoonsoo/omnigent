@@ -3228,13 +3228,21 @@ def _wait_for_daemon_claim(
     without claiming; the record returned then is that daemon's, under
     another target.
     """
-    import functools
-
     from omnigent.host.daemon_lifecycle import probe_workspace_id, resolve_daemon_workspace_id
 
-    # Resolved once per wait: each lookup would otherwise repeat the server
-    # probe, while the records themselves are reread on every poll.
-    probe = functools.cache(probe_workspace_id)
+    # Remember only successful answers: a failed probe is retried on the next
+    # poll, while the records themselves are reread every time.
+    answers: dict[tuple[str, str | None], str] = {}
+
+    def probe(url: str, *, org_id: str | None = None) -> str | None:
+        key = (url, org_id)
+        if key not in answers:
+            answer = probe_workspace_id(url, org_id=org_id)
+            if answer is None:
+                return None
+            answers[key] = answer
+        return answers[key]
+
     requested_workspace: str | None = None
     deadline = time.monotonic() + timeout_s
     while True:
@@ -3485,7 +3493,9 @@ def _claim_foreground_workspace(
     workspace_id = resolve_daemon_workspace_id(server_url)
     if workspace_id is None:
         return None
-    lock = DaemonLifecycleLock.for_workspace(record.host_id, workspace_id)
+    lock = DaemonLifecycleLock.for_workspace(
+        record.host_id, workspace_id, base_dir=_HOST_PID_PATH.parent
+    )
     if lock.try_acquire() is False:
         holder = find_same_workspace_daemon(
             _list_daemon_records(),

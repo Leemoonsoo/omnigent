@@ -128,16 +128,22 @@ def daemon_workspace_id(server_url: str) -> str | None:
 # Databricks answers every request with the workspace it routed to, even
 # unauthenticated ones, so this header names a URL's workspace without a token.
 _ORG_ID_RESPONSE_HEADER = "x-databricks-org-id"
-_WORKSPACE_PROBE_TIMEOUT_S = 3.0
+WORKSPACE_PROBE_TIMEOUT_S = 3.0
 
 
-def probe_workspace_id(server_url: str, *, org_id: str | None = None) -> str | None:
+def probe_workspace_id(
+    server_url: str,
+    *,
+    org_id: str | None = None,
+    timeout_s: float = WORKSPACE_PROBE_TIMEOUT_S,
+) -> str | None:
     """Ask the server which Databricks workspace *server_url* reaches.
 
     :param server_url: Server API base, e.g.
         ``"https://example.databricks.com/api/2.0/omnigent"``.
     :param org_id: Workspace selector to send, e.g. ``"123"``. A host shared
         by several workspaces names one only when the request selects it.
+    :param timeout_s: Request timeout in seconds, e.g. ``3.0``.
     :returns: The workspace id the server reported, e.g. ``"123"``, or
         ``None`` when the server is unreachable or names none (non-Databricks
         servers, a shared host without a selector).
@@ -151,7 +157,7 @@ def probe_workspace_id(server_url: str, *, org_id: str | None = None) -> str | N
         response = httpx.get(
             f"{server_url.rstrip('/')}/v1/me",
             headers=headers,
-            timeout=_WORKSPACE_PROBE_TIMEOUT_S,
+            timeout=timeout_s,
             follow_redirects=False,
         )
     except httpx.HTTPError:

@@ -241,7 +241,7 @@ def test_background_daemon_claims_record_before_connecting(
     )
     monkeypatch.setattr(
         "omnigent.host.daemon_lifecycle.probe_workspace_id",
-        lambda url, *, org_id=None: "7",
+        lambda url, *, org_id=None, **_kwargs: "7",
     )
 
     connected: list[str] = []
@@ -646,7 +646,7 @@ def test_resolve_daemon_workspace_id_prefers_the_server(
     sent: list[str | None] = []
 
     def _answers(answer: str | None):
-        def _probe(url: str, *, org_id: str | None = None) -> str | None:
+        def _probe(url: str, *, org_id: str | None = None, **_kwargs: object) -> str | None:
             sent.append(org_id)
             return answer
 
@@ -686,7 +686,7 @@ def _daemon_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setattr(
         "omnigent.host.daemon_lifecycle.probe_workspace_id",
-        lambda url, *, org_id=None: "1",
+        lambda url, *, org_id=None, **_kwargs: "1",
     )
     return tmp_path
 
@@ -754,6 +754,48 @@ def test_daemon_without_flock_yields_to_current_workspace_record(
     assert (workspace_id, lock) == ("1", None)
 
 
+def test_daemon_bounds_its_total_workspace_probe_time(
+    _daemon_registry: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probes of several older daemons share one budget, below the launcher's claim wait."""
+    from omnigent.host import _daemon_entry
+    from omnigent.host._daemon_entry import _claim_workspace
+
+    clock = [0.0]
+    monkeypatch.setattr(_daemon_entry.time, "monotonic", lambda: clock[0])
+    timeouts: list[float] = []
+
+    def _probe(url: str, *, org_id: str | None = None, timeout_s: float = 3.0) -> str | None:
+        timeouts.append(timeout_s)
+        clock[0] += timeout_s  # Every probe runs to its timeout.
+        return "1" if url == _VANITY else None
+
+    monkeypatch.setattr("omnigent.host.daemon_lifecycle.probe_workspace_id", _probe)
+    legacy_locks = []
+    for index in range(3):
+        legacy = _server_record(f"https://legacy-{index}.example.com", pid=os.getpid())
+        legacy_lock = DaemonLifecycleLock.for_target(legacy.target)
+        assert legacy_lock.try_acquire() is True
+        legacy_locks.append(legacy_lock)
+        write_daemon_record(legacy)
+    try:
+        workspace_id, lock = _claim_workspace(
+            server_url=_VANITY, daemon_target=_VANITY, host_id=_HOST_ID
+        )
+    finally:
+        for legacy_lock in legacy_locks:
+            legacy_lock.release()
+    try:
+        assert workspace_id == "1"
+        assert lock is not None
+        assert sum(timeouts) <= _daemon_entry._WORKSPACE_DISCOVERY_BUDGET_S
+        # The budget ran out before every older daemon was probed.
+        assert len(timeouts) < 4
+    finally:
+        if lock is not None:
+            lock.release()
+
+
 def test_yielding_daemon_removes_its_record_left_from_before_a_restart_exec(
     _daemon_registry: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -797,7 +839,7 @@ def test_daemon_skips_the_workspace_check_when_the_workspace_is_unknown(
 
     monkeypatch.setattr(
         "omnigent.host.daemon_lifecycle.probe_workspace_id",
-        lambda url, *, org_id=None: None,
+        lambda url, *, org_id=None, **_kwargs: None,
     )
 
     assert _claim_workspace(server_url=_VANITY, daemon_target=_VANITY, host_id=_HOST_ID) == (
@@ -843,7 +885,7 @@ def test_read_daemon_records_loads_old_records_and_skips_lock_files(
                 host_id=_HOST_ID,
                 is_live=lambda _record: True,
                 workspace_id="1",
-                probe=lambda url, *, org_id=None: "1",
+                probe=lambda url, *, org_id=None, **_kwargs: "1",
             )
             == old
         )
