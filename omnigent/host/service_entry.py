@@ -18,7 +18,7 @@ def _wait_while_workspace_is_served(server: str) -> None:
 
     The host would be refused and exit, and the service manager would restart
     it every few seconds. Waiting keeps the other daemon as the only one and
-    lets this service take over once it stops.
+    lets this service take over once it stops, up to a minute later.
 
     :param server: Remote Omnigent server URL, e.g.
         ``"https://example.databricks.com/omnigent"``.

@@ -798,6 +798,7 @@ def test_daemon_bounds_its_total_workspace_probe_time(
     _daemon_registry: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Probes of several older daemons share one budget, below the launcher's claim wait."""
+    from omnigent import cli
     from omnigent.host import _daemon_entry
     from omnigent.host._daemon_entry import _claim_workspace
 
@@ -830,6 +831,7 @@ def test_daemon_bounds_its_total_workspace_probe_time(
         assert workspace_id == "1"
         assert lock is not None
         assert 2 * sum(timeouts) <= WORKSPACE_DISCOVERY_BUDGET_S
+        assert WORKSPACE_DISCOVERY_BUDGET_S < cli._DAEMON_CLAIM_TIMEOUT_S
         # The budget ran out before every older daemon was probed.
         assert len(timeouts) < 4
     finally:
@@ -963,6 +965,13 @@ def test_record_owner_is_live_without_flock_never_signals(
         ({"status": 200, "headers": {"x-databricks-org-id": " 456 "}}, "789", "456"),
         ({"status": 401, "headers": {}}, "789", None),
         ({"status": 200, "headers": {"x-databricks-org-id": "not-a-number"}}, "789", None),
+        # Non-ASCII digits and over-long values are not workspace ids.
+        (
+            {"status": 200, "headers": [(b"x-databricks-org-id", "\u0661\u0662".encode())]},
+            "789",
+            None,
+        ),
+        ({"status": 200, "headers": {"x-databricks-org-id": "1" * 33}}, "789", None),
         (httpx.ConnectError("unreachable"), "789", None),
         # A URL httpx rejects, or a selector it can't encode, is "unknown" too.
         (httpx.InvalidURL("bad URL"), "789", None),

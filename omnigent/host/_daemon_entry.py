@@ -179,6 +179,8 @@ def _claim_workspace(
     workspace_id = resolve_daemon_workspace_id(server_url, probe=_probe)
     if workspace_id is None:
         return None, None
+    # The lock is close-on-exec: a daily-restart exec drops it until this runs
+    # again, and a daemon on another URL that claims it first keeps the workspace.
     lock = DaemonLifecycleLock.for_workspace(host_id, workspace_id)
     acquired = lock.try_acquire()
     if acquired is False:
@@ -188,20 +190,22 @@ def _claim_workspace(
             daemon_target,
         )
         return workspace_id, None
-    # Daemons from versions without the workspace lock still hold their
-    # record; yield to a live one rather than take over its connection.
-    # Without a working lock (no flock), any live record on the workspace counts.
-    older = find_same_workspace_daemon(
-        read_daemon_records(),
-        server_url=server_url,
-        host_id=host_id,
-        is_live=record_owner_is_live,
-        workspace_id=workspace_id,
-        # Older daemons record no workspace id, and a sign-in through a
-        # Databricks CLI profile leaves no login record to read it from.
-        probe=_probe,
-        legacy_only=acquired is True,
-    )
+    try:
+        # Yield to a live pre-lock daemon; without flock, to any live record.
+        older = find_same_workspace_daemon(
+            read_daemon_records(),
+            server_url=server_url,
+            host_id=host_id,
+            is_live=record_owner_is_live,
+            workspace_id=workspace_id,
+            # Older daemons record no workspace id, and a sign-in through a
+            # Databricks CLI profile leaves no login record to read it from.
+            probe=_probe,
+            legacy_only=acquired is True,
+        )
+    except BaseException:
+        lock.release()
+        raise
     if older is not None:
         logger.info(
             "Host daemon pid %s already serves workspace %s through %s; %s exits",

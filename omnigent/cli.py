@@ -112,6 +112,7 @@ from omnigent.process_logging import (
 from omnigent.util.json_types import JsonObject as _JsonObject
 from omnigent.util.server_url import ServerUrl
 from omnigent.util.server_url import org_id_from_url as _org_id_from_url
+from omnigent.util.uuid import normalize_uuid
 
 if TYPE_CHECKING:
     import httpx
@@ -2940,8 +2941,6 @@ def _daemon_host_identity_changed(record: _HostDaemonRecord) -> bool:
     if record.host_id is None:
         return False
     current_host_id = _load_existing_host_id()
-    from omnigent.db.db_models import normalize_uuid
-
     return normalize_uuid(record.host_id) != normalize_uuid(current_host_id)
 
 
@@ -3225,23 +3224,37 @@ def _wait_for_daemon_claim(
     without claiming; the record returned then is that daemon's, under
     another target.
     """
-    from omnigent.host.daemon_lifecycle import probe_workspace_id, resolve_daemon_workspace_id
+    from omnigent.host.daemon_lifecycle import (
+        WORKSPACE_PROBE_TIMEOUT_S,
+        probe_workspace_id,
+        resolve_daemon_workspace_id,
+    )
 
-    # Remember only successful answers: a failed probe is retried on the next
-    # poll, while the records themselves are reread every time.
+    deadline = time.monotonic() + timeout_s
+    # Remember only successful answers. A failed probe is retried at most every
+    # half second, and no probe runs past the claim deadline.
     answers: dict[tuple[str, str | None], str] = {}
+    failed_at: dict[tuple[str, str | None], float] = {}
 
     def probe(url: str, *, org_id: str | None = None) -> str | None:
         key = (url, org_id)
-        if key not in answers:
-            answer = probe_workspace_id(url, org_id=org_id)
-            if answer is None:
-                return None
-            answers[key] = answer
-        return answers[key]
+        if key in answers:
+            return answers[key]
+        now = time.monotonic()
+        remaining = deadline - now
+        if remaining <= 0 or now - failed_at.get(key, -1.0) < 0.5:
+            return None
+        # Connecting and reading the headers are timed separately.
+        answer = probe_workspace_id(
+            url, org_id=org_id, timeout_s=min(remaining / 2, WORKSPACE_PROBE_TIMEOUT_S)
+        )
+        if answer is None:
+            failed_at[key] = time.monotonic()
+            return None
+        answers[key] = answer
+        return answer
 
     requested_workspace: str | None = None
-    deadline = time.monotonic() + timeout_s
     while True:
         record = _find_daemon_record(target)
         if record is not None and _daemon_owner_is_live(record):
@@ -3512,7 +3525,11 @@ def _claim_foreground_workspace(
             )
         # A daemon starting on another URL may yield to this host's record.
         time.sleep(0.2)
-    _write_daemon_record(_HostDaemonRecord(**{**asdict(record), "workspace_id": workspace_id}))
+    try:
+        _write_daemon_record(_HostDaemonRecord(**{**asdict(record), "workspace_id": workspace_id}))
+    except BaseException:
+        lock.release()
+        raise
     return lock
 
 
@@ -3615,7 +3632,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         _record_host_state("start_failed")
         return False
     claimed = _wait_for_daemon_claim(target, spawned, server_url=server_url)
-    if claimed is not None and claimed.target != target:
+    if claimed is not None and _normalize_daemon_target(claimed.target) != target:
         _record_host_state("reused_same_workspace_daemon", running_before=True)
         return False
     if claimed is None:
@@ -3630,7 +3647,9 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
             f"{_DAEMON_CLAIM_TIMEOUT_S:.0f}s and was stopped. See {spawned.log_path}."
         )
     expected_host_id = expected_host_id or _load_existing_host_id()
-    if expected_host_id is not None and claimed.host_id != expected_host_id:
+    if expected_host_id is not None and normalize_uuid(claimed.host_id) != normalize_uuid(
+        expected_host_id
+    ):
         _record_host_state("start_identity_mismatch")
         _stop_spawned_host_daemon_process(spawned)
         _delete_spawned_daemon_record(target, spawned)
@@ -9480,9 +9499,11 @@ def host(
         # so we can prompt below instead of exiting with an "Aborted!" trace.
         stopped_cleanly = True
     finally:
+        # Restore the record first, so no daemon takes the workspace while a
+        # stale record of this host is still on disk.
+        _restore_replaced_daemon_record(record, previous)
         if workspace_lock is not None:
             workspace_lock.release()
-        _restore_replaced_daemon_record(record, previous)
         # Offer to stop the local server only when WE spawned it this run.
         # Not in --server mode (someone else's server), and not when we reused
         # a server started by `omnigent server` or another daemon — killing

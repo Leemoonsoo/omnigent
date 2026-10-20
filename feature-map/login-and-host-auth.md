@@ -30,10 +30,11 @@ be able to write resources without a separate Omnigent account.
 - `proxy-env`: login detects the right mode even with HTTP proxy variables set.
 - `host-lifecycle`: register in the foreground or background, run as a per-user
   system service, and check status, stop, stop a session, or reset the host ID.
-  A machine runs one host per host ID and Databricks workspace, even through
-  two URLs for it: a second background daemon yields and `host --background` or
-  `start` reports the running one, a foreground `host` refuses, and a service
-  host waits until the other daemon stops.
+  Where file locks work (not on Windows), a machine runs one host per host ID
+  and Databricks workspace, even through two URLs for it: a second background
+  daemon yields and `host --background` or `start` reports the running one, a
+  foreground `host` refuses, and a service host waits until the other daemon
+  stops.
 - `host-inline-login`: `omnigent host` against a Databricks-fronted server that
   the user is not signed in to runs the login flow first; `--non-interactive`
   fails with the login command instead.
@@ -130,10 +131,11 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
 - **`host-lifecycle`:** run `omnigent host --help` and the management commands
   inside cli-setup-verify's sandbox; the system service commands change the
   user's login items, so only run them on a disposable machine. One host per
-  workspace: `tests/host/test_daemon_lifecycle.py` (a daemon yields, and
-  `test_background_daemon_loser_exits_before_connecting`), `tests/host/test_cli_host.py`
-  (`test_background_commands_report_reuse_when_the_spawned_daemon_yields`, the
-  `test_foreground_host_*_workspace*` cases), and
+  workspace: `tests/host/test_daemon_lifecycle.py` (the `test_daemon_yields_*`
+  cases and `test_background_daemon_loser_exits_before_connecting`),
+  `tests/host/test_cli_host.py`
+  (`test_background_commands_report_reuse_when_the_spawned_daemon_yields` and
+  the `test_foreground_host_*_workspace*` cases), and
   `tests/host/test_service.py::test_service_entry_waits_while_another_daemon_serves_the_workspace`.
   A real check needs two URLs that reach one workspace, so run it only in a
   private-network sandbox against a disposable server.

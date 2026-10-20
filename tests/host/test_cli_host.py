@@ -1590,6 +1590,7 @@ def _seed_yielding_spawn(
     requested_login: bool = True,
     failed_probes: int = 0,
     exit_code: int = 0,
+    winner_target: str = _WORKSPACE_API,
 ) -> list[str]:
     """
     Make the spawned daemon yield to a same-workspace daemon on another URL.
@@ -1602,6 +1603,8 @@ def _seed_yielding_spawn(
         names its workspace.
     :param failed_probes: How many probes of the requested URL fail first.
     :param exit_code: The spawned child's exit status; ``0`` is a yield.
+    :param winner_target: Target the winning daemon's record names, e.g. an
+        old spelling of the requested URL.
     :returns: The URLs probed, in order.
     """
     from omnigent.cli import _SpawnedDaemonProcess
@@ -1644,9 +1647,9 @@ def _seed_yielding_spawn(
         cli_module._write_daemon_record(
             cli_module._HostDaemonRecord(
                 pid=_SAME_WORKSPACE_PID,
-                target=_WORKSPACE_API,
+                target=winner_target,
                 mode="server",
-                server_url=_WORKSPACE_API,
+                server_url=winner_target,
                 log_path=str(tmp_path / "existing.log"),
                 started_at=int(time.time()),
                 host_id="a" * 32,
@@ -1735,6 +1738,55 @@ def test_wait_for_daemon_claim_treats_only_a_clean_exit_as_a_yield(
     assert (claimed.pid if claimed is not None else None) == (
         _SAME_WORKSPACE_PID if reused else None
     )
+
+
+def test_wait_for_daemon_claim_paces_failed_probes_within_its_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe that keeps failing is retried every half second, never past the wait."""
+    _seed_yielding_spawn(monkeypatch, tmp_path, requested_login=False)
+    spawned = cli_module._spawn_host_daemon_process(args=[], env={})
+    clock = [0.0]
+    monkeypatch.setattr("omnigent.cli.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "omnigent.cli.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    timeouts: list[float] = []
+
+    def _probe(url: str, *, org_id: str | None = None, timeout_s: float = 3.0) -> str | None:
+        timeouts.append(timeout_s)
+        return None
+
+    monkeypatch.setattr("omnigent.host.daemon_lifecycle.probe_workspace_id", _probe)
+
+    claimed = cli_module._wait_for_daemon_claim(
+        _VANITY_API, spawned, timeout_s=2.0, server_url=_VANITY_API
+    )
+
+    assert claimed is None
+    assert 0 < len(timeouts) <= 5
+    assert max(timeouts) <= 1.0
+
+
+def test_ensure_host_daemon_treats_an_old_spelling_of_its_url_as_its_own_daemon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record under an old spelling of the requested URL is not another URL's daemon."""
+    _seed_yielding_spawn(
+        monkeypatch, tmp_path, winner_target="https://VANITY.databricks.com:443/api/2.0/omnigent"
+    )
+    actions: list[str] = []
+
+    def _record(event: str, *, details: dict[str, object], **_kwargs: object) -> None:
+        if event == "host_state_observed":
+            actions.append(str(details["host_process_action"]))
+
+    monkeypatch.setattr("omnigent.cli.record_startup_event", _record)
+
+    assert _ensure_host_daemon(_VANITY_API) is False
+    assert actions[-1] == "started_concurrently_during_launch"
 
 
 @pytest.mark.parametrize(

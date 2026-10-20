@@ -29,6 +29,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from omnigent.process_logging import data_dir
+from omnigent.util.uuid import normalize_uuid
 
 try:
     import fcntl
@@ -130,7 +131,7 @@ def daemon_workspace_id(server_url: str) -> str | None:
 _ORG_ID_RESPONSE_HEADER = "x-databricks-org-id"
 WORKSPACE_PROBE_TIMEOUT_S = 3.0
 # Total time a starting daemon spends asking servers which workspace a URL
-# reaches; the launcher waits about ten seconds for the daemon to claim.
+# reaches. Must stay below the launcher's claim wait, cli._DAEMON_CLAIM_TIMEOUT_S.
 WORKSPACE_DISCOVERY_BUDGET_S = 5.0
 
 
@@ -163,6 +164,8 @@ def probe_workspace_id(
     """Ask the server which Databricks workspace *server_url* reaches.
 
     Only the response headers are read; the request carries no credentials.
+    The answer is trusted like the server itself: a server can name any
+    workspace, which makes another daemon for that workspace yield.
 
     :param server_url: Server API base, e.g.
         ``"https://example.databricks.com/api/2.0/omnigent"``.
@@ -191,7 +194,8 @@ def probe_workspace_id(
     # means "unknown", like an unreachable server.
     except (httpx.HTTPError, httpx.InvalidURL, ValueError):
         return None
-    return value if value.isdecimal() else None
+    # Workspace ids are short ASCII digit strings; anything else is "unknown".
+    return value if value.isascii() and value.isdigit() and len(value) <= 32 else None
 
 
 def resolve_daemon_workspace_id(
@@ -211,24 +215,6 @@ def resolve_daemon_workspace_id(
     """
     known = daemon_workspace_id(server_url)
     return (probe or probe_workspace_id)(server_url, org_id=known) or known
-
-
-def normalize_host_id(host_id: str | None) -> str | None:
-    """Return *host_id* in the bare-hex form the server keys hosts by.
-
-    :param host_id: Host id in any accepted spelling (bare, dashed,
-        ``host_``-prefixed), or ``None``.
-    :returns: Bare lowercase hex, *host_id* unchanged when it is not
-        uuid-shaped, or ``None``.
-    """
-    if host_id is None:
-        return None
-    from omnigent.util.uuid import InvalidUuidError, uuid_to_bytes
-
-    try:
-        return uuid_to_bytes(host_id).hex()
-    except InvalidUuidError:
-        return host_id
 
 
 def find_same_workspace_daemon(
@@ -265,7 +251,7 @@ def find_same_workspace_daemon(
         i.e. daemons from versions that don't take the workspace lock.
     :returns: The live record, or ``None``.
     """
-    wanted_host = normalize_host_id(host_id)
+    wanted_host = normalize_uuid(host_id)
     if wanted_host is None:
         return None
     target = normalize_daemon_target(server_url)
@@ -283,7 +269,7 @@ def find_same_workspace_daemon(
     for record in records:
         if record.mode != "server" or record.server_url is None:
             continue
-        if normalize_host_id(record.host_id) != wanted_host:
+        if normalize_uuid(record.host_id) != wanted_host:
             continue
         if normalize_daemon_target(record.target) == target:
             continue
@@ -309,7 +295,7 @@ def workspace_lock_path(host_id: str, workspace_id: str, *, base_dir: Path | Non
     :param base_dir: Data-directory override; defaults to :func:`data_dir`.
     :returns: ``<base>/daemons/workspace-<digest>.lock``.
     """
-    key = f"{normalize_host_id(host_id)}:{workspace_id}"
+    key = f"{normalize_uuid(host_id)}:{workspace_id}"
     return daemon_registry_dir(base_dir) / f"workspace-{_target_digest(key)}.lock"
 
 
@@ -386,15 +372,10 @@ def pid_is_recorded_daemon(
 ) -> bool:
     """Whether *record*'s pid still names the recorded daemon, not a recycled pid.
 
-    A bare existence check keeps trusting the pid after a reboot: the kernel
-    recycles low pids, and a fresh system daemon can then hold the recorded
-    pid forever. The record's own ``started_at`` is the identity: a process
-    created *after* the record's start time (beyond a small clock tolerance)
-    cannot be the daemon that wrote it. The check is one-sided on purpose — a
-    daemon always exists before it writes its record, so a creation time
-    *earlier* than ``started_at`` (even by minutes of slow startup or sign-in)
-    is still ours. Legacy records without a start time, and pids whose
-    creation time can't be read, fall back to alive-only.
+    A process created after the record's ``started_at`` (beyond a small clock
+    tolerance) cannot be the daemon that wrote it; an earlier one, even by
+    minutes, still is. Records without a start time, and pids whose creation
+    time can't be read, fall back to alive-only.
 
     :param record: Record to check.
     :param pid_alive: Existence check for a pid; defaults to a cross-platform
