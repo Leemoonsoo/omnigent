@@ -65,6 +65,7 @@ from omnigent.config import (
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.host.daemon_lifecycle import (
     DAEMON_CONFIG_SIG_ENV_VAR,
+    WORKSPACE_DISCOVERY_BUDGET_S,
 )
 from omnigent.host.daemon_lifecycle import (
     HostDaemonRecord as _HostDaemonRecord,
@@ -111,10 +112,12 @@ from omnigent.process_logging import (
 from omnigent.util.json_types import JsonObject as _JsonObject
 from omnigent.util.server_url import ServerUrl
 from omnigent.util.server_url import org_id_from_url as _org_id_from_url
+from omnigent.util.uuid import normalize_uuid
 
 if TYPE_CHECKING:
     import httpx
 
+    from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
     from omnigent.install_ledger import InstallLedger
     from omnigent.onboarding.acp_auth import AcpAgentEntry
     from omnigent.server.smart_routing import LLMRoutingClient
@@ -2755,41 +2758,9 @@ def _record_from_json(raw: _HostJsonObject) -> _HostDaemonRecord | None:
     :returns: Parsed :class:`_HostDaemonRecord`, or ``None`` if the
         record is malformed.
     """
-    try:
-        pid_raw = raw["pid"]
-        if not isinstance(pid_raw, str | int) or isinstance(pid_raw, bool):
-            return None
-        pid = int(pid_raw)
-        target = str(raw["target"])
-        mode = str(raw["mode"])
-        started_at_raw = raw["started_at"]
-        if not isinstance(started_at_raw, str | int) or isinstance(started_at_raw, bool):
-            return None
-        started_at = int(started_at_raw)
-    except (KeyError, TypeError, ValueError):
-        return None
-    if mode not in {"local", "server"} or not target:
-        return None
-    server_url = raw.get("server_url")
-    log_path = raw.get("log_path")
-    host_id = raw.get("host_id")
-    resolved_server_url = raw.get("resolved_server_url")
-    config_sig = raw.get("config_sig")
-    return _HostDaemonRecord(
-        pid=pid,
-        target=target,
-        mode=mode,
-        server_url=server_url if isinstance(server_url, str) and server_url else None,
-        log_path=log_path if isinstance(log_path, str) and log_path else None,
-        started_at=started_at,
-        host_id=host_id if isinstance(host_id, str) and host_id else None,
-        resolved_server_url=(
-            resolved_server_url
-            if isinstance(resolved_server_url, str) and resolved_server_url
-            else None
-        ),
-        config_sig=config_sig if isinstance(config_sig, str) and config_sig else None,
-    )
+    from omnigent.host.daemon_lifecycle import record_from_json
+
+    return record_from_json(raw)
 
 
 def _read_daemon_record(path: Path) -> _HostDaemonRecord | None:
@@ -2800,13 +2771,9 @@ def _read_daemon_record(path: Path) -> _HostDaemonRecord | None:
         ``Path("~/.omnigent/daemons/abc.json")``.
     :returns: Parsed daemon record, or ``None`` if unreadable or malformed.
     """
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    return _record_from_json(cast(_HostJsonObject, raw))
+    from omnigent.host.daemon_lifecycle import read_daemon_record
+
+    return read_daemon_record(path)
 
 
 def _write_daemon_record(record: _HostDaemonRecord) -> None:
@@ -2869,13 +2836,9 @@ def _list_daemon_records(*, include_legacy: bool = True) -> list[_HostDaemonReco
         from ``host.pid`` if no JSON record exists for that target.
     :returns: Records ordered by ``started_at`` descending.
     """
-    records: dict[str, _HostDaemonRecord] = {}
-    registry = _daemon_registry_dir()
-    if registry.exists():
-        for path in registry.glob("*.json"):
-            record = _read_daemon_record(path)
-            if record is not None:
-                records[record.target] = record
+    from omnigent.host.daemon_lifecycle import read_daemon_records
+
+    records = {record.target: record for record in read_daemon_records(_HOST_PID_PATH.parent)}
     if include_legacy:
         legacy = _legacy_daemon_record()
         if legacy is not None and legacy.target not in records:
@@ -2978,8 +2941,6 @@ def _daemon_host_identity_changed(record: _HostDaemonRecord) -> bool:
     if record.host_id is None:
         return False
     current_host_id = _load_existing_host_id()
-    from omnigent.db.db_models import normalize_uuid
-
     return normalize_uuid(record.host_id) != normalize_uuid(current_host_id)
 
 
@@ -3117,7 +3078,11 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
 
 
 def _same_workspace_daemon(
-    server_url: str | None, *, host_id: str | None = None
+    server_url: str | None,
+    *,
+    host_id: str | None = None,
+    workspace_id: str | None = None,
+    probe: Callable[..., str | None] | None = None,
 ) -> _HostDaemonRecord | None:
     """
     Find the live daemon that already hosts this machine on *server_url*'s workspace.
@@ -3130,15 +3095,23 @@ def _same_workspace_daemon(
         empty (local mode) never matches.
     :param host_id: Host id the caller would advertise; defaults to the local
         host identity.
+    :param workspace_id: *server_url*'s workspace id when already resolved,
+        e.g. ``"123"``.
+    :param probe: Server lookup for unknown workspace ids; defaults to
+        :func:`omnigent.host.daemon_lifecycle.probe_workspace_id`.
     :returns: The live daemon's record, or ``None``.
     """
     if not server_url:
         return None
+    from omnigent.host.daemon_lifecycle import probe_workspace_id
+
     return _find_same_workspace_daemon(
         _list_daemon_records(),
         server_url=server_url,
         host_id=host_id if host_id is not None else _load_existing_host_id(),
         is_live=_daemon_owner_is_live,
+        workspace_id=workspace_id,
+        probe=probe or probe_workspace_id,
     )
 
 
@@ -3243,13 +3216,59 @@ def _wait_for_daemon_claim(
     spawned: _SpawnedDaemonProcess,
     *,
     timeout_s: float = _DAEMON_CLAIM_TIMEOUT_S,
+    server_url: str | None = None,
 ) -> _HostDaemonRecord | None:
-    """Wait for a spawned daemon (or its concurrent winner) to claim *target*."""
+    """Wait for a spawned daemon (or its concurrent winner) to claim *target*.
+
+    A daemon that found another one already serving its workspace exits
+    without claiming; the record returned then is that daemon's, under
+    another target.
+    """
+    from omnigent.host.daemon_lifecycle import (
+        WORKSPACE_PROBE_TIMEOUT_S,
+        probe_workspace_id,
+        resolve_daemon_workspace_id,
+    )
+
     deadline = time.monotonic() + timeout_s
+    # Remember only successful answers. A failed probe is retried at most every
+    # half second, and no probe runs past the claim deadline.
+    answers: dict[tuple[str, str | None], str] = {}
+    failed_at: dict[tuple[str, str | None], float] = {}
+
+    def probe(url: str, *, org_id: str | None = None) -> str | None:
+        key = (url, org_id)
+        if key in answers:
+            return answers[key]
+        now = time.monotonic()
+        remaining = deadline - now
+        if remaining <= 0 or now - failed_at.get(key, -1.0) < 0.5:
+            return None
+        answer = probe_workspace_id(
+            url, org_id=org_id, timeout_s=min(remaining, WORKSPACE_PROBE_TIMEOUT_S)
+        )
+        if answer is None:
+            failed_at[key] = time.monotonic()
+            return None
+        answers[key] = answer
+        return answer
+
+    requested_workspace: str | None = None
     while True:
         record = _find_daemon_record(target)
         if record is not None and _daemon_owner_is_live(record):
             return record
+        # A yielding daemon exits 0; a crash stays a failed start with its log hint.
+        if server_url and spawned.process is not None and spawned.process.poll() == 0:
+            if requested_workspace is None:
+                requested_workspace = resolve_daemon_workspace_id(server_url, probe=probe)
+            sibling = (
+                _same_workspace_daemon(server_url, workspace_id=requested_workspace, probe=probe)
+                if requested_workspace is not None
+                else None
+            )
+            if sibling is not None:
+                return sibling
         if time.monotonic() >= deadline:
             return None
         # A losing child exits promptly, but the winner's process may still be
@@ -3287,9 +3306,6 @@ def _foreground_daemon_record(
     )
 
 
-_DAEMON_PID_START_TOLERANCE_S = 5.0
-
-
 def _describe_pid(pid: int) -> str:
     """Name what actually holds *pid* — user and command — for error copy.
 
@@ -3324,28 +3340,11 @@ def _pid_is_foreign(pid: int) -> bool:
 def _pid_is_recorded_daemon(record: _HostDaemonRecord) -> bool:
     """Whether *record*'s pid still names the recorded daemon, not a recycled pid.
 
-    A bare existence check keeps trusting the pid after a reboot: the kernel
-    recycles low pids, and a fresh system daemon can then hold the recorded
-    pid forever — the host refuses to start and ``host stop`` tries to signal
-    an unrelated process. The record's own ``started_at`` is the identity: a
-    process created *after* the record's start time (beyond a small clock
-    tolerance) cannot be the daemon that wrote it. The check is one-sided on
-    purpose — a daemon always exists before it writes its record, so a
-    creation time *earlier* than ``started_at`` (even by minutes of slow
-    startup or sign-in) is still ours. Legacy records without a start time,
-    and pids whose creation time can't be read, fall back to alive-only.
+    See :func:`omnigent.host.daemon_lifecycle.pid_is_recorded_daemon`.
     """
-    if not _pid_alive(record.pid):
-        return False
-    if record.started_at <= 0:
-        return True
-    try:
-        created = psutil.Process(record.pid).create_time()
-    except psutil.NoSuchProcess:
-        return False
-    except Exception:  # noqa: BLE001 — unreadable creation time: alive-only
-        return True
-    return created <= record.started_at + _DAEMON_PID_START_TOLERANCE_S
+    from omnigent.host.daemon_lifecycle import pid_is_recorded_daemon
+
+    return pid_is_recorded_daemon(record, pid_alive=_pid_alive)
 
 
 def _live_daemon_conflict(record: _HostDaemonRecord) -> _HostDaemonRecord | None:
@@ -3482,6 +3481,57 @@ def _raise_live_daemon_conflict(
     )
 
 
+# How long a foreground host retries the workspace lock: a starting daemon
+# holds it for at most its workspace discovery budget, then claims or yields.
+_FOREGROUND_WORKSPACE_LOCK_WAIT_S = WORKSPACE_DISCOVERY_BUDGET_S + 1.0
+
+
+def _claim_foreground_workspace(
+    record: _HostDaemonRecord, server_url: str, *, workspace_id: str | None
+) -> DaemonLifecycleLock | None:
+    """
+    Hold the one-daemon-per-workspace lock for a foreground host.
+
+    :param record: Foreground record this process claimed.
+    :param server_url: Server URL the host connects to.
+    :param workspace_id: Workspace *server_url* reaches, e.g. ``"123"``, or
+        ``None`` when unknown.
+    :returns: The held lock, or ``None`` when the workspace is unknown.
+    :raises click.ClickException: If another daemon holds the workspace.
+    """
+    from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, find_same_workspace_daemon
+
+    if record.host_id is None or workspace_id is None:
+        return None
+    lock = DaemonLifecycleLock.for_workspace(
+        record.host_id, workspace_id, base_dir=_HOST_PID_PATH.parent
+    )
+    deadline = time.monotonic() + _FOREGROUND_WORKSPACE_LOCK_WAIT_S
+    while lock.try_acquire() is False:
+        holder = find_same_workspace_daemon(
+            _list_daemon_records(),
+            server_url=server_url,
+            host_id=record.host_id,
+            is_live=_daemon_owner_is_live,
+            workspace_id=workspace_id,
+        )
+        if holder is not None:
+            _raise_live_daemon_conflict(record, holder)
+        if time.monotonic() >= deadline:
+            raise click.ClickException(
+                f"Another host daemon on this machine already serves workspace {workspace_id}. "
+                f"Run `{cli_invocation()} host status --all` to see it."
+            )
+        # A daemon starting on another URL may yield to this host's record.
+        time.sleep(0.2)
+    try:
+        _write_daemon_record(_HostDaemonRecord(**{**asdict(record), "workspace_id": workspace_id}))
+    except BaseException:
+        lock.release()
+        raise
+    return lock
+
+
 def _restore_replaced_daemon_record(
     record: _HostDaemonRecord,
     previous: _HostDaemonRecord | None,
@@ -3534,11 +3584,11 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     :param server_url: Omnigent server URL the daemon connects to, or ``None``
         for local mode — the daemon starts (or reuses) a persistent local
         Omnigent server and connects to that.
-    :returns: ``True`` when an existing daemon was torn down and respawned
-        because its config (auth source) changed — the caller
-        should ask the user to re-run against the freshly-restarted server
-        rather than continue this command mid-restart. ``False`` for a
-        plain reuse, a transparent tunnel-health heal, or a first spawn.
+    :returns: ``True`` when a config (auth source) change tore down this
+        target's daemon, whether it was respawned or another URL's daemon now
+        serves the workspace — the caller should ask the user to re-run
+        rather than continue this command mid-restart. ``False`` for a plain
+        reuse, a transparent tunnel-health heal, or a first spawn.
     """
     ensure_started_at = time.monotonic()
     target = _normalize_daemon_target(server_url)
@@ -3565,7 +3615,8 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         return False
     if _same_workspace_daemon(server_url) is not None:
         _record_host_state("reused_same_workspace_daemon", running_before=True)
-        return False
+        # Report the config change even when an existing workspace daemon is reused.
+        return decision.config_changed
 
     _HOST_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     mode_args = ["--local"] if not server_url else ["--server", server_url]
@@ -3580,7 +3631,10 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     if spawned is None:
         _record_host_state("start_failed")
         return False
-    claimed = _wait_for_daemon_claim(target, spawned)
+    claimed = _wait_for_daemon_claim(target, spawned, server_url=server_url)
+    if claimed is not None and _normalize_daemon_target(claimed.target) != target:
+        _record_host_state("reused_same_workspace_daemon", running_before=True)
+        return decision.config_changed
     if claimed is None:
         _record_host_state("start_timeout")
         _stop_spawned_host_daemon_process(spawned)
@@ -3593,7 +3647,9 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
             f"{_DAEMON_CLAIM_TIMEOUT_S:.0f}s and was stopped. See {spawned.log_path}."
         )
     expected_host_id = expected_host_id or _load_existing_host_id()
-    if expected_host_id is not None and claimed.host_id != expected_host_id:
+    if expected_host_id is not None and normalize_uuid(claimed.host_id) != normalize_uuid(
+        expected_host_id
+    ):
         _record_host_state("start_identity_mismatch")
         _stop_spawned_host_daemon_process(spawned)
         _delete_spawned_daemon_record(target, spawned)
@@ -9415,6 +9471,7 @@ def host(
     # exit). A connection failure (SystemExit) leaves this False so we don't
     # prompt over an error.
     stopped_cleanly = False
+    workspace_lock = None
     try:
         # Sign in first when the remote server is Databricks-fronted and we
         # hold no usable credentials — otherwise the tunnel upgrade is
@@ -9423,11 +9480,17 @@ def host(
         # this runs the browser login and continues; ``--non-interactive``
         # (or a headless invocation) fails loud with the command to run.
         if remote_mode:
+            from omnigent.host.daemon_lifecycle import resolve_daemon_workspace_id
+
             _ensure_databricks_server_auth(server, non_interactive=non_interactive)
             # A first sign-in is what records the workspace id, so check again.
-            sibling = _same_workspace_daemon(server, host_id=record.host_id)
+            workspace_id = resolve_daemon_workspace_id(server)
+            sibling = _same_workspace_daemon(
+                server, host_id=record.host_id, workspace_id=workspace_id
+            )
             if sibling is not None:
                 _raise_live_daemon_conflict(record, sibling)
+            workspace_lock = _claim_foreground_workspace(record, server, workspace_id=workspace_id)
         _maybe_open_host_web_ui(server, non_interactive=non_interactive, no_open=no_open, cfg=cfg)
         run_host_process(server_url=server, daemon_target=target)
         stopped_cleanly = True
@@ -9436,7 +9499,11 @@ def host(
         # so we can prompt below instead of exiting with an "Aborted!" trace.
         stopped_cleanly = True
     finally:
+        # Restore the record first, so no daemon takes the workspace while a
+        # stale record of this host is still on disk.
         _restore_replaced_daemon_record(record, previous)
+        if workspace_lock is not None:
+            workspace_lock.release()
         # Offer to stop the local server only when WE spawned it this run.
         # Not in --server mode (someone else's server), and not when we reused
         # a server started by `omnigent server` or another daemon — killing

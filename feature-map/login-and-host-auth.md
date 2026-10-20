@@ -30,6 +30,14 @@ be able to write resources without a separate Omnigent account.
 - `proxy-env`: login detects the right mode even with HTTP proxy variables set.
 - `host-lifecycle`: register in the foreground or background, run as a per-user
   system service, and check status, stop, stop a session, or reset the host ID.
+  A machine runs one host per host ID and Databricks workspace, even through
+  two URLs for it, once the workspace ID is known from the server or a login
+  record; otherwise (a non-Databricks server, or an unreachable server with no
+  login record) daemons stay per URL. A second background daemon yields and
+  `host --background` or `start` reports the running one, a foreground `host`
+  refuses after retrying for about 6 s, and a service host waits until the
+  other daemon stops. Without file locks (Windows), daemons check only each
+  other's records, so two that start at the same moment can both connect.
 - `host-inline-login`: `omnigent host` against a Databricks-fronted server that
   the user is not signed in to runs the login flow first; `--non-interactive`
   fails with the login command instead.
@@ -125,7 +133,16 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
   profile of each kind. No e2e covers the host daemon against a real workspace.
 - **`host-lifecycle`:** run `omnigent host --help` and the management commands
   inside cli-setup-verify's sandbox; the system service commands change the
-  user's login items, so only run them on a disposable machine.
+  user's login items, so only run them on a disposable machine. One host per
+  workspace: `tests/host/test_daemon_lifecycle.py` (the `test_daemon_yields_*`
+  cases, `test_daemon_without_flock_yields_to_current_workspace_record`, and
+  `test_background_daemon_loser_exits_before_connecting`),
+  `tests/host/test_cli_host.py`
+  (`test_background_commands_report_reuse_when_the_spawned_daemon_yields` and
+  the `test_foreground_host_*_workspace*` cases), and
+  `tests/host/test_service.py::test_service_entry_waits_while_another_daemon_serves_the_workspace`.
+  A real check needs two URLs that reach one workspace, so run it only in a
+  private-network sandbox against a disposable server.
 - **`embedded-resource-write` (in-process app and real stores):**
   `tests/server/test_external_account_authority.py::test_custom_auth_project_routes_without_users`.
   Run with plain `uv run pytest`; it constructs `create_app` with a custom
