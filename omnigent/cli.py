@@ -3739,6 +3739,11 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         return False
     claimed = _wait_for_daemon_claim(target, spawned, server_url=server_url)
     if claimed is not None and _normalize_daemon_target(claimed.target) != target:
+        # The spawned daemon yielded to this one; it may still be offline.
+        reason = _same_workspace_daemon_offline_reason(claimed, server_url)
+        if reason is not None:
+            _record_host_state("same_workspace_daemon_offline", running_before=True)
+            raise _offline_same_workspace_daemon_error(claimed, reason)
         _record_host_state("reused_same_workspace_daemon", running_before=True)
         return decision.config_changed
     if claimed is None:

@@ -1958,6 +1958,25 @@ def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
     assert probed.count(_VANITY_API) == failed_probes + 1
 
 
+def test_ensure_host_daemon_refuses_an_offline_daemon_a_spawned_daemon_yielded_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Yielding to an offline daemon gets the refusal a launch gets before spawning."""
+    _seed_yielding_spawn(monkeypatch, tmp_path)
+    monkeypatch.setattr("omnigent.cli._DAEMON_REUSE_MIN_AGE_S", 0.0)
+    _stub_host_status_by_url(
+        monkeypatch, {_VANITY_API: _HOST_OFFLINE, _WORKSPACE_API: _HOST_REJECTED}
+    )
+
+    with pytest.raises(click.ClickException) as raised:
+        _ensure_host_daemon(_VANITY_API)
+
+    message = raised.value.format_message()
+    assert "rejected its sign-in (HTTP 401)" in message
+    assert "host stop --server https://dbc-1.cloud.databricks.com/omnigent?o=1" in message
+
+
 @pytest.mark.parametrize(("exit_code", "reused"), [(0, True), (1, False)])
 def test_wait_for_daemon_claim_treats_only_a_clean_exit_as_a_yield(
     tmp_path: Path,
