@@ -25,11 +25,6 @@ if TYPE_CHECKING:
     from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 
 
-# Total time a starting daemon spends asking servers which workspace a URL
-# reaches; the launcher waits about ten seconds for the daemon to claim.
-_WORKSPACE_DISCOVERY_BUDGET_S = 5.0
-
-
 def main() -> None:
     """Parse args and run the host process.
 
@@ -157,6 +152,7 @@ def _claim_workspace(
         unknown and no check applies.
     """
     from omnigent.host.daemon_lifecycle import (
+        WORKSPACE_DISCOVERY_BUDGET_S,
         WORKSPACE_PROBE_TIMEOUT_S,
         DaemonLifecycleLock,
         find_same_workspace_daemon,
@@ -169,14 +165,15 @@ def _claim_workspace(
     logger = logging.getLogger(__name__)
     # One budget for every probe here, so several older daemons with unknown
     # workspaces can't push this daemon past the launcher's claim deadline.
-    deadline = time.monotonic() + _WORKSPACE_DISCOVERY_BUDGET_S
+    deadline = time.monotonic() + WORKSPACE_DISCOVERY_BUDGET_S
 
     def _probe(url: str, *, org_id: str | None = None) -> str | None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
+        # Connecting and reading the headers are timed separately.
         return probe_workspace_id(
-            url, org_id=org_id, timeout_s=min(remaining, WORKSPACE_PROBE_TIMEOUT_S)
+            url, org_id=org_id, timeout_s=min(remaining / 2, WORKSPACE_PROBE_TIMEOUT_S)
         )
 
     workspace_id = resolve_daemon_workspace_id(server_url, probe=_probe)
@@ -219,11 +216,7 @@ def _claim_workspace(
 
 
 def _drop_own_record(lifecycle_lock: DaemonLifecycleLock) -> None:
-    """Remove a yielding daemon's own record and legacy pidfile.
-
-    That is the empty file its flock created, or, after a daily-restart exec
-    into this process, the record it wrote before the exec.
-    """
+    """Remove this process's own record and pidfile; the record may predate a re-exec."""
     from omnigent.host.daemon_lifecycle import daemon_record_path, read_daemon_record
     from omnigent.process_logging import data_dir
 

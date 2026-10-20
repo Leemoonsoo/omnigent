@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 
 from omnigent.host import connect
 from omnigent.host.connect import HostProcess
 from omnigent.host.daemon_lifecycle import (
+    WORKSPACE_DISCOVERY_BUDGET_S,
     DaemonLifecycleLock,
     HostDaemonRecord,
     daemon_record_path,
@@ -270,11 +274,17 @@ def test_background_daemon_claims_record_before_connecting(
     released.release()
 
 
+@pytest.mark.parametrize("held", ["target", "workspace"])
 def test_background_daemon_loser_exits_before_connecting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, held: str
 ) -> None:
-    """A second child for one target exits without replacing the live owner."""
+    """A second child for one target, or for one host id and workspace, never connects.
+
+    It leaves the live owner's record alone, and a child that yields to the
+    workspace's daemon removes its own record and releases its target lock.
+    """
     from omnigent.host import _daemon_entry
+    from omnigent.host import identity as identity_module
     from omnigent.process_logging import DATA_DIR_ENV_VAR
 
     target = "https://server.example.com"
@@ -288,13 +298,35 @@ def test_background_daemon_loser_exits_before_connecting(
         "omnigent.host.connect.run_host_process",
         lambda **_kw: pytest.fail("losing daemon must not connect"),
     )
-    owner = DaemonLifecycleLock.for_target(target, base_dir=tmp_path, pid=4242)
-    assert owner.acquire() is True
+    monkeypatch.setattr(
+        identity_module,
+        "load_or_create_host_identity",
+        lambda: HostIdentity(host_id=_HOST_ID, name="loser"),
+    )
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    monkeypatch.setattr(
+        "omnigent.host.daemon_lifecycle.probe_workspace_id",
+        lambda url, *, org_id=None, **_kwargs: "7",
+    )
+    record_path = daemon_record_path(target, base_dir=tmp_path)
+    if held == "target":
+        owner = DaemonLifecycleLock.for_target(target, base_dir=tmp_path, pid=4242)
+        assert owner.acquire() is True
+        _write_record(record_path, 4242)
+    else:
+        owner = DaemonLifecycleLock.for_workspace(_HOST_ID, "7", base_dir=tmp_path)
+        assert owner.try_acquire() is True
+    before = record_path.read_text() if record_path.exists() else None
     try:
-        _write_record(daemon_record_path(target, base_dir=tmp_path), 4242)
-        before = daemon_record_path(target, base_dir=tmp_path).read_text()
         _daemon_entry.main()
-        assert daemon_record_path(target, base_dir=tmp_path).read_text() == before
+        assert (record_path.read_text() if record_path.exists() else None) == before
+        if held == "workspace":
+            assert not (tmp_path / "host.pid").exists()
+            target_lock = DaemonLifecycleLock.for_target(target, base_dir=tmp_path)
+            assert target_lock.try_acquire() is True
+            target_lock.release()
     finally:
         owner.release()
 
@@ -556,18 +588,25 @@ def test_find_same_workspace_daemon_skips_local_records(
 def test_find_same_workspace_daemon_uses_recorded_and_probed_workspace_ids(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A record's own workspace id, or a server probe, stands in for a missing login record."""
+    """A record's own workspace id, or the server's answer, decides the match.
+
+    The server wins over a stale login record, as in
+    :func:`resolve_daemon_workspace_id`.
+    """
+    from omnigent.cli_auth import store_databricks_auth
+
     monkeypatch.setattr(
         "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
     )
+    store_databricks_auth(_VANITY, "https://dbc-1.cloud.databricks.com", org_id="2")
     recorded = dataclasses.replace(_server_record(_WORKSPACE_HOST), workspace_id="1")
     dead = dataclasses.replace(
         _server_record("https://dead.databricks.com/api/2.0/omnigent"), pid=7
     )
-    probed: list[str] = []
+    probed: list[tuple[str, str | None]] = []
 
-    def _probe(url: str) -> str | None:
-        probed.append(url)
+    def _probe(url: str, *, org_id: str | None = None) -> str | None:
+        probed.append((url, org_id))
         return "1"
 
     found = find_same_workspace_daemon(
@@ -579,8 +618,9 @@ def test_find_same_workspace_daemon_uses_recorded_and_probed_workspace_ids(
     )
 
     assert found == recorded
-    # Only the requested URL needed the server; the dead record cost nothing.
-    assert probed == [_VANITY]
+    # Only the requested URL needed the server, which got the login record's
+    # selector; the dead record cost nothing.
+    assert probed == [(_VANITY, "2")]
 
 
 def test_find_same_workspace_daemon_matches_host_id_spellings(
@@ -767,7 +807,8 @@ def test_daemon_bounds_its_total_workspace_probe_time(
 
     def _probe(url: str, *, org_id: str | None = None, timeout_s: float = 3.0) -> str | None:
         timeouts.append(timeout_s)
-        clock[0] += timeout_s  # Every probe runs to its timeout.
+        # Every probe times out both connecting and reading the headers.
+        clock[0] += 2 * timeout_s
         return "1" if url == _VANITY else None
 
     monkeypatch.setattr("omnigent.host.daemon_lifecycle.probe_workspace_id", _probe)
@@ -788,7 +829,7 @@ def test_daemon_bounds_its_total_workspace_probe_time(
     try:
         assert workspace_id == "1"
         assert lock is not None
-        assert sum(timeouts) <= _daemon_entry._WORKSPACE_DISCOVERY_BUDGET_S
+        assert 2 * sum(timeouts) <= WORKSPACE_DISCOVERY_BUDGET_S
         # The budget ran out before every older daemon was probed.
         assert len(timeouts) < 4
     finally:
@@ -815,21 +856,6 @@ def test_yielding_daemon_removes_its_record_left_from_before_a_restart_exec(
     assert not (_daemon_registry / "host.pid").exists()
     # A record another process wrote is left for its owner or the CLI to prune.
     assert daemon_record_path(other.target).exists()
-
-
-def test_daemon_claims_the_workspace_when_alone(_daemon_registry: Path) -> None:
-    from omnigent.host._daemon_entry import _claim_workspace
-
-    workspace_id, lock = _claim_workspace(
-        server_url=_VANITY, daemon_target=_VANITY, host_id=_HOST_ID
-    )
-    try:
-        assert workspace_id == "1"
-        assert lock is not None
-        assert DaemonLifecycleLock.for_workspace(_HOST_ID, "1").try_acquire() is False
-    finally:
-        if lock is not None:
-            lock.release()
 
 
 def test_daemon_skips_the_workspace_check_when_the_workspace_is_unknown(
@@ -872,7 +898,7 @@ def test_read_daemon_records_loads_old_records_and_skips_lock_files(
     records = read_daemon_records()
 
     assert old in records
-    assert all(record.pid != [1] for record in records)  # type: ignore[comparison-overlap]
+    assert "https://typo.example" not in {record.target for record in records}
     numeric = next(record for record in records if record.target == "123")
     assert numeric.server_url is None
     # Malformed records never abort the lookup, which still finds the valid
@@ -937,39 +963,77 @@ def test_record_owner_is_live_without_flock_never_signals(
         ({"status": 200, "headers": {"x-databricks-org-id": " 456 "}}, "789", "456"),
         ({"status": 401, "headers": {}}, "789", None),
         ({"status": 200, "headers": {"x-databricks-org-id": "not-a-number"}}, "789", None),
-        (None, "789", None),
+        (httpx.ConnectError("unreachable"), "789", None),
+        # A URL httpx rejects, or a selector it can't encode, is "unknown" too.
+        (httpx.InvalidURL("bad URL"), "789", None),
+        (UnicodeEncodeError("ascii", "\u00e9", 0, 1, "not ASCII"), "789", None),
         # With no known selector, none is sent.
         ({"status": 401, "headers": {"x-databricks-org-id": "123"}}, None, "123"),
     ],
 )
 def test_probe_workspace_id_reads_the_org_header(
     monkeypatch: pytest.MonkeyPatch,
-    response: dict[str, object] | None,
+    response: dict[str, object] | Exception,
     org_id: str | None,
     expected: str | None,
 ) -> None:
-    import httpx
-
     from omnigent.host.daemon_lifecycle import probe_workspace_id
 
     calls: list[dict[str, object]] = []
 
-    def _get(url: str, **kwargs: object) -> httpx.Response:
-        calls.append({"url": url, **kwargs})
-        if response is None:
-            raise httpx.ConnectError("unreachable")
-        return httpx.Response(
+    @contextlib.contextmanager
+    def _stream(method: str, url: str, **kwargs: object) -> Iterator[httpx.Response]:
+        calls.append({"method": method, "url": url, **kwargs})
+        if isinstance(response, Exception):
+            raise response
+        # Only the headers are read: the body is never consumed.
+        yield httpx.Response(
             response["status"],  # type: ignore[arg-type]
             headers=response["headers"],  # type: ignore[arg-type]
-            request=httpx.Request("GET", url),
+            request=httpx.Request(method, url),
         )
 
-    monkeypatch.setattr(httpx, "get", _get)
+    monkeypatch.setattr(httpx, "stream", _stream)
 
     assert probe_workspace_id(f"{_VANITY}/", org_id=org_id) == expected
     (call,) = calls
-    assert call["url"] == f"{_VANITY}/v1/me"
+    assert (call["method"], call["url"]) == ("GET", f"{_VANITY}/v1/me")
     # The selector is forwarded only when known, no credentials are sent, and
     # a login redirect is never followed.
     assert call["headers"] == ({"X-Databricks-Org-Id": org_id} if org_id else {})
     assert call["follow_redirects"] is False
+
+
+@pytest.mark.parametrize(
+    ("server_url", "probed_url"),
+    [
+        # Userinfo is dropped, so the probe sends no credentials.
+        (
+            "https://user:secret@example.databricks.com:8443/api/2.0/omnigent",
+            "https://example.databricks.com:8443/api/2.0/omnigent/v1/me",
+        ),
+        ("http://[::1]:8000/api/2.0/omnigent", "http://[::1]:8000/api/2.0/omnigent/v1/me"),
+        # Malformed and non-HTTP URLs are never requested.
+        ("file:///etc/passwd", None),
+        ("https://[::1/api", None),
+        ("https://example.databricks.com:99999/api", None),
+    ],
+)
+def test_probe_workspace_id_requests_only_plain_http_urls(
+    monkeypatch: pytest.MonkeyPatch, server_url: str, probed_url: str | None
+) -> None:
+    from omnigent.host.daemon_lifecycle import probe_workspace_id
+
+    requested: list[str] = []
+
+    @contextlib.contextmanager
+    def _stream(method: str, url: str, **_kwargs: object) -> Iterator[httpx.Response]:
+        requested.append(url)
+        yield httpx.Response(
+            401, headers={"x-databricks-org-id": "1"}, request=httpx.Request(method, url)
+        )
+
+    monkeypatch.setattr(httpx, "stream", _stream)
+
+    assert probe_workspace_id(server_url) == ("1" if probed_url else None)
+    assert requested == ([probed_url] if probed_url else [])

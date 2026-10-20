@@ -65,6 +65,7 @@ from omnigent.config import (
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.host.daemon_lifecycle import (
     DAEMON_CONFIG_SIG_ENV_VAR,
+    WORKSPACE_DISCOVERY_BUDGET_S,
 )
 from omnigent.host.daemon_lifecycle import (
     HostDaemonRecord as _HostDaemonRecord,
@@ -2834,13 +2835,9 @@ def _list_daemon_records(*, include_legacy: bool = True) -> list[_HostDaemonReco
         from ``host.pid`` if no JSON record exists for that target.
     :returns: Records ordered by ``started_at`` descending.
     """
-    records: dict[str, _HostDaemonRecord] = {}
-    registry = _daemon_registry_dir()
-    if registry.exists():
-        for path in registry.glob("*.json"):
-            record = _read_daemon_record(path)
-            if record is not None:
-                records[record.target] = record
+    from omnigent.host.daemon_lifecycle import read_daemon_records
+
+    records = {record.target: record for record in read_daemon_records(_HOST_PID_PATH.parent)}
     if include_legacy:
         legacy = _legacy_daemon_record()
         if legacy is not None and legacy.target not in records:
@@ -3249,7 +3246,8 @@ def _wait_for_daemon_claim(
         record = _find_daemon_record(target)
         if record is not None and _daemon_owner_is_live(record):
             return record
-        if server_url and spawned.process is not None and spawned.process.poll() is not None:
+        # A yielding daemon exits 0; a crash stays a failed start with its log hint.
+        if server_url and spawned.process is not None and spawned.process.poll() == 0:
             if requested_workspace is None:
                 requested_workspace = resolve_daemon_workspace_id(server_url, probe=probe)
             sibling = (
@@ -3471,32 +3469,33 @@ def _raise_live_daemon_conflict(
     )
 
 
+# How long a foreground host retries the workspace lock: a starting daemon
+# holds it for at most its workspace discovery budget, then claims or yields.
+_FOREGROUND_WORKSPACE_LOCK_WAIT_S = WORKSPACE_DISCOVERY_BUDGET_S + 1.0
+
+
 def _claim_foreground_workspace(
-    record: _HostDaemonRecord, server_url: str
+    record: _HostDaemonRecord, server_url: str, *, workspace_id: str | None
 ) -> DaemonLifecycleLock | None:
     """
     Hold the one-daemon-per-workspace lock for a foreground host.
 
     :param record: Foreground record this process claimed.
     :param server_url: Server URL the host connects to.
+    :param workspace_id: Workspace *server_url* reaches, e.g. ``"123"``, or
+        ``None`` when unknown.
     :returns: The held lock, or ``None`` when the workspace is unknown.
     :raises click.ClickException: If another daemon holds the workspace.
     """
-    from omnigent.host.daemon_lifecycle import (
-        DaemonLifecycleLock,
-        find_same_workspace_daemon,
-        resolve_daemon_workspace_id,
-    )
+    from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, find_same_workspace_daemon
 
-    if record.host_id is None:
-        return None
-    workspace_id = resolve_daemon_workspace_id(server_url)
-    if workspace_id is None:
+    if record.host_id is None or workspace_id is None:
         return None
     lock = DaemonLifecycleLock.for_workspace(
         record.host_id, workspace_id, base_dir=_HOST_PID_PATH.parent
     )
-    if lock.try_acquire() is False:
+    deadline = time.monotonic() + _FOREGROUND_WORKSPACE_LOCK_WAIT_S
+    while lock.try_acquire() is False:
         holder = find_same_workspace_daemon(
             _list_daemon_records(),
             server_url=server_url,
@@ -3506,10 +3505,13 @@ def _claim_foreground_workspace(
         )
         if holder is not None:
             _raise_live_daemon_conflict(record, holder)
-        raise click.ClickException(
-            f"Another host daemon on this machine already serves workspace {workspace_id}. "
-            f"Run `{cli_invocation()} host status --all` to see it."
-        )
+        if time.monotonic() >= deadline:
+            raise click.ClickException(
+                f"Another host daemon on this machine already serves workspace {workspace_id}. "
+                f"Run `{cli_invocation()} host status --all` to see it."
+            )
+        # A daemon starting on another URL may yield to this host's record.
+        time.sleep(0.2)
     _write_daemon_record(_HostDaemonRecord(**{**asdict(record), "workspace_id": workspace_id}))
     return lock
 
@@ -9459,12 +9461,17 @@ def host(
         # this runs the browser login and continues; ``--non-interactive``
         # (or a headless invocation) fails loud with the command to run.
         if remote_mode:
+            from omnigent.host.daemon_lifecycle import resolve_daemon_workspace_id
+
             _ensure_databricks_server_auth(server, non_interactive=non_interactive)
             # A first sign-in is what records the workspace id, so check again.
-            sibling = _same_workspace_daemon(server, host_id=record.host_id)
+            workspace_id = resolve_daemon_workspace_id(server)
+            sibling = _same_workspace_daemon(
+                server, host_id=record.host_id, workspace_id=workspace_id
+            )
             if sibling is not None:
                 _raise_live_daemon_conflict(record, sibling)
-            workspace_lock = _claim_foreground_workspace(record, server)
+            workspace_lock = _claim_foreground_workspace(record, server, workspace_id=workspace_id)
         _maybe_open_host_web_ui(server, non_interactive=non_interactive, no_open=no_open, cfg=cfg)
         run_host_process(server_url=server, daemon_target=target)
         stopped_cleanly = True

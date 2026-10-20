@@ -129,6 +129,29 @@ def daemon_workspace_id(server_url: str) -> str | None:
 # unauthenticated ones, so this header names a URL's workspace without a token.
 _ORG_ID_RESPONSE_HEADER = "x-databricks-org-id"
 WORKSPACE_PROBE_TIMEOUT_S = 3.0
+# Total time a starting daemon spends asking servers which workspace a URL
+# reaches; the launcher waits about ten seconds for the daemon to claim.
+WORKSPACE_DISCOVERY_BUDGET_S = 5.0
+
+
+def _workspace_probe_url(server_url: str) -> str | None:
+    """Return the ``/v1/me`` URL to probe, without any userinfo credentials.
+
+    :param server_url: Server API base, e.g.
+        ``"https://example.databricks.com/api/2.0/omnigent"``.
+    :returns: The probe URL, or ``None`` for a malformed or non-HTTP URL.
+    """
+    try:
+        parts = urlsplit(server_url.rstrip("/"))
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not hostname:
+        return None
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit((parts.scheme, netloc, f"{parts.path}/v1/me", "", ""))
 
 
 def probe_workspace_id(
@@ -139,30 +162,35 @@ def probe_workspace_id(
 ) -> str | None:
     """Ask the server which Databricks workspace *server_url* reaches.
 
+    Only the response headers are read; the request carries no credentials.
+
     :param server_url: Server API base, e.g.
         ``"https://example.databricks.com/api/2.0/omnigent"``.
     :param org_id: Workspace selector to send, e.g. ``"123"``. A host shared
         by several workspaces names one only when the request selects it.
-    :param timeout_s: Request timeout in seconds, e.g. ``3.0``.
+    :param timeout_s: Timeout in seconds for each of connecting and reading
+        the response headers, e.g. ``3.0``.
     :returns: The workspace id the server reported, e.g. ``"123"``, or
         ``None`` when the server is unreachable or names none (non-Databricks
-        servers, a shared host without a selector).
+        servers, a shared host without a selector, a malformed URL).
     """
     import httpx
 
     from omnigent.cli_auth import DATABRICKS_ORG_ID_HEADER
 
+    url = _workspace_probe_url(server_url)
+    if url is None:
+        return None
     headers = {DATABRICKS_ORG_ID_HEADER: org_id} if org_id else {}
     try:
-        response = httpx.get(
-            f"{server_url.rstrip('/')}/v1/me",
-            headers=headers,
-            timeout=timeout_s,
-            follow_redirects=False,
-        )
-    except httpx.HTTPError:
+        with httpx.stream(
+            "GET", url, headers=headers, timeout=timeout_s, follow_redirects=False
+        ) as response:
+            value = response.headers.get(_ORG_ID_RESPONSE_HEADER, "").strip()
+    # The probe is best-effort: an unencodable selector or a URL httpx rejects
+    # means "unknown", like an unreachable server.
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError):
         return None
-    value = response.headers.get(_ORG_ID_RESPONSE_HEADER, "").strip()
     return value if value.isdecimal() else None
 
 
@@ -229,9 +257,10 @@ def find_same_workspace_daemon(
     :param is_live: Liveness check for a record's owner.
     :param workspace_id: *server_url*'s workspace id when the caller already
         knows it, e.g. ``"123"``.
-    :param probe: Server lookup (see :func:`probe_workspace_id`) used only
-        when a candidate's workspace id is otherwise unknown; ``None`` keeps
-        the lookup offline.
+    :param probe: Server lookup (see :func:`probe_workspace_id`) for a URL
+        whose daemon record names no workspace. Its answer wins over the login
+        record, as in :func:`resolve_daemon_workspace_id`; ``None`` keeps the
+        lookup offline.
     :param legacy_only: Consider only records without a ``workspace_id``,
         i.e. daemons from versions that don't take the workspace lock.
     :returns: The live record, or ``None``.
@@ -240,17 +269,16 @@ def find_same_workspace_daemon(
     if wanted_host is None:
         return None
     target = normalize_daemon_target(server_url)
-    probed: dict[str, str | None] = {}
+    resolved: dict[str, str | None] = {}
 
     def _lookup(url: str, recorded: str | None) -> str | None:
         if recorded:
             return recorded
-        known = daemon_workspace_id(url)
-        if known is not None or probe is None:
-            return known
-        if url not in probed:
-            probed[url] = probe(url)
-        return probed[url]
+        if probe is None:
+            return daemon_workspace_id(url)
+        if url not in resolved:
+            resolved[url] = resolve_daemon_workspace_id(url, probe=probe)
+        return resolved[url]
 
     for record in records:
         if record.mode != "server" or record.server_url is None:
