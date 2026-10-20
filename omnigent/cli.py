@@ -3584,11 +3584,11 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     :param server_url: Omnigent server URL the daemon connects to, or ``None``
         for local mode — the daemon starts (or reuses) a persistent local
         Omnigent server and connects to that.
-    :returns: ``True`` when an existing daemon was torn down and respawned
-        because its config (auth source) changed — the caller
-        should ask the user to re-run against the freshly-restarted server
-        rather than continue this command mid-restart. ``False`` for a
-        plain reuse, a transparent tunnel-health heal, or a first spawn.
+    :returns: ``True`` when a config (auth source) change tore down this
+        target's daemon, whether it was respawned or another URL's daemon now
+        serves the workspace — the caller should ask the user to re-run
+        rather than continue this command mid-restart. ``False`` for a plain
+        reuse, a transparent tunnel-health heal, or a first spawn.
     """
     ensure_started_at = time.monotonic()
     target = _normalize_daemon_target(server_url)
@@ -3615,7 +3615,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         return False
     if _same_workspace_daemon(server_url) is not None:
         _record_host_state("reused_same_workspace_daemon", running_before=True)
-        # A config-change teardown above still happened, even with no respawn.
+        # Report the config change even when an existing workspace daemon is reused.
         return decision.config_changed
 
     _HOST_PID_PATH.parent.mkdir(parents=True, exist_ok=True)

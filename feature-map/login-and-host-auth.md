@@ -30,11 +30,14 @@ be able to write resources without a separate Omnigent account.
 - `proxy-env`: login detects the right mode even with HTTP proxy variables set.
 - `host-lifecycle`: register in the foreground or background, run as a per-user
   system service, and check status, stop, stop a session, or reset the host ID.
-  Where file locks work (not on Windows), a machine runs one host per host ID
-  and Databricks workspace, even through two URLs for it: a second background
-  daemon yields and `host --background` or `start` reports the running one, a
-  foreground `host` refuses, and a service host waits until the other daemon
-  stops.
+  A machine runs one host per host ID and Databricks workspace, even through
+  two URLs for it, once the workspace ID is known from the server or a login
+  record; otherwise (a non-Databricks server, or an unreachable server with no
+  login record) daemons stay per URL. A second background daemon yields and
+  `host --background` or `start` reports the running one, a foreground `host`
+  refuses after retrying for about 6 s, and a service host waits until the
+  other daemon stops. Without file locks (Windows), daemons check only each
+  other's records, so two that start at the same moment can both connect.
 - `host-inline-login`: `omnigent host` against a Databricks-fronted server that
   the user is not signed in to runs the login flow first; `--non-interactive`
   fails with the login command instead.
@@ -132,7 +135,8 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
   inside cli-setup-verify's sandbox; the system service commands change the
   user's login items, so only run them on a disposable machine. One host per
   workspace: `tests/host/test_daemon_lifecycle.py` (the `test_daemon_yields_*`
-  cases and `test_background_daemon_loser_exits_before_connecting`),
+  cases, `test_daemon_without_flock_yields_to_current_workspace_record`, and
+  `test_background_daemon_loser_exits_before_connecting`),
   `tests/host/test_cli_host.py`
   (`test_background_commands_report_reuse_when_the_spawned_daemon_yields` and
   the `test_foreground_host_*_workspace*` cases), and
