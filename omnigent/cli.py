@@ -3244,9 +3244,8 @@ def _wait_for_daemon_claim(
         remaining = deadline - now
         if remaining <= 0 or now - failed_at.get(key, -1.0) < 0.5:
             return None
-        # Connecting and reading the headers are timed separately.
         answer = probe_workspace_id(
-            url, org_id=org_id, timeout_s=min(remaining / 2, WORKSPACE_PROBE_TIMEOUT_S)
+            url, org_id=org_id, timeout_s=min(remaining, WORKSPACE_PROBE_TIMEOUT_S)
         )
         if answer is None:
             failed_at[key] = time.monotonic()

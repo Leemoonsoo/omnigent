@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -113,16 +114,20 @@ def daemon_workspace_id(server_url: str) -> str | None:
     Two different URLs can front one workspace (a vanity host and the
     ``dbc-…`` workspace host, say). The server keys host connections by
     workspace and host id, so the workspace id, not the URL, decides whether
-    two daemons collide.
+    two daemons collide. Only the workspace API mount is that shared server;
+    each app on a workspace (a Databricks App, say) runs its own.
 
     :param server_url: Server URL, e.g.
         ``"https://example.databricks.com/api/2.0/omnigent?o=123"``.
     :returns: The ``?o=`` selector when the URL carries one, else the org id
         stored by ``omnigent login`` for the URL, e.g. ``"123"``. ``None``
-        when neither is known (non-Databricks servers, no login yet).
+        when neither is known (non-Databricks servers, no login yet) or the
+        URL is not the workspace API mount.
     """
-    from omnigent.util.server_url import ServerUrl
+    from omnigent.util.server_url import ServerUrl, is_workspace_hosted_url
 
+    if not is_workspace_hosted_url(server_url):
+        return None
     return ServerUrl.from_api_base(server_url).org_id
 
 
@@ -171,28 +176,57 @@ def probe_workspace_id(
         ``"https://example.databricks.com/api/2.0/omnigent"``.
     :param org_id: Workspace selector to send, e.g. ``"123"``. A host shared
         by several workspaces names one only when the request selects it.
-    :param timeout_s: Timeout in seconds for each of connecting and reading
-        the response headers, e.g. ``3.0``.
+    :param timeout_s: Total time in seconds to wait for the answer, including
+        name resolution and the TLS handshake, e.g. ``3.0``.
     :returns: The workspace id the server reported, e.g. ``"123"``, or
-        ``None`` when the server is unreachable or names none (non-Databricks
-        servers, a shared host without a selector, a malformed URL).
+        ``None`` when the server is unreachable, slower than *timeout_s*, or
+        names none (non-Databricks servers, a shared host without a selector,
+        a malformed URL).
+    """
+    url = _workspace_probe_url(server_url)
+    if url is None:
+        return None
+    answer: list[str | None] = [None]
+
+    def _request() -> None:
+        answer[0] = _read_workspace_header(url, org_id=org_id, timeout_s=timeout_s)
+
+    # httpx times each phase separately and never times name resolution, so a
+    # worker thread enforces the total; one still stuck is left to finish.
+    worker = threading.Thread(target=_request, name="omnigent-workspace-probe", daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    return None if worker.is_alive() else answer[0]
+
+
+def _read_workspace_header(url: str, *, org_id: str | None, timeout_s: float) -> str | None:
+    """Send the probe request and read the workspace header.
+
+    :param url: Probe URL from :func:`_workspace_probe_url`.
+    :param org_id: Workspace selector to send, e.g. ``"123"``.
+    :param timeout_s: httpx's per-phase timeout in seconds, e.g. ``3.0``.
+    :returns: The reported workspace id, e.g. ``"123"``, or ``None``.
     """
     import httpx
 
     from omnigent.cli_auth import DATABRICKS_ORG_ID_HEADER
+    from omnigent.util.tls import client_ssl_context
 
-    url = _workspace_probe_url(server_url)
-    if url is None:
-        return None
     headers = {DATABRICKS_ORG_ID_HEADER: org_id} if org_id else {}
     try:
+        # The tunnel's trust store, so a TLS-intercepting proxy it trusts works here too.
         with httpx.stream(
-            "GET", url, headers=headers, timeout=timeout_s, follow_redirects=False
+            "GET",
+            url,
+            headers=headers,
+            timeout=timeout_s,
+            follow_redirects=False,
+            verify=client_ssl_context(),
         ) as response:
             value = response.headers.get(_ORG_ID_RESPONSE_HEADER, "").strip()
-    # The probe is best-effort: an unencodable selector or a URL httpx rejects
-    # means "unknown", like an unreachable server.
-    except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+    # The probe is best-effort: an unencodable selector, a URL httpx rejects, or
+    # an unreadable CA bundle means "unknown", like an unreachable server.
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError, OSError):
         return None
     # Workspace ids are short ASCII digit strings; anything else is "unknown".
     return value if value.isascii() and value.isdigit() and len(value) <= 32 else None
@@ -211,8 +245,13 @@ def resolve_daemon_workspace_id(
     :param server_url: Server API base, e.g.
         ``"https://example.databricks.com/api/2.0/omnigent"``.
     :param probe: Server lookup, :func:`probe_workspace_id` by default.
-    :returns: The workspace id, e.g. ``"123"``, or ``None`` when unknown.
+    :returns: The workspace id, e.g. ``"123"``, or ``None`` when unknown or
+        the URL is not the workspace API mount.
     """
+    from omnigent.util.server_url import is_workspace_hosted_url
+
+    if not is_workspace_hosted_url(server_url):
+        return None
     known = daemon_workspace_id(server_url)
     return (probe or probe_workspace_id)(server_url, org_id=known) or known
 
@@ -251,6 +290,8 @@ def find_same_workspace_daemon(
         i.e. daemons from versions that don't take the workspace lock.
     :returns: The live record, or ``None``.
     """
+    from omnigent.util.server_url import is_workspace_hosted_url
+
     wanted_host = normalize_uuid(host_id)
     if wanted_host is None:
         return None
@@ -258,6 +299,8 @@ def find_same_workspace_daemon(
     resolved: dict[str, str | None] = {}
 
     def _lookup(url: str, recorded: str | None) -> str | None:
+        if not is_workspace_hosted_url(url):
+            return None
         if recorded:
             return recorded
         if probe is None:

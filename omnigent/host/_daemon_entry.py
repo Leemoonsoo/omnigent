@@ -171,9 +171,8 @@ def _claim_workspace(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
-        # Connecting and reading the headers are timed separately.
         return probe_workspace_id(
-            url, org_id=org_id, timeout_s=min(remaining / 2, WORKSPACE_PROBE_TIMEOUT_S)
+            url, org_id=org_id, timeout_s=min(remaining, WORKSPACE_PROBE_TIMEOUT_S)
         )
 
     workspace_id = resolve_daemon_workspace_id(server_url, probe=_probe)

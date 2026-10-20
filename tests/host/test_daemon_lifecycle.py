@@ -23,10 +23,12 @@ from omnigent.host.daemon_lifecycle import (
     daemon_record_path,
     find_same_workspace_daemon,
     normalize_daemon_target,
+    probe_workspace_id,
     record_flock_is_held,
     write_daemon_record,
 )
 from omnigent.host.identity import HostIdentity
+from omnigent.util.tls import client_ssl_context
 
 
 def _write_record(path: Path, pid: int) -> None:
@@ -227,7 +229,7 @@ def test_background_daemon_claims_record_before_connecting(
     from omnigent.host import identity as identity_module
     from omnigent.process_logging import DATA_DIR_ENV_VAR
 
-    target = "https://server.example.com"
+    target = "https://server.example.com/api/2.0/omnigent"
     log_path = tmp_path / "host.log"
     monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
     monkeypatch.setenv("OMNIGENT_HOST_DAEMON_CONFIG_SIG", "config-signature")
@@ -287,7 +289,7 @@ def test_background_daemon_loser_exits_before_connecting(
     from omnigent.host import identity as identity_module
     from omnigent.process_logging import DATA_DIR_ENV_VAR
 
-    target = "https://server.example.com"
+    target = "https://server.example.com/api/2.0/omnigent"
     monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["omnigent.host._daemon_entry", "--server", target])
     monkeypatch.setattr(
@@ -474,6 +476,8 @@ async def test_monitor_startup_grace_before_first_ownership(
 _VANITY = "https://vanity.databricks.com/api/2.0/omnigent"
 _WORKSPACE_HOST = "https://dbc-1.cloud.databricks.com/api/2.0/omnigent"
 _HOST_ID = "a" * 32
+_APP_A = "https://app-a.aws.databricksapps.com"
+_APP_B = "https://app-b.aws.databricksapps.com"
 
 
 def _server_record(
@@ -530,6 +534,14 @@ def _server_record(
             _server_record(_WORKSPACE_HOST),
             {_VANITY: "1", _WORKSPACE_HOST: "1"},
             False,
+            False,
+        ),
+        # Two apps on one workspace are separate servers, even with one org id.
+        (
+            _APP_B,
+            _server_record(_APP_A),
+            {_APP_A: "1", _APP_B: "1"},
+            True,
             False,
         ),
     ],
@@ -694,6 +706,9 @@ def test_resolve_daemon_workspace_id_prefers_the_server(
 
     assert resolve_daemon_workspace_id(_VANITY, probe=_answers("1")) == "1"
     assert resolve_daemon_workspace_id(_VANITY, probe=_answers(None)) == "2"
+    # An app's URL names no workspace for this check, so it is never probed.
+    store_databricks_auth(_APP_A, "https://dbc-1.cloud.databricks.com", org_id="2")
+    assert resolve_daemon_workspace_id(_APP_A, probe=_answers("1")) is None
     # The known selector is sent, so a shared host can name the workspace.
     assert sent == ["2", "2"]
 
@@ -808,14 +823,15 @@ def test_daemon_bounds_its_total_workspace_probe_time(
 
     def _probe(url: str, *, org_id: str | None = None, timeout_s: float = 3.0) -> str | None:
         timeouts.append(timeout_s)
-        # Every probe times out both connecting and reading the headers.
-        clock[0] += 2 * timeout_s
+        clock[0] += timeout_s  # Every probe runs to its deadline.
         return "1" if url == _VANITY else None
 
     monkeypatch.setattr("omnigent.host.daemon_lifecycle.probe_workspace_id", _probe)
     legacy_locks = []
     for index in range(3):
-        legacy = _server_record(f"https://legacy-{index}.example.com", pid=os.getpid())
+        legacy = _server_record(
+            f"https://legacy-{index}.example.com/api/2.0/omnigent", pid=os.getpid()
+        )
         legacy_lock = DaemonLifecycleLock.for_target(legacy.target)
         assert legacy_lock.try_acquire() is True
         legacy_locks.append(legacy_lock)
@@ -830,7 +846,7 @@ def test_daemon_bounds_its_total_workspace_probe_time(
     try:
         assert workspace_id == "1"
         assert lock is not None
-        assert 2 * sum(timeouts) <= WORKSPACE_DISCOVERY_BUDGET_S
+        assert sum(timeouts) <= WORKSPACE_DISCOVERY_BUDGET_S
         assert WORKSPACE_DISCOVERY_BUDGET_S < cli._DAEMON_CLAIM_TIMEOUT_S
         # The budget ran out before every older daemon was probed.
         assert len(timeouts) < 4
@@ -986,8 +1002,6 @@ def test_probe_workspace_id_reads_the_org_header(
     org_id: str | None,
     expected: str | None,
 ) -> None:
-    from omnigent.host.daemon_lifecycle import probe_workspace_id
-
     calls: list[dict[str, object]] = []
 
     @contextlib.contextmanager
@@ -1007,6 +1021,7 @@ def test_probe_workspace_id_reads_the_org_header(
     assert probe_workspace_id(f"{_VANITY}/", org_id=org_id) == expected
     (call,) = calls
     assert (call["method"], call["url"]) == ("GET", f"{_VANITY}/v1/me")
+    assert call["verify"] is client_ssl_context()
     # The selector is forwarded only when known, no credentials are sent, and
     # a login redirect is never followed.
     assert call["headers"] == ({"X-Databricks-Org-Id": org_id} if org_id else {})
@@ -1031,8 +1046,6 @@ def test_probe_workspace_id_reads_the_org_header(
 def test_probe_workspace_id_requests_only_plain_http_urls(
     monkeypatch: pytest.MonkeyPatch, server_url: str, probed_url: str | None
 ) -> None:
-    from omnigent.host.daemon_lifecycle import probe_workspace_id
-
     requested: list[str] = []
 
     @contextlib.contextmanager
@@ -1046,3 +1059,26 @@ def test_probe_workspace_id_requests_only_plain_http_urls(
 
     assert probe_workspace_id(server_url) == ("1" if probed_url else None)
     assert requested == ([probed_url] if probed_url else [])
+
+
+def test_probe_workspace_id_gives_up_at_its_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request stuck before any httpx timeout fires (name resolution, say) still ends."""
+    import threading
+    import time
+
+    released = threading.Event()
+
+    @contextlib.contextmanager
+    def _stream(method: str, url: str, **_kwargs: object) -> Iterator[httpx.Response]:
+        released.wait(5)
+        yield httpx.Response(
+            401, headers={"x-databricks-org-id": "1"}, request=httpx.Request(method, url)
+        )
+
+    monkeypatch.setattr(httpx, "stream", _stream)
+    started = time.monotonic()
+    try:
+        assert probe_workspace_id(_VANITY, timeout_s=0.2) is None
+        assert time.monotonic() - started < 2.0
+    finally:
+        released.set()

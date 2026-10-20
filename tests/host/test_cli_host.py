@@ -23,14 +23,6 @@ from omnigent.cli_diagnostics import suppresses_recovery_hint
 from omnigent.host.local_server import LocalServerStartup
 
 
-@pytest.fixture(autouse=True)
-def _no_workspace_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep CLI tests off the network: the workspace probe answers "unknown"."""
-    monkeypatch.setattr(
-        "omnigent.host.daemon_lifecycle.probe_workspace_id", lambda url, **_kwargs: None
-    )
-
-
 @dataclass(frozen=True)
 class _SpawnedDaemon:
     """
@@ -1752,10 +1744,10 @@ def test_wait_for_daemon_claim_paces_failed_probes_within_its_deadline(
     monkeypatch.setattr(
         "omnigent.cli.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
     )
-    timeouts: list[float] = []
+    probe_ends: list[float] = []
 
     def _probe(url: str, *, org_id: str | None = None, timeout_s: float = 3.0) -> str | None:
-        timeouts.append(timeout_s)
+        probe_ends.append(clock[0] + timeout_s)
         return None
 
     monkeypatch.setattr("omnigent.host.daemon_lifecycle.probe_workspace_id", _probe)
@@ -1765,8 +1757,9 @@ def test_wait_for_daemon_claim_paces_failed_probes_within_its_deadline(
     )
 
     assert claimed is None
-    assert 0 < len(timeouts) <= 5
-    assert max(timeouts) <= 1.0
+    assert 0 < len(probe_ends) <= 5
+    # No probe may run past the claim wait.
+    assert max(probe_ends) <= 2.0
 
 
 def test_ensure_host_daemon_treats_an_old_spelling_of_its_url_as_its_own_daemon(
