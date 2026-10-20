@@ -1732,6 +1732,42 @@ def test_wait_for_daemon_claim_treats_only_a_clean_exit_as_a_yield(
     )
 
 
+@pytest.mark.parametrize("before_spawn", [True, False])
+def test_ensure_host_daemon_reports_a_config_change_when_another_url_serves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before_spawn: bool,
+) -> None:
+    """A config-change teardown is reported even when another URL's daemon is reused.
+
+    The other daemon is found either before spawning, or after the spawned one yields.
+    """
+    _seed_yielding_spawn(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "omnigent.cli._reuse_existing_daemon_record",
+        lambda target: cli_module._DaemonReuseDecision(reuse=False, config_changed=True),
+    )
+    if before_spawn:
+        cli_module._write_daemon_record(
+            cli_module._HostDaemonRecord(
+                pid=_SAME_WORKSPACE_PID,
+                target=_WORKSPACE_API,
+                mode="server",
+                server_url=_WORKSPACE_API,
+                log_path=str(tmp_path / "existing.log"),
+                started_at=int(time.time()),
+                host_id="a" * 32,
+                workspace_id="1",
+            )
+        )
+        monkeypatch.setattr(
+            "omnigent.cli._spawn_host_daemon_process",
+            lambda **_kwargs: pytest.fail("the workspace's daemon is reused before spawning"),
+        )
+
+    assert _ensure_host_daemon(_VANITY_API) is True
+
+
 def test_wait_for_daemon_claim_paces_failed_probes_within_its_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

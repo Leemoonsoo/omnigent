@@ -3615,7 +3615,8 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         return False
     if _same_workspace_daemon(server_url) is not None:
         _record_host_state("reused_same_workspace_daemon", running_before=True)
-        return False
+        # A config-change teardown above still happened, even with no respawn.
+        return decision.config_changed
 
     _HOST_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     mode_args = ["--local"] if not server_url else ["--server", server_url]
@@ -3633,7 +3634,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     claimed = _wait_for_daemon_claim(target, spawned, server_url=server_url)
     if claimed is not None and _normalize_daemon_target(claimed.target) != target:
         _record_host_state("reused_same_workspace_daemon", running_before=True)
-        return False
+        return decision.config_changed
     if claimed is None:
         _record_host_state("start_timeout")
         _stop_spawned_host_daemon_process(spawned)
