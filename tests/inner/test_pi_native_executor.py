@@ -12,6 +12,7 @@ the same shape the peer native ``test_goose_native_executor.py`` uses.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -112,11 +113,18 @@ async def test_turn_refreshes_baked_bearer(tmp_path: Path, monkeypatch) -> None:
     The token baked into ``config.json`` at launch dies with the ~1h
     Databricks OAuth lifetime; without a per-turn refresh the resident
     extension's policy/MCP POSTs fail closed once the session outlives it.
-    Both turn paths (``run_turn`` and live steering) must refresh.
+    Both turn paths (``run_turn`` and live steering) must refresh, and both
+    must mint off the event loop: minting is synchronous and can run CLI auth.
     """
     import omnigent.runner._entry as entry
 
-    monkeypatch.setattr(entry, "_make_auth_token_factory", lambda *a, **k: lambda: "tok")
+    mint_threads: list[int] = []
+
+    def _mint() -> str:
+        mint_threads.append(threading.get_ident())
+        return "tok"
+
+    monkeypatch.setattr(entry, "_make_auth_token_factory", lambda *a, **k: _mint)
     monkeypatch.setattr(pne, "enqueue_user_message", lambda *a: "msg")
     refreshed: list[dict[str, str]] = []
     monkeypatch.setattr(
@@ -129,6 +137,8 @@ async def test_turn_refreshes_baked_bearer(tmp_path: Path, monkeypatch) -> None:
     [_ async for _ in ex.run_turn([{"role": "user", "content": "hi"}], [], "")]
     assert await ex.enqueue_session_message("main", "steer") is True
     assert refreshed == [{"Authorization": "Bearer tok"}, {"Authorization": "Bearer tok"}]
+    assert len(mint_threads) == 2
+    assert threading.get_ident() not in mint_threads
 
 
 async def test_turn_refresh_is_best_effort(tmp_path: Path, monkeypatch) -> None:

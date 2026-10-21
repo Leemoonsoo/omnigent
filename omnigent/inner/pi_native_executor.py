@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -70,7 +71,7 @@ class PiNativeExecutor(Executor):
         text = _content_to_text(content, self._bridge_dir)
         if not text:
             return False
-        self._refresh_auth_headers()
+        await asyncio.to_thread(self._refresh_auth_headers)
         enqueue_user_message(self._bridge_dir, text)
         return True
 
@@ -103,7 +104,7 @@ class PiNativeExecutor(Executor):
         if not text:
             yield ExecutorError(message="Pi native turn had no user text to send")
             return
-        self._refresh_auth_headers()
+        await asyncio.to_thread(self._refresh_auth_headers)
         model = config.model if config is not None else None
         if model:
             enqueue_model_change(self._bridge_dir, model)
@@ -122,7 +123,8 @@ class PiNativeExecutor(Executor):
         policy hooks already get via re-mint. Minting runs in-runner through
         the same factory those use. Best-effort: any failure (no factory in
         local/unauthenticated runs, transient SDK error) leaves the existing
-        headers in place rather than blocking the turn.
+        headers in place rather than blocking the turn. Minting is synchronous
+        and can run CLI auth, so async callers run this in a worker thread.
 
         ponytail: refreshes per turn, so a *single* turn running past ~1h
         still risks expiry mid-turn; add a background refresh task keyed to
