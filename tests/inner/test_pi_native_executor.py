@@ -12,6 +12,7 @@ the same shape the peer native ``test_goose_native_executor.py`` uses.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from pathlib import Path
 
@@ -139,6 +140,43 @@ async def test_turn_refreshes_baked_bearer(tmp_path: Path, monkeypatch) -> None:
     assert refreshed == [{"Authorization": "Bearer tok"}, {"Authorization": "Bearer tok"}]
     assert len(mint_threads) == 2
     assert threading.get_ident() not in mint_threads
+
+
+async def test_slow_mint_keeps_overlapping_messages_in_arrival_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A steering message sent during a turn's slow mint must queue after that turn."""
+    import omnigent.runner._entry as entry
+
+    first_mint_started = threading.Event()
+    release_first_mint = threading.Event()
+    mint_calls: list[int] = []
+
+    def _mint() -> str:
+        mint_calls.append(len(mint_calls))
+        if len(mint_calls) == 1:
+            first_mint_started.set()
+            release_first_mint.wait(timeout=5)
+        return "tok"
+
+    monkeypatch.setattr(entry, "_make_auth_token_factory", lambda *a, **k: _mint)
+    monkeypatch.setattr(pne, "refresh_config_auth_headers", lambda *a: True)
+    queued: list[str] = []
+    monkeypatch.setattr(pne, "enqueue_user_message", lambda bridge_dir, text: queued.append(text))
+    ex = pne.PiNativeExecutor(bridge_dir=tmp_path)
+
+    async def _run_turn() -> None:
+        [_ async for _ in ex.run_turn([{"role": "user", "content": "turn"}], [], "")]
+
+    turn = asyncio.create_task(_run_turn())
+    assert await asyncio.to_thread(first_mint_started.wait, 5)
+    steer = asyncio.create_task(ex.enqueue_session_message("main", "steer"))
+    # Give an unserialized steer time to mint and queue ahead of the stalled turn.
+    await asyncio.wait({steer}, timeout=0.2)
+    release_first_mint.set()
+    await asyncio.gather(turn, steer)
+
+    assert queued == ["turn", "steer"]
 
 
 async def test_turn_refresh_is_best_effort(tmp_path: Path, monkeypatch) -> None:
