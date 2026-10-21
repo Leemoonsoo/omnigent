@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import logging
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from omnigent import process_logging
 from omnigent._platform import IS_POSIX
 from omnigent.debug_logging import record_to_row
 from omnigent.process_logging import (
@@ -22,6 +25,7 @@ from omnigent.process_logging import (
     PROCESS_LOG_FILE_ENV_VAR,
     RedactingLogFormatter,
     TerminalLogFormatter,
+    TerminalWriter,
     _debug_sink_target_loggers,
     _log_once_seen,
     _unlink_if_empty,
@@ -31,6 +35,7 @@ from omnigent.process_logging import (
     ensure_stdio_survives_unencodable_output,
     log_info_once,
     log_once,
+    nonblocking_terminal_stdio,
     process_log_dir_reference,
     process_log_reference,
     redact_log_text,
@@ -86,6 +91,184 @@ def test_terminal_stream_handler_writes_to_explicit_log_fd(
         for fd in (read_fd, write_fd):
             with contextlib.suppress(OSError):
                 os.close(fd)
+
+
+class _FakeTerminal(io.StringIO):
+    """In-memory terminal whose writes can be held until the test releases them."""
+
+    def __init__(self, *, tty: bool = True, fail_with: OSError | None = None) -> None:
+        super().__init__()
+        self._tty = tty
+        self._fail_with = fail_with
+        self.reading = threading.Event()
+        self.reading.set()
+        self.write_calls = 0
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def write(self, text: str) -> int:
+        self.write_calls += 1
+        if self._fail_with is not None:
+            raise self._fail_with
+        self.reading.wait()
+        return super().write(text)
+
+
+def _record(message: str, *args: object) -> logging.LogRecord:
+    return logging.LogRecord("test", logging.INFO, __file__, 1, message, args, None)
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="fd-based terminal mirroring is POSIX-only")
+def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Logging continues while the terminal is not read; skipped lines are reported later."""
+    monkeypatch.setattr(process_logging, "_TERMINAL_BACKLOG_CHARS", 4096)
+    read_fd, write_fd = os.pipe()  # nothing reads until every line is logged
+    handler: logging.Handler | None = None
+    try:
+        monkeypatch.setenv(LOG_TTY_FD_ENV_VAR, str(write_fd))
+        handler = terminal_stream_handler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        assert isinstance(handler, logging.StreamHandler)
+        writer = handler.stream
+        assert isinstance(writer, TerminalWriter)
+
+        # About 200 KB: more than the pipe buffer plus the backlog.
+        logging_thread = threading.Thread(
+            target=lambda: [
+                handler.handle(_record("line %04d %s", index, "x" * 90)) for index in range(2000)
+            ],
+            daemon=True,
+        )
+        logging_thread.start()
+        logging_thread.join(10)
+        assert not logging_thread.is_alive(), "logging waited for the stalled terminal"
+
+        output = bytearray()
+
+        def read_terminal() -> None:
+            while b"final\n" not in output:
+                output.extend(os.read(read_fd, 65536))
+
+        reader = threading.Thread(target=read_terminal, daemon=True)
+        reader.start()
+        assert writer.drain(10)
+        handler.handle(_record("final"))
+        reader.join(10)
+        assert not reader.is_alive()
+    finally:
+        if handler is not None:
+            handler.close()
+        for fd in (read_fd, write_fd):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    *shown, final = output.decode().splitlines()
+    assert final == "final"
+    # Every line is either shown in order or counted by a notice where it was dropped.
+    next_index = 0
+    notices = 0
+    for text in shown:
+        notice = re.fullmatch(
+            r"\[omnigent\] (\d+) lines were not shown because this terminal stopped "
+            r"reading output; the log file has every log line\.",
+            text,
+        )
+        if notice is not None:
+            notices += 1
+            next_index += int(notice.group(1))
+        else:
+            assert text == f"line {next_index:04d} {'x' * 90}"
+            next_index += 1
+    assert next_index == 2000
+    assert notices > 0
+
+
+def test_terminal_writer_stops_writing_after_the_terminal_hangs_up() -> None:
+    """A terminal write error ends mirroring instead of retrying or raising to the caller."""
+    terminal = _FakeTerminal(fail_with=OSError(5, "Input/output error"))
+    writer = TerminalWriter(terminal)
+
+    writer.write("first\n")
+    assert writer.drain(5)
+    writer.write("second\n")
+    assert writer.drain(5)
+
+    assert terminal.write_calls == 1
+
+
+def test_terminal_writer_keeps_partial_lines_until_flush() -> None:
+    """Text without a newline is written once it is flushed, as ``print(..., end="")`` expects."""
+    terminal = _FakeTerminal()
+    writer = TerminalWriter(terminal)
+
+    print("Waiting", end="", file=writer)
+    print(" for login...", end="", file=writer, flush=True)
+    assert writer.drain(5)
+
+    assert terminal.getvalue() == "Waiting for login..."
+
+
+def test_terminal_writer_writes_after_a_fork_left_its_lock_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forked child starts its own writer instead of waiting on the parent's lock."""
+    terminal = _FakeTerminal()
+    writer = TerminalWriter(terminal)
+    parent_pid = os.getpid()
+    parent_condition = writer._condition
+    # Held by another parent thread at the moment of the fork.
+    parent_condition.acquire()
+    try:
+        monkeypatch.setattr(os, "getpid", lambda: parent_pid + 1)
+        writer.write("from the child\n")
+        assert writer.drain(5)
+    finally:
+        parent_condition.release()
+
+    assert terminal.getvalue() == "from the child\n"
+
+
+def test_nonblocking_terminal_stdio_wraps_only_terminals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Terminal stdio is routed through a writer and restored once its output is written."""
+    terminal = _FakeTerminal()
+    log_file = _FakeTerminal(tty=False)
+    monkeypatch.setattr(sys, "stdout", terminal)
+    monkeypatch.setattr(sys, "stderr", log_file)
+
+    restore = nonblocking_terminal_stdio()
+    assert isinstance(sys.stdout, TerminalWriter)
+    assert sys.stderr is log_file
+    print("✓ Connected")
+    restore()
+
+    assert sys.stdout is terminal
+    assert sys.stderr is log_file
+    assert terminal.getvalue() == "✓ Connected\n"
+
+
+def test_nonblocking_terminal_stdio_keeps_the_writer_while_the_terminal_is_stalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restoring a terminal that still is not reading would let the exit-time flush block."""
+    monkeypatch.setattr(process_logging, "_TERMINAL_EXIT_DRAIN_S", 0.05)
+    terminal = _FakeTerminal()
+    terminal.reading.clear()
+    monkeypatch.setattr(sys, "stdout", terminal)
+
+    restore = nonblocking_terminal_stdio()
+    writer = sys.stdout
+    try:
+        print("↓ Runner stopped", flush=True)
+        restore()
+        assert sys.stdout is writer
+    finally:
+        terminal.reading.set()
+    assert isinstance(writer, TerminalWriter)
+    assert writer.drain(5)
+    assert terminal.getvalue() == "↓ Runner stopped\n"
 
 
 def test_terminal_log_formatter_colors_level_name() -> None:

@@ -9,11 +9,12 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, TextIO, TypedDict
+from typing import BinaryIO, TextIO, TypedDict, cast
 
 from omnigent._platform import IS_POSIX
 
@@ -452,6 +453,197 @@ def _terminal_stream() -> TextIO | None:
     return None
 
 
+#: Characters a stalled terminal may fall behind before new lines are dropped.
+_TERMINAL_BACKLOG_CHARS = 1 << 20
+#: How long a restore or process exit waits for queued terminal output.
+_TERMINAL_EXIT_DRAIN_S = 1.0
+
+
+class TerminalWriter:
+    """Text stream that writes to a terminal from a daemon thread.
+
+    A terminal whose client stops reading (for example, a disconnected session
+    that leaves the pty open) blocks ``write`` once its buffer fills. Writing
+    through this class never makes the caller wait: complete lines are queued
+    for a writer thread. While more than :data:`_TERMINAL_BACKLOG_CHARS` are
+    queued, new lines are dropped and counted, and a notice reports the count
+    once the terminal catches up. Process log files are written separately and
+    keep every line.
+    """
+
+    def __init__(self, stream: TextIO) -> None:
+        """:param stream: Terminal stream to write to, e.g. ``sys.stderr``."""
+        self._stream = stream
+        self._reset()
+        atexit.register(self.drain, _TERMINAL_EXIT_DRAIN_S)
+
+    def _reset(self) -> None:
+        # Also runs in a forked child, where the writer thread is gone and the
+        # parent's lock may have been held at fork time.
+        self._pid = os.getpid()
+        self._condition = threading.Condition()
+        self._chunks: deque[str] = deque()
+        self._partial_line = ""
+        self._queued_chars = 0
+        self._dropped_lines = 0
+        self._stream_failed = False
+        self._thread: threading.Thread | None = None
+
+    def write(self, text: str) -> int:
+        """Queue *text* for the terminal and return at once."""
+        if os.getpid() != self._pid:
+            self._reset()
+        with self._condition:
+            complete, newline, self._partial_line = (self._partial_line + text).rpartition("\n")
+            if newline:
+                self._enqueue_locked(complete + newline)
+        return len(text)
+
+    def writelines(self, lines: Iterable[str]) -> None:
+        """Queue each of *lines*; see :meth:`write`."""
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        """Queue any partial line; never wait for the terminal."""
+        if os.getpid() != self._pid:
+            self._reset()
+        with self._condition:
+            if self._partial_line:
+                self._enqueue_locked(self._partial_line)
+                self._partial_line = ""
+
+    def drain(self, timeout: float) -> bool:
+        """Wait up to *timeout* seconds for queued output to be written.
+
+        :returns: ``True`` when nothing is left to write.
+        """
+        if os.getpid() != self._pid:
+            return False
+        self.flush()
+        with self._condition:
+            return self._condition.wait_for(lambda: self._queued_chars == 0, timeout)
+
+    def _enqueue_locked(self, chunk: str) -> None:
+        if self._stream_failed:
+            return
+        if self._queued_chars + len(chunk) > _TERMINAL_BACKLOG_CHARS:
+            self._dropped_lines += max(1, chunk.count("\n"))
+            return
+        if self._dropped_lines:
+            notice = (
+                f"[omnigent] {self._dropped_lines} lines were not shown because this "
+                "terminal stopped reading output; the log file has every log line.\n"
+            )
+            self._chunks.append(notice)
+            self._queued_chars += len(notice)
+            self._dropped_lines = 0
+        self._chunks.append(chunk)
+        self._queued_chars += len(chunk)
+        if self._thread is None:
+            thread = threading.Thread(
+                target=self._write_chunks, name="omnigent-terminal-writer", daemon=True
+            )
+            try:
+                thread.start()
+            except RuntimeError:
+                # Interpreter shutdown refuses new threads; drop output rather than block.
+                self._stream_failed = True
+                self._chunks.clear()
+                self._queued_chars = 0
+                return
+            self._thread = thread
+        self._condition.notify_all()
+
+    def _write_chunks(self) -> None:
+        while True:
+            with self._condition:
+                self._condition.wait_for(lambda: bool(self._chunks))
+                chunk = self._chunks.popleft()
+            try:
+                self._stream.write(chunk)
+                self._stream.flush()
+            except (OSError, ValueError):
+                # The terminal hung up or the stream closed; stop writing to it.
+                with self._condition:
+                    self._stream_failed = True
+                    self._chunks.clear()
+                    self._queued_chars = 0
+                    self._condition.notify_all()
+                return
+            with self._condition:
+                self._queued_chars -= len(chunk)
+                self._condition.notify_all()
+
+    def writable(self) -> bool:
+        """Report the stream as writable."""
+        return True
+
+    def isatty(self) -> bool:
+        """Return whether the wrapped stream is a terminal."""
+        return self._stream.isatty()
+
+    def fileno(self) -> int:
+        """Return the wrapped stream's file descriptor."""
+        return self._stream.fileno()
+
+    @property
+    def encoding(self) -> str:
+        """Return the wrapped stream's encoding."""
+        return self._stream.encoding
+
+    @property
+    def errors(self) -> str | None:
+        """Return the wrapped stream's encoding error handler."""
+        return self._stream.errors
+
+    def __getattr__(self, name: str) -> object:
+        # Other attributes (``buffer``, ``name``, ...) belong to the wrapped stream.
+        if name == "_stream":
+            raise AttributeError(name)
+        return getattr(self._stream, name)
+
+
+def _terminal_writer(stream: TextIO) -> TerminalWriter:
+    return stream if isinstance(stream, TerminalWriter) else TerminalWriter(stream)
+
+
+def _is_terminal(stream: TextIO | None) -> bool:
+    try:
+        return stream is not None and stream.isatty()
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def nonblocking_terminal_stdio() -> Callable[[], None]:
+    """Route ``sys.stdout`` and ``sys.stderr`` through :class:`TerminalWriter`.
+
+    Only streams attached to a terminal are wrapped; files and pipes are left
+    as they are. A long-running process that prints from an event loop calls
+    this so a terminal that stops reading cannot stall the loop.
+
+    :returns: A callable that waits briefly for queued output, then restores
+        the original streams. If a terminal is still not reading, its wrapper
+        stays installed: a direct write or the exit-time flush would block.
+    """
+    originals = (sys.stdout, sys.stderr)
+    wrapped = tuple(
+        _terminal_writer(stream) if _is_terminal(stream) else stream for stream in originals
+    )
+    sys.stdout, sys.stderr = cast(tuple[TextIO, TextIO], wrapped)
+
+    def restore() -> None:
+        drained = [
+            stream.drain(_TERMINAL_EXIT_DRAIN_S)
+            for stream in wrapped
+            if isinstance(stream, TerminalWriter)
+        ]
+        if all(drained) and (sys.stdout, sys.stderr) == wrapped:
+            sys.stdout, sys.stderr = originals
+
+    return restore
+
+
 def terminal_supports_color() -> bool:
     """Return whether the requested terminal mirror can render ANSI colors."""
     # Omnigent-owned mirrors (omnidev panes) may force ANSI; otherwise NO_COLOR wins.
@@ -471,11 +663,15 @@ def terminal_supports_color() -> bool:
 
 
 def terminal_stream_handler() -> logging.Handler:
-    """Return a stream handler for the requested terminal mirror."""
+    """Return a stream handler for the requested terminal mirror.
+
+    The handler writes through a :class:`TerminalWriter`, so logging never
+    waits for a terminal that stopped reading.
+    """
     stream = _terminal_stream()
     if stream is None:
         return logging.NullHandler()
-    handler = _ProcessLogStreamHandler(stream)
+    handler = _ProcessLogStreamHandler(cast(TextIO, _terminal_writer(stream)))
     handler._omnigent_process_log_stderr = True
     return handler
 

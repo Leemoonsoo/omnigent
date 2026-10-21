@@ -6665,6 +6665,38 @@ def test_run_host_process_mirrors_structured_logs_on_foreground_tty(
     configure_logging.assert_called_once_with("host", log_to_stderr=True)
 
 
+def test_run_host_process_writes_to_its_terminal_from_a_writer_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A foreground host's terminal output cannot block its event loop."""
+    from omnigent.host import connect as connect_mod
+    from omnigent.process_logging import TerminalWriter
+
+    original_streams = (sys.stdout, sys.stderr)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+    streams_while_serving: list[tuple[object, object]] = []
+
+    def serve(*_args: object, **_kwargs: object) -> bool:
+        streams_while_serving.append((sys.stdout, sys.stderr))
+        return False
+
+    monkeypatch.setattr(connect_mod, "_serve_host_until_exit", serve)
+    with patch(
+        "omnigent.host.connect.configure_process_logging",
+        return_value=tmp_path / "host.log",
+    ):
+        run_host_process(
+            server_url="https://app.example.databricks.com",
+            config_path=tmp_path / "config.yaml",
+        )
+
+    [(stdout, stderr)] = streams_while_serving
+    assert isinstance(stdout, TerminalWriter)
+    assert isinstance(stderr, TerminalWriter)
+    assert (sys.stdout, sys.stderr) == original_streams
+
+
 def test_run_host_process_keys_its_tunnel_from_the_launch_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
