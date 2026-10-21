@@ -5326,17 +5326,21 @@ def run_host_process(
     publish_origin_identity(server_url)
     # The loop prints and logs to the terminal; one that stops reading must not stall it.
     restore_terminal_stdio = nonblocking_terminal_stdio()
-    host_log_path = configure_process_logging(
-        "host",
-        log_to_stderr=should_log_to_stderr() or sys.stderr.isatty(),
-    )
-    from omnigent.host import crash_reporting
+    try:
+        host_log_path = configure_process_logging(
+            "host",
+            log_to_stderr=should_log_to_stderr() or sys.stderr.isatty(),
+        )
+        from omnigent.host import crash_reporting
 
-    crash_reporting.install_host_crash_hooks()
-    crash_reporting.set_host_exit_context(daemon_target=daemon_target)
-    # Installed before any startup work, so a stop signal during e.g. the git
-    # credential setup is still reported and drained.
-    restore_signal_handlers = crash_reporting.install_host_signal_handlers()
+        crash_reporting.install_host_crash_hooks()
+        crash_reporting.set_host_exit_context(daemon_target=daemon_target)
+        # Installed before any startup work, so a stop signal during e.g. the git
+        # credential setup is still reported and drained.
+        restore_signal_handlers = crash_reporting.install_host_signal_handlers()
+    except BaseException:
+        restore_terminal_stdio()
+        raise
     # Report here rather than relying on sys.excepthook: the foreground CLI
     # catches crashes itself, so the hook never sees them.
     try:

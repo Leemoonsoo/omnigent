@@ -146,18 +146,17 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
         logging_thread.join(10)
         assert not logging_thread.is_alive(), "logging waited for the stalled terminal"
 
+        # The terminal reads again. Nothing else is logged, so drops are reported by the writer.
         output = bytearray()
-
-        def read_terminal() -> None:
-            while b"final\n" not in output:
+        os.set_blocking(read_fd, False)
+        deadline = time.monotonic() + 10
+        while not writer.drain(0.05):
+            assert time.monotonic() < deadline, "queued output was never written"
+            with contextlib.suppress(BlockingIOError):
                 output.extend(os.read(read_fd, 65536))
-
-        reader = threading.Thread(target=read_terminal, daemon=True)
-        reader.start()
-        assert writer.drain(10)
-        handler.handle(_record("final"))
-        reader.join(10)
-        assert not reader.is_alive()
+        with contextlib.suppress(BlockingIOError):
+            while chunk := os.read(read_fd, 65536):
+                output.extend(chunk)
     finally:
         if handler is not None:
             handler.close()
@@ -165,8 +164,7 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
             with contextlib.suppress(OSError):
                 os.close(fd)
 
-    *shown, final = output.decode().splitlines()
-    assert final == "final"
+    shown = output.decode().splitlines()
     # Every line is either shown in order or counted by a notice where it was dropped.
     next_index = 0
     notices = 0
@@ -182,8 +180,36 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
         else:
             assert text == f"line {next_index:04d} {'x' * 90}"
             next_index += 1
+    # Nothing was logged after the burst, so trailing drops count only if drain() reported them.
     assert next_index == 2000
     assert notices > 0
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="fd-based terminal mirroring is POSIX-only")
+def test_terminal_stream_handlers_share_one_writer_per_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors of one terminal share a writer, so their lines keep the order they were logged."""
+    read_fd, write_fd = os.pipe()
+    terminal = _FakeTerminal()
+    try:
+        monkeypatch.setenv(LOG_TTY_FD_ENV_VAR, str(write_fd))
+        first, second = terminal_stream_handler(), terminal_stream_handler()
+        assert isinstance(first, logging.StreamHandler)
+        assert isinstance(second, logging.StreamHandler)
+        assert first.stream is second.stream
+
+        monkeypatch.delenv(LOG_TTY_FD_ENV_VAR)
+        monkeypatch.setattr(sys, "stderr", terminal)
+        restore = nonblocking_terminal_stdio()
+        mirror = terminal_stream_handler()
+        assert isinstance(mirror, logging.StreamHandler)
+        assert mirror.stream is sys.stderr
+        restore()
+    finally:
+        for fd in (read_fd, write_fd):
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def test_terminal_writer_stops_writing_after_the_terminal_hangs_up() -> None:
@@ -211,7 +237,26 @@ def test_terminal_writer_keeps_partial_lines_until_flush() -> None:
     assert terminal.getvalue() == "Waiting for login..."
 
 
-def test_terminal_writer_writes_after_a_fork_left_its_lock_held(
+def test_terminal_writer_bounds_text_without_a_newline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Long output without a newline or flush is written instead of growing in memory."""
+    monkeypatch.setattr(process_logging, "_TERMINAL_PARTIAL_LINE_CHARS", 16)
+    terminal = _FakeTerminal()
+    writer = TerminalWriter(terminal)
+
+    for _ in range(10):
+        writer.write("\r#####")
+
+    # Every third 6-character write reaches the 16-character limit and is queued.
+    deadline = time.monotonic() + 5
+    while len(terminal.getvalue()) < 54:
+        assert time.monotonic() < deadline, "partial line was never queued"
+        time.sleep(0.01)
+    assert terminal.getvalue() == "\r#####" * 9
+    assert writer.drain(5)
+    assert terminal.getvalue() == "\r#####" * 10
+
+
+def test_terminal_writer_resets_when_the_pid_changes_with_its_lock_held(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A forked child starts its own writer instead of waiting on the parent's lock."""

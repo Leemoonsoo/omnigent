@@ -9,6 +9,8 @@ import os
 import re
 import sys
 import threading
+import time
+import weakref
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
@@ -439,23 +441,11 @@ def process_log_reference(destination: str) -> str:
     return process_log_dir_reference(destination)
 
 
-def _terminal_stream() -> TextIO | None:
-    fd_value = os.environ.get(LOG_TTY_FD_ENV_VAR)
-    if fd_value and IS_POSIX:
-        try:
-            fd = int(fd_value)
-            dup = os.dup(fd)
-            return os.fdopen(dup, "w", buffering=1, encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            return None
-    if sys.stderr.isatty():
-        return sys.stderr
-    return None
-
-
 #: Characters a stalled terminal may fall behind before new lines are dropped.
 _TERMINAL_BACKLOG_CHARS = 1 << 20
-#: How long a restore or process exit waits for queued terminal output.
+#: Text without a newline is queued once it reaches this many characters.
+_TERMINAL_PARTIAL_LINE_CHARS = 8192
+#: How long a restore or process exit waits, in total, for queued terminal output.
 _TERMINAL_EXIT_DRAIN_S = 1.0
 
 
@@ -468,18 +458,19 @@ class TerminalWriter:
     for a writer thread. While more than :data:`_TERMINAL_BACKLOG_CHARS` are
     queued, new lines are dropped and counted, and a notice reports the count
     once the terminal catches up. Process log files are written separately and
-    keep every line.
+    keep every line. Attributes other than the text-stream methods, such as
+    ``buffer``, belong to the wrapped stream, so binary writes are not queued.
     """
 
     def __init__(self, stream: TextIO) -> None:
         """:param stream: Terminal stream to write to, e.g. ``sys.stderr``."""
         self._stream = stream
         self._reset()
-        atexit.register(self.drain, _TERMINAL_EXIT_DRAIN_S)
+        _live_terminal_writers.add(self)
 
     def _reset(self) -> None:
-        # Also runs in a forked child, where the writer thread is gone and the
-        # parent's lock may have been held at fork time.
+        # Forked children lose the writer thread; rebuild this writer's state
+        # without touching the parent's lock.
         self._pid = os.getpid()
         self._condition = threading.Condition()
         self._chunks: deque[str] = deque()
@@ -497,6 +488,9 @@ class TerminalWriter:
             complete, newline, self._partial_line = (self._partial_line + text).rpartition("\n")
             if newline:
                 self._enqueue_locked(complete + newline)
+            if len(self._partial_line) >= _TERMINAL_PARTIAL_LINE_CHARS:
+                self._enqueue_locked(self._partial_line)
+                self._partial_line = ""
         return len(text)
 
     def writelines(self, lines: Iterable[str]) -> None:
@@ -516,13 +510,16 @@ class TerminalWriter:
     def drain(self, timeout: float) -> bool:
         """Wait up to *timeout* seconds for queued output to be written.
 
-        :returns: ``True`` when nothing is left to write.
+        :returns: ``True`` when nothing is left to write, including the notice
+            for dropped lines.
         """
         if os.getpid() != self._pid:
             return False
         self.flush()
         with self._condition:
-            return self._condition.wait_for(lambda: self._queued_chars == 0, timeout)
+            return self._condition.wait_for(
+                lambda: self._queued_chars == 0 and not self._dropped_lines, timeout
+            )
 
     def _enqueue_locked(self, chunk: str) -> None:
         if self._stream_failed:
@@ -530,16 +527,8 @@ class TerminalWriter:
         if self._queued_chars + len(chunk) > _TERMINAL_BACKLOG_CHARS:
             self._dropped_lines += max(1, chunk.count("\n"))
             return
-        if self._dropped_lines:
-            notice = (
-                f"[omnigent] {self._dropped_lines} lines were not shown because this "
-                "terminal stopped reading output; the log file has every log line.\n"
-            )
-            self._chunks.append(notice)
-            self._queued_chars += len(notice)
-            self._dropped_lines = 0
-        self._chunks.append(chunk)
-        self._queued_chars += len(chunk)
+        self._queue_dropped_notice_locked()
+        self._queue_locked(chunk)
         if self._thread is None:
             thread = threading.Thread(
                 target=self._write_chunks, name="omnigent-terminal-writer", daemon=True
@@ -548,11 +537,28 @@ class TerminalWriter:
                 thread.start()
             except RuntimeError:
                 # Interpreter shutdown refuses new threads; drop output rather than block.
-                self._stream_failed = True
-                self._chunks.clear()
-                self._queued_chars = 0
+                self._fail_locked()
                 return
             self._thread = thread
+
+    def _queue_dropped_notice_locked(self) -> None:
+        if self._dropped_lines:
+            self._queue_locked(
+                f"[omnigent] {self._dropped_lines} lines were not shown because this "
+                "terminal stopped reading output; the log file has every log line.\n"
+            )
+            self._dropped_lines = 0
+
+    def _queue_locked(self, chunk: str) -> None:
+        self._chunks.append(chunk)
+        self._queued_chars += len(chunk)
+        self._condition.notify_all()
+
+    def _fail_locked(self) -> None:
+        self._stream_failed = True
+        self._chunks.clear()
+        self._queued_chars = 0
+        self._dropped_lines = 0
         self._condition.notify_all()
 
     def _write_chunks(self) -> None:
@@ -566,13 +572,13 @@ class TerminalWriter:
             except (OSError, ValueError):
                 # The terminal hung up or the stream closed; stop writing to it.
                 with self._condition:
-                    self._stream_failed = True
-                    self._chunks.clear()
-                    self._queued_chars = 0
-                    self._condition.notify_all()
+                    self._fail_locked()
                 return
             with self._condition:
                 self._queued_chars -= len(chunk)
+                if not self._chunks:
+                    # Caught up: report lines dropped since the last accepted one.
+                    self._queue_dropped_notice_locked()
                 self._condition.notify_all()
 
     def writable(self) -> bool:
@@ -598,14 +604,72 @@ class TerminalWriter:
         return self._stream.errors
 
     def __getattr__(self, name: str) -> object:
-        # Other attributes (``buffer``, ``name``, ...) belong to the wrapped stream.
         if name == "_stream":
             raise AttributeError(name)
         return getattr(self._stream, name)
 
 
+_live_terminal_writers: weakref.WeakSet[TerminalWriter] = weakref.WeakSet()
+# One writer per terminal stream or mirror fd, so callers share its thread and line order.
+_shared_terminal_writers: dict[tuple[object, ...], TerminalWriter] = {}
+
+
+def _shared_terminal_writer(
+    key: tuple[object, ...], open_stream: Callable[[], TextIO | None]
+) -> TerminalWriter | None:
+    writer = _shared_terminal_writers.get(key)
+    if writer is None:
+        stream = open_stream()
+        if stream is None:
+            return None
+        writer = _shared_terminal_writers.setdefault(key, TerminalWriter(stream))
+    return writer
+
+
 def _terminal_writer(stream: TextIO) -> TerminalWriter:
-    return stream if isinstance(stream, TerminalWriter) else TerminalWriter(stream)
+    if isinstance(stream, TerminalWriter):
+        return stream
+    # The cached writer keeps *stream* alive, so its id is not reused meanwhile.
+    key = ("stream", id(stream))
+    writer = _shared_terminal_writers.get(key)
+    if writer is None:
+        writer = _shared_terminal_writers.setdefault(key, TerminalWriter(stream))
+    return writer
+
+
+def _open_mirror_fd(fd: int) -> TextIO | None:
+    try:
+        return os.fdopen(os.dup(fd), "w", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _terminal_mirror_writer() -> TerminalWriter | None:
+    fd_value = os.environ.get(LOG_TTY_FD_ENV_VAR)
+    if fd_value and IS_POSIX:
+        try:
+            fd = int(fd_value)
+            status = os.fstat(fd)
+        except (OSError, ValueError):
+            return None
+        # A reused fd number names a different file; it gets its own writer.
+        key = ("fd", fd, status.st_dev, status.st_ino)
+        return _shared_terminal_writer(key, lambda: _open_mirror_fd(fd))
+    if sys.stderr.isatty():
+        return _terminal_writer(sys.stderr)
+    return None
+
+
+def _drain_terminal_writers(writers: Iterable[TerminalWriter]) -> bool:
+    """Wait up to :data:`_TERMINAL_EXIT_DRAIN_S` in total for *writers* to write their output."""
+    deadline = time.monotonic() + _TERMINAL_EXIT_DRAIN_S
+    drained = True
+    for writer in list(writers):
+        drained = writer.drain(max(0.0, deadline - time.monotonic())) and drained
+    return drained
+
+
+atexit.register(_drain_terminal_writers, _live_terminal_writers)
 
 
 def _is_terminal(stream: TextIO | None) -> bool:
@@ -633,12 +697,8 @@ def nonblocking_terminal_stdio() -> Callable[[], None]:
     sys.stdout, sys.stderr = cast(tuple[TextIO, TextIO], wrapped)
 
     def restore() -> None:
-        drained = [
-            stream.drain(_TERMINAL_EXIT_DRAIN_S)
-            for stream in wrapped
-            if isinstance(stream, TerminalWriter)
-        ]
-        if all(drained) and (sys.stdout, sys.stderr) == wrapped:
+        writers = [stream for stream in wrapped if isinstance(stream, TerminalWriter)]
+        if _drain_terminal_writers(writers) and (sys.stdout, sys.stderr) == wrapped:
             sys.stdout, sys.stderr = originals
 
     return restore
@@ -668,10 +728,10 @@ def terminal_stream_handler() -> logging.Handler:
     The handler writes through a :class:`TerminalWriter`, so logging never
     waits for a terminal that stopped reading.
     """
-    stream = _terminal_stream()
-    if stream is None:
+    writer = _terminal_mirror_writer()
+    if writer is None:
         return logging.NullHandler()
-    handler = _ProcessLogStreamHandler(cast(TextIO, _terminal_writer(stream)))
+    handler = _ProcessLogStreamHandler(cast(TextIO, writer))
     handler._omnigent_process_log_stderr = True
     return handler
 

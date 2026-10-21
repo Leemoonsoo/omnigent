@@ -6665,8 +6665,8 @@ def test_run_host_process_mirrors_structured_logs_on_foreground_tty(
     configure_logging.assert_called_once_with("host", log_to_stderr=True)
 
 
-def test_run_host_process_writes_to_its_terminal_from_a_writer_thread(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_run_host_process_prints_to_its_terminal_through_a_writer_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A foreground host's terminal output cannot block its event loop."""
     from omnigent.host import connect as connect_mod
@@ -6679,6 +6679,7 @@ def test_run_host_process_writes_to_its_terminal_from_a_writer_thread(
 
     def serve(*_args: object, **_kwargs: object) -> bool:
         streams_while_serving.append((sys.stdout, sys.stderr))
+        print("✓ Connected as 'test-host'")
         return False
 
     monkeypatch.setattr(connect_mod, "_serve_host_until_exit", serve)
@@ -6695,6 +6696,7 @@ def test_run_host_process_writes_to_its_terminal_from_a_writer_thread(
     assert isinstance(stdout, TerminalWriter)
     assert isinstance(stderr, TerminalWriter)
     assert (sys.stdout, sys.stderr) == original_streams
+    assert "✓ Connected as 'test-host'\n" in capsys.readouterr().out
 
 
 def test_run_host_process_keys_its_tunnel_from_the_launch_config(
