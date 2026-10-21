@@ -36,7 +36,9 @@ be able to write resources without a separate Omnigent account.
   login record) daemons stay per URL. A second background daemon yields and
   `host --background` or `start` reports the running one, a foreground `host`
   refuses after retrying for about 6 s, and a service host waits until the
-  other daemon stops. Without file locks (Windows), daemons check only each
+  other daemon stops. If the server reports the running daemon's host offline,
+  a launch doesn't reuse it; it refuses and names the login and `host stop`
+  commands that fix it. Without file locks (Windows), daemons check only each
   other's records, so two that start at the same moment can both connect.
 - `host-inline-login`: `omnigent host` against a Databricks-fronted server that
   the user is not signed in to runs the login flow first; `--non-interactive`
@@ -139,7 +141,9 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
   `test_background_daemon_loser_exits_before_connecting`),
   `tests/host/test_cli_host.py`
   (`test_background_commands_report_reuse_when_the_spawned_daemon_yields` and
-  the `test_foreground_host_*_workspace*` cases), and
+  the `test_foreground_host_*_workspace*` cases; offline daemons:
+  `test_same_workspace_daemon_offline_reason*` and
+  `test_host_background_reuses_same_workspace_daemon_only_when_online`), and
   `tests/host/test_service.py::test_service_entry_waits_while_another_daemon_serves_the_workspace`.
   A real check needs two URLs that reach one workspace, so run it only in a
   private-network sandbox against a disposable server.

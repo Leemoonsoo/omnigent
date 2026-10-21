@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from importlib import import_module, resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, NoReturn, TypeAlias, cast, get_args
@@ -3145,7 +3145,7 @@ def _record_probed_through(record: _HostDaemonRecord, server_url: str) -> _HostD
     :returns: The copied record, targeting *server_url*.
     """
     target = _normalize_daemon_target(server_url)
-    return _HostDaemonRecord(**{**asdict(record), "target": target, "server_url": target})
+    return replace(record, target=target, server_url=target)
 
 
 def _same_workspace_daemon_offline_reason(
@@ -3554,7 +3554,7 @@ def _raise_live_daemon_conflict(
     if same_workspace and not _pid_is_foreign(conflict.pid):
         reason = _same_workspace_daemon_offline_reason(conflict, record.server_url)
         if reason is not None:
-            # Keep the stale-host hint: the running daemon is what needs fixing.
+            # Don't suppress the recovery hint; the running daemon needs fixing.
             raise _offline_same_workspace_daemon_error(conflict, reason)
         exc = click.ClickException(
             detail + "It already connects this machine to the workspace, so there is "
@@ -9408,12 +9408,10 @@ def _run_background_host(
             server_url = _normalize_daemon_target(record.target)
         # A reused same-workspace daemon may be visible through only one of the
         # two URLs, whichever this machine's credentials still work for.
-        _confirm_background_host_registered(
-            record,
-            also_via=_record_probed_through(record, target)
-            if same_workspace is not None
-            else None,
-        )
+        also_via = None
+        if same_workspace is not None and _normalize_daemon_target(record.target) != target:
+            also_via = _record_probed_through(record, target)
+        _confirm_background_host_registered(record, also_via=also_via)
     except click.ClickException:
         if not reused:
             with contextlib.suppress(click.ClickException):

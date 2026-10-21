@@ -1331,6 +1331,7 @@ _HOST_ONLINE = cli_module._HostHttpResult(status_code=200, body={"status": "onli
 _HOST_OFFLINE = cli_module._HostHttpResult(status_code=200, body={"status": "offline"})
 _HOST_NOT_FOUND = cli_module._HostHttpResult(status_code=404, body={"detail": "host not found"})
 _HOST_REJECTED = cli_module._HostHttpResult(status_code=401, body="unauthorized")
+_HOST_FORBIDDEN = cli_module._HostHttpResult(status_code=403, body="forbidden")
 _HOST_UNREACHABLE = cli_module._HostHttpResult(status_code=0, body="connection refused")
 _HOST_HTML_PAGE = cli_module._HostHttpResult(status_code=200, body="<html>Sign in</html>")
 _HOST_UNKNOWN_STATE = cli_module._HostHttpResult(status_code=200, body={"status": "draining"})
@@ -1360,6 +1361,7 @@ def _stub_host_status_by_url(
     [
         # Its own sign-in expired and the server has it offline.
         (60, _HOST_OFFLINE, _HOST_REJECTED, "its server rejected its sign-in (HTTP 401)"),
+        (60, _HOST_OFFLINE, _HOST_FORBIDDEN, "its server rejected its sign-in (HTTP 403)"),
         (60, _HOST_OFFLINE, _HOST_UNREACHABLE, "it can't reach its server"),
         (60, _HOST_OFFLINE, _HOST_OFFLINE, "its host is not connected to the server"),
         # Only its own URL answers, and the server has it offline.
@@ -1380,22 +1382,27 @@ def _stub_host_status_by_url(
         (60, _ROUTE_NOT_FOUND, _HOST_UNREACHABLE, None),
         # Just started and still connecting: no verdict yet.
         (0, _HOST_OFFLINE, _HOST_OFFLINE, None),
+        # No requested URL: only its own URL is asked.
+        (60, None, _HOST_OFFLINE, "its host is not connected to the server"),
+        (60, None, _HOST_ONLINE, None),
     ],
 )
 def test_same_workspace_daemon_offline_reason(
     monkeypatch: pytest.MonkeyPatch,
     age_s: int,
-    via_requested_url: cli_module._HostHttpResult,
+    via_requested_url: cli_module._HostHttpResult | None,
     via_own_url: cli_module._HostHttpResult,
     reason: str | None,
 ) -> None:
-    _stub_host_status_by_url(
-        monkeypatch, {_VANITY_API: via_requested_url, _WORKSPACE_API: via_own_url}
-    )
+    statuses = {_WORKSPACE_API: via_own_url}
+    if via_requested_url is not None:
+        statuses[_VANITY_API] = via_requested_url
+    _stub_host_status_by_url(monkeypatch, statuses)
 
     assert (
         cli_module._same_workspace_daemon_offline_reason(
-            _same_workspace_sibling(age_s=age_s), _VANITY_API
+            _same_workspace_sibling(age_s=age_s),
+            _VANITY_API if via_requested_url is not None else None,
         )
         == reason
     )
