@@ -469,15 +469,35 @@ class TerminalWriter:
         _live_terminal_writers.add(self)
 
     def _reset(self) -> None:
-        # Also runs in a forked child, which has no writer thread and must not
-        # wait on a lock another parent thread held at fork time.
         self._condition = threading.Condition()
         self._chunks: deque[str] = deque()
         self._partial_line = ""
         self._queued_chars = 0
         self._dropped_lines = 0
         self._stream_failed = False
+        self._gave_up = False
         self._thread: threading.Thread | None = None
+
+    def _reopen_after_fork(self) -> None:
+        """Start over in a forked child, writing to a duplicate of the stream's fd.
+
+        A parent writer thread may have been mid-write at fork time, which
+        leaves the wrapped stream's own lock held forever in the child.
+        """
+        self._reset()
+        try:
+            reopened = os.fdopen(
+                os.dup(self._stream.fileno()),
+                "w",
+                buffering=1,
+                encoding=self._stream.encoding,
+                errors=self._stream.errors,
+            )
+        except (AttributeError, OSError, ValueError):
+            return
+        # Freeing the old stream would flush it, which waits on that lock.
+        _streams_replaced_at_fork.append(self._stream)
+        self._stream = reopened
 
     def write(self, text: str) -> int:
         """Queue *text* for the terminal and return at once."""
@@ -510,9 +530,11 @@ class TerminalWriter:
         """
         self.flush()
         with self._condition:
-            return self._condition.wait_for(
+            drained = self._condition.wait_for(
                 lambda: self._queued_chars == 0 and not self._dropped_lines, timeout
             )
+            self._gave_up = not drained
+            return drained
 
     def _enqueue_locked(self, chunk: str) -> None:
         if self._stream_failed:
@@ -563,8 +585,8 @@ class TerminalWriter:
             try:
                 self._stream.write(chunk)
                 self._stream.flush()
-            except (OSError, ValueError):
-                # The terminal hung up or the stream closed; stop writing to it.
+            except Exception:  # noqa: BLE001 — any write error ends the mirror, never the caller
+                # The terminal hung up, the stream closed, or it can't encode the text.
                 with self._condition:
                     self._fail_locked()
                 return
@@ -573,6 +595,7 @@ class TerminalWriter:
                 if not self._chunks:
                     # Caught up: report lines dropped since the last accepted one.
                     self._queue_dropped_notice_locked()
+                    self._gave_up = False
                 self._condition.notify_all()
 
     def writable(self) -> bool:
@@ -607,6 +630,7 @@ _live_terminal_writers: weakref.WeakSet[TerminalWriter] = weakref.WeakSet()
 # One writer per terminal stream or mirror fd, so callers share its thread and line order.
 _shared_terminal_writers: dict[tuple[object, ...], TerminalWriter] = {}
 _shared_terminal_writers_lock = threading.Lock()
+_streams_replaced_at_fork: list[TextIO] = []
 
 
 def _terminal_writer(stream: TextIO) -> TerminalWriter:
@@ -655,10 +679,8 @@ def _terminal_mirror_writer() -> TerminalWriter | None:
 def _reset_terminal_writers_after_fork() -> None:
     global _shared_terminal_writers_lock
     _shared_terminal_writers_lock = threading.Lock()
-    # The parent's streams may be locked by its writer threads; mirrors reopen their fd.
-    _shared_terminal_writers.clear()
     for writer in list(_live_terminal_writers):
-        writer._reset()
+        writer._reopen_after_fork()
 
 
 if hasattr(os, "register_at_fork"):
@@ -676,11 +698,16 @@ def _drain_terminal_writers(writers: Iterable[TerminalWriter], timeout: float) -
 def drain_terminal_output(timeout: float | None = None) -> bool:
     """Wait for every :class:`TerminalWriter` to write its queued output.
 
+    Writers whose last drain timed out are not waited for again; their
+    terminal has already shown it is not reading.
+
     :param timeout: Total seconds to wait; defaults to :data:`_TERMINAL_EXIT_DRAIN_S`.
     :returns: ``True`` when nothing is left to write.
     """
     wait_s = _TERMINAL_EXIT_DRAIN_S if timeout is None else timeout
-    return _drain_terminal_writers(_live_terminal_writers, wait_s)
+    writers = list(_live_terminal_writers)
+    waiting = [writer for writer in writers if not writer._gave_up]
+    return _drain_terminal_writers(waiting, wait_s) and len(waiting) == len(writers)
 
 
 atexit.register(drain_terminal_output)

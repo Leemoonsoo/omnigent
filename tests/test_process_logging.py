@@ -7,7 +7,9 @@ import io
 import logging
 import os
 import re
+import subprocess
 import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -102,7 +104,7 @@ def _isolated_terminal_writers(monkeypatch: pytest.MonkeyPatch) -> None:
 class _FakeTerminal(io.StringIO):
     """In-memory terminal whose writes can be held until the test releases them."""
 
-    def __init__(self, *, tty: bool = True, fail_with: OSError | None = None) -> None:
+    def __init__(self, *, tty: bool = True, fail_with: Exception | None = None) -> None:
         super().__init__()
         self._tty = tty
         self._fail_with = fail_with
@@ -208,19 +210,26 @@ def test_terminal_stream_handlers_share_one_writer_per_terminal(
         monkeypatch.delenv(LOG_TTY_FD_ENV_VAR)
         monkeypatch.setattr(sys, "stderr", terminal)
         restore = nonblocking_terminal_stdio()
-        mirror = terminal_stream_handler()
-        assert isinstance(mirror, logging.StreamHandler)
-        assert mirror.stream is sys.stderr
-        restore()
+        try:
+            mirror = terminal_stream_handler()
+            assert isinstance(mirror, logging.StreamHandler)
+            assert mirror.stream is sys.stderr
+        finally:
+            restore()
     finally:
         for fd in (read_fd, write_fd):
             with contextlib.suppress(OSError):
                 os.close(fd)
 
 
-def test_terminal_writer_stops_writing_after_the_terminal_hangs_up() -> None:
+@pytest.mark.parametrize(
+    "error",
+    [OSError(5, "Input/output error"), UnicodeEncodeError("ascii", "✓", 0, 1, "not ASCII")],
+    ids=["hang-up", "unencodable"],
+)
+def test_terminal_writer_stops_writing_after_a_terminal_error(error: Exception) -> None:
     """A terminal write error ends mirroring instead of retrying or raising to the caller."""
-    terminal = _FakeTerminal(fail_with=OSError(5, "Input/output error"))
+    terminal = _FakeTerminal(fail_with=error)
     writer = TerminalWriter(terminal)
 
     writer.write("first\n")
@@ -229,6 +238,7 @@ def test_terminal_writer_stops_writing_after_the_terminal_hangs_up() -> None:
     assert writer.drain(5)
 
     assert terminal.write_calls == 1
+    assert not writer.writable()
 
 
 def test_terminal_writer_keeps_partial_lines_until_flush() -> None:
@@ -263,7 +273,7 @@ def test_terminal_writer_bounds_text_without_a_newline(monkeypatch: pytest.Monke
 
 
 def test_terminal_writer_after_fork_ignores_a_lock_the_parent_held() -> None:
-    """The at-fork hook gives a child writer its own lock and thread."""
+    """The at-fork hook gives a child writer its own lock and thread; see the real fork test."""
     terminal = _FakeTerminal()
     writer = TerminalWriter(terminal)
     parent_condition = writer._condition
@@ -277,6 +287,45 @@ def test_terminal_writer_after_fork_ignores_a_lock_the_parent_held() -> None:
         parent_condition.release()
 
     assert terminal.getvalue() == "from the child\n"
+
+
+_FORK_WHILE_WRITING = """
+import os, select, sys, threading, time, warnings
+from omnigent.process_logging import TerminalWriter
+
+read_fd, write_fd = os.pipe()
+writer = TerminalWriter(os.fdopen(write_fd, "w", buffering=1))
+# More than the pipe holds: the writer thread blocks mid-write, holding the stream's lock.
+writer.write("x" * 70000 + "\\n")
+time.sleep(0.5)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+    pid = os.fork()
+if pid == 0:
+    writer.write("from the child\\n")
+    os._exit(0 if writer.drain(10) else 1)
+output = bytearray()
+deadline = time.monotonic() + 10
+while b"from the child\\n" not in output and time.monotonic() < deadline:
+    if select.select([read_fd], [], [], max(0.0, deadline - time.monotonic()))[0]:
+        output.extend(os.read(read_fd, 65536))
+_, status = os.waitpid(pid, 0)
+print(os.waitstatus_to_exitcode(status), b"from the child\\n" in output)
+"""
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="os.fork is POSIX-only")
+def test_terminal_writer_in_a_child_forked_mid_write_writes_to_a_fresh_fd() -> None:
+    """A child forked while a parent writer thread holds the stream's lock still writes."""
+    completed = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_FORK_WHILE_WRITING)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.split() == ["0", "True"]
 
 
 def test_terminal_writer_shows_one_write_larger_than_the_backlog(
@@ -327,6 +376,10 @@ def test_nonblocking_terminal_stdio_keeps_the_writer_while_the_terminal_is_stall
         print("↓ Runner stopped", flush=True)
         restore()
         assert sys.stdout is writer
+        # The exit-time drain does not wait again for a terminal that already timed out.
+        started = time.monotonic()
+        assert not process_logging.drain_terminal_output(5)
+        assert time.monotonic() - started < 1
     finally:
         terminal.reading.set()
     assert isinstance(writer, TerminalWriter)
