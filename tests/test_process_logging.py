@@ -95,10 +95,45 @@ def test_terminal_stream_handler_writes_to_explicit_log_fd(
                 os.close(fd)
 
 
+_LOG_THEN_HARD_EXIT = """
+import logging, os
+from omnigent.process_logging import terminal_stream_handler
+
+handler = terminal_stream_handler()
+handler.setFormatter(logging.Formatter("%(message)s"))
+for index in range(200):
+    handler.handle(logging.makeLogRecord({"msg": "line %d", "args": (index,)}))
+os._exit(0)
+"""
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="fd-based terminal mirroring is POSIX-only")
+def test_terminal_mirror_keeps_lines_logged_just_before_os_exit() -> None:
+    """Outside the host's opt-in the mirror writes synchronously, so ``os._exit`` loses nothing."""
+    read_fd, write_fd = os.pipe()
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(_LOG_THEN_HARD_EXIT)],
+            env={**os.environ, LOG_TTY_FD_ENV_VAR: str(write_fd)},
+            pass_fds=(write_fd,),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        os.close(write_fd)
+    with os.fdopen(read_fd, encoding="utf-8") as mirror_output:
+        lines = mirror_output.read().splitlines()
+
+    assert completed.returncode == 0, completed.stderr
+    assert lines == [f"line {index}" for index in range(200)]
+
+
 @pytest.fixture(autouse=True)
 def _isolated_terminal_writers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep one test's shared terminal writers out of the next test."""
+    """Keep one test's shared terminal writers and mirror mode out of the next test."""
     monkeypatch.setattr(process_logging, "_shared_terminal_writers", {})
+    monkeypatch.setattr(process_logging, "_threaded_terminal_mirrors", False)
 
 
 class _FakeTerminal(io.StringIO):
@@ -135,6 +170,8 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
     monkeypatch.setattr(process_logging, "_TERMINAL_BACKLOG_CHARS", 4096)
     read_fd, write_fd = os.pipe()  # nothing reads until every line is logged
     handler: logging.Handler | None = None
+    # As in the foreground host, whose terminal mirrors write from a thread.
+    restore = nonblocking_terminal_stdio()
     try:
         monkeypatch.setenv(LOG_TTY_FD_ENV_VAR, str(write_fd))
         handler = terminal_stream_handler()
@@ -166,6 +203,7 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
             while chunk := os.read(read_fd, 65536):
                 output.extend(chunk)
     finally:
+        restore()
         if handler is not None:
             handler.close()
         for fd in (read_fd, write_fd):
@@ -179,7 +217,7 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
     for text in shown:
         notice = re.fullmatch(
             r"\[omnigent\] (\d+) lines were not shown because this terminal stopped "
-            r"reading output; log lines are also in the log file\.",
+            r"reading output; any log lines among them are in the log file\.",
             text,
         )
         if notice is not None:
@@ -188,7 +226,7 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
         else:
             assert text == f"line {next_index:04d} {'x' * 90}"
             next_index += 1
-    # Nothing was logged after the burst, so trailing drops count only if drain() reported them.
+    # Trailing drops are counted only through the writer's catch-up notice.
     assert next_index == 2000
     assert notices > 0
 
@@ -199,24 +237,22 @@ def test_terminal_stream_handlers_share_one_writer_per_stream(
 ) -> None:
     """Mirrors of one stream or mirror fd share a writer, so their lines keep the order logged."""
     read_fd, write_fd = os.pipe()
-    terminal = _FakeTerminal()
+    monkeypatch.setattr(sys, "stderr", _FakeTerminal())
+    restore = nonblocking_terminal_stdio()
     try:
         monkeypatch.setenv(LOG_TTY_FD_ENV_VAR, str(write_fd))
         first, second = terminal_stream_handler(), terminal_stream_handler()
         assert isinstance(first, logging.StreamHandler)
         assert isinstance(second, logging.StreamHandler)
+        assert isinstance(first.stream, TerminalWriter)
         assert first.stream is second.stream
 
         monkeypatch.delenv(LOG_TTY_FD_ENV_VAR)
-        monkeypatch.setattr(sys, "stderr", terminal)
-        restore = nonblocking_terminal_stdio()
-        try:
-            mirror = terminal_stream_handler()
-            assert isinstance(mirror, logging.StreamHandler)
-            assert mirror.stream is sys.stderr
-        finally:
-            restore()
+        mirror = terminal_stream_handler()
+        assert isinstance(mirror, logging.StreamHandler)
+        assert mirror.stream is sys.stderr
     finally:
+        restore()
         for fd in (read_fd, write_fd):
             with contextlib.suppress(OSError):
                 os.close(fd)
@@ -286,7 +322,7 @@ with warnings.catch_warnings():
     pid = os.fork()
 if pid == 0:
     writer.write("from the child\\n")
-    os._exit(0 if writer.drain(10) else 1)
+    EXIT_CALL(0 if writer.drain(10) else 1)
 output = bytearray()
 deadline = time.monotonic() + 10
 while b"from the child\\n" not in output and time.monotonic() < deadline:
@@ -298,10 +334,12 @@ print(os.waitstatus_to_exitcode(status), b"from the child\\n" in output)
 
 
 @pytest.mark.skipif(not IS_POSIX, reason="os.fork is POSIX-only")
-def test_terminal_writer_in_a_child_forked_mid_write_writes_to_a_fresh_fd() -> None:
-    """A child forked while a parent writer thread holds the stream's lock still writes."""
+@pytest.mark.parametrize("exit_call", ["os._exit", "sys.exit"])
+def test_terminal_writer_in_a_child_forked_mid_write_writes_to_a_fresh_fd(exit_call: str) -> None:
+    """A child forked while a parent writer holds the stream's lock still writes and exits."""
+    script = textwrap.dedent(_FORK_WHILE_WRITING).replace("EXIT_CALL", exit_call)
     completed = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(_FORK_WHILE_WRITING)],
+        [sys.executable, "-c", script],
         capture_output=True,
         text=True,
         timeout=60,

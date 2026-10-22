@@ -291,7 +291,8 @@ def test_stop_signal_exit_row_reaches_the_terminal_mirror(tmp_path: Path) -> Non
     read_fd, write_fd = os.pipe()
     script = _CHILD_PRELUDE + textwrap.dedent(
         """
-        from omnigent.process_logging import terminal_stream_handler
+        from omnigent.process_logging import nonblocking_terminal_stdio, terminal_stream_handler
+        nonblocking_terminal_stdio()  # as the host does, so the mirror writes from a thread
         mirror = terminal_stream_handler()
         mirror.setFormatter(logging.Formatter("%(message)s"))
         root.addHandler(mirror)
