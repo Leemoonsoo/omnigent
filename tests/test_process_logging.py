@@ -218,8 +218,8 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
     notices = 0
     for text in shown:
         notice = re.fullmatch(
-            r"\[omnigent\] (\d+) lines were not shown because this terminal stopped "
-            r"reading output; any log lines among them are in the log file\.",
+            r"\[omnigent\] (\d+) lines? (?:was|were) not shown because this terminal "
+            r"stopped reading output; any log lines among them are in the log file\.",
             text,
         )
         if notice is not None:
@@ -284,6 +284,8 @@ def test_terminal_writer_stops_writing_after_a_terminal_error(
     while "terminal output stopped after a write error" not in caplog.text:
         assert time.monotonic() < deadline, "the stopped mirror was never logged"
         time.sleep(0.01)
+    assert type(error).__name__ in caplog.text
+    assert "✓" not in caplog.text  # the rejected text stays out of the log file
 
 
 def test_terminal_writer_keeps_partial_lines_until_flush() -> None:
@@ -422,35 +424,70 @@ def test_nonblocking_terminal_stdio_wraps_only_terminals(monkeypatch: pytest.Mon
 def test_nonblocking_terminal_stdio_routes_handlers_that_already_write_to_the_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Handlers attached before the host starts, e.g. under ``--log-to-stderr``, are moved too."""
-    read_fd, write_fd = os.pipe()
+    """Handlers attached before the host starts, e.g. under ``--log-to-stderr``, are moved too.
+
+    They are handed back only once every writer has caught up: a mirror blocked mid-write
+    holds its stream's lock, so its handler would block on the next line.
+    """
+    monkeypatch.setattr(process_logging, "_TERMINAL_EXIT_DRAIN_S", 0.05)
+    read_fd, write_fd = os.pipe()  # nothing reads until the restore has been refused
     logger = logging.getLogger("tests.terminal_routing")
-    monkeypatch.setattr(sys, "stderr", _FakeTerminal())
+    terminal = _FakeTerminal()
+    monkeypatch.setattr(sys, "stderr", terminal)
     monkeypatch.setenv(LOG_TTY_FD_ENV_VAR, str(write_fd))
     stderr_handler = logging.StreamHandler(sys.stderr)
     mirror = terminal_stream_handler()  # synchronous: opened before the opt-in
+    assert isinstance(mirror, logging.StreamHandler)
+    mirror_stream = mirror.stream
     log_file = logging.FileHandler(os.devnull)
-    for handler in (stderr_handler, mirror, log_file):
+    handlers: list[logging.Handler] = [stderr_handler, mirror, log_file]
+    for handler in handlers:
         logger.addHandler(handler)
     restore = nonblocking_terminal_stdio()
     try:
-        assert isinstance(mirror, logging.StreamHandler)
         assert stderr_handler.stream is sys.stderr
         assert isinstance(sys.stderr, TerminalWriter)
-        assert isinstance(mirror.stream, TerminalWriter)
+        writer = mirror.stream
+        assert isinstance(writer, TerminalWriter)
+        assert not isinstance(log_file.stream, TerminalWriter)
         # A mirror opened later for the same file shares the existing mirror's writer.
         later = terminal_stream_handler()
         assert isinstance(later, logging.StreamHandler)
-        assert later.stream is mirror.stream
-        assert not isinstance(log_file.stream, TerminalWriter)
-    finally:
+        assert later.stream is writer
+        logger.addHandler(later)
+        handlers.append(later)
+
+        # More than the pipe holds, so the mirror's writer blocks mid-write.
+        for index in range(100):
+            mirror.handle(_record("line %d %s", index, "x" * 1000))
         restore()
-        for handler in (stderr_handler, mirror, log_file):
+        assert mirror.stream is writer
+        assert isinstance(sys.stderr, TerminalWriter)
+
+        # The terminal reads again; now everything is handed back, once.
+        os.set_blocking(read_fd, False)
+        deadline = time.monotonic() + 10
+        while not writer.drain(0.05):
+            assert time.monotonic() < deadline, "queued output was never written"
+            with contextlib.suppress(BlockingIOError):
+                os.read(read_fd, 65536)
+        restore()
+        assert sys.stderr is terminal
+        assert stderr_handler.stream is terminal
+        assert mirror.stream is mirror_stream
+        assert not isinstance(later.stream, TerminalWriter)
+        assert process_logging._threaded_terminal_mirrors == 0
+        restore()
+        assert process_logging._threaded_terminal_mirrors == 0
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(read_fd)  # unblocks a writer the test left blocked
+        restore()
+        for handler in handlers:
             logger.removeHandler(handler)
         log_file.close()
-        for fd in (read_fd, write_fd):
-            with contextlib.suppress(OSError):
-                os.close(fd)
+        with contextlib.suppress(OSError):
+            os.close(write_fd)
 
 
 def test_nonblocking_terminal_stdio_keeps_the_writer_while_the_terminal_is_stalled(
