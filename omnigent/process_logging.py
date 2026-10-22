@@ -458,7 +458,7 @@ class TerminalWriter:
     for a writer thread. While more than :data:`_TERMINAL_BACKLOG_CHARS` are
     queued, new lines are dropped and counted, and a notice reports the count
     once the terminal catches up. Process log files are written separately and
-    keep every line. Attributes other than the text-stream methods, such as
+    keep every log line. Attributes other than the text-stream methods, such as
     ``buffer``, belong to the wrapped stream, so binary writes are not queued.
     """
 
@@ -469,9 +469,8 @@ class TerminalWriter:
         _live_terminal_writers.add(self)
 
     def _reset(self) -> None:
-        # Forked children lose the writer thread; rebuild this writer's state
-        # without touching the parent's lock.
-        self._pid = os.getpid()
+        # Also runs in a forked child, which has no writer thread and must not
+        # wait on a lock another parent thread held at fork time.
         self._condition = threading.Condition()
         self._chunks: deque[str] = deque()
         self._partial_line = ""
@@ -482,8 +481,6 @@ class TerminalWriter:
 
     def write(self, text: str) -> int:
         """Queue *text* for the terminal and return at once."""
-        if os.getpid() != self._pid:
-            self._reset()
         with self._condition:
             complete, newline, self._partial_line = (self._partial_line + text).rpartition("\n")
             if newline:
@@ -500,8 +497,6 @@ class TerminalWriter:
 
     def flush(self) -> None:
         """Queue any partial line; never wait for the terminal."""
-        if os.getpid() != self._pid:
-            self._reset()
         with self._condition:
             if self._partial_line:
                 self._enqueue_locked(self._partial_line)
@@ -513,8 +508,6 @@ class TerminalWriter:
         :returns: ``True`` when nothing is left to write, including the notice
             for dropped lines.
         """
-        if os.getpid() != self._pid:
-            return False
         self.flush()
         with self._condition:
             return self._condition.wait_for(
@@ -524,7 +517,8 @@ class TerminalWriter:
     def _enqueue_locked(self, chunk: str) -> None:
         if self._stream_failed:
             return
-        if self._queued_chars + len(chunk) > _TERMINAL_BACKLOG_CHARS:
+        # Past the backlog, drop new text; one oversized write into an empty queue still goes out.
+        if self._queued_chars and self._queued_chars + len(chunk) > _TERMINAL_BACKLOG_CHARS:
             self._dropped_lines += max(1, chunk.count("\n"))
             return
         self._queue_dropped_notice_locked()
@@ -545,7 +539,7 @@ class TerminalWriter:
         if self._dropped_lines:
             self._queue_locked(
                 f"[omnigent] {self._dropped_lines} lines were not shown because this "
-                "terminal stopped reading output; the log file has every log line.\n"
+                "terminal stopped reading output; log lines are also in the log file.\n"
             )
             self._dropped_lines = 0
 
@@ -582,8 +576,8 @@ class TerminalWriter:
                 self._condition.notify_all()
 
     def writable(self) -> bool:
-        """Report the stream as writable."""
-        return True
+        """Report whether output can still reach the terminal."""
+        return not self._stream_failed
 
     def isatty(self) -> bool:
         """Return whether the wrapped stream is a terminal."""
@@ -612,18 +606,7 @@ class TerminalWriter:
 _live_terminal_writers: weakref.WeakSet[TerminalWriter] = weakref.WeakSet()
 # One writer per terminal stream or mirror fd, so callers share its thread and line order.
 _shared_terminal_writers: dict[tuple[object, ...], TerminalWriter] = {}
-
-
-def _shared_terminal_writer(
-    key: tuple[object, ...], open_stream: Callable[[], TextIO | None]
-) -> TerminalWriter | None:
-    writer = _shared_terminal_writers.get(key)
-    if writer is None:
-        stream = open_stream()
-        if stream is None:
-            return None
-        writer = _shared_terminal_writers.setdefault(key, TerminalWriter(stream))
-    return writer
+_shared_terminal_writers_lock = threading.Lock()
 
 
 def _terminal_writer(stream: TextIO) -> TerminalWriter:
@@ -631,17 +614,16 @@ def _terminal_writer(stream: TextIO) -> TerminalWriter:
         return stream
     # The cached writer keeps *stream* alive, so its id is not reused meanwhile.
     key = ("stream", id(stream))
-    writer = _shared_terminal_writers.get(key)
-    if writer is None:
-        writer = _shared_terminal_writers.setdefault(key, TerminalWriter(stream))
-    return writer
+    with _shared_terminal_writers_lock:
+        writer = _shared_terminal_writers.get(key)
+        if writer is None:
+            writer = _shared_terminal_writers[key] = TerminalWriter(stream)
+        return writer
 
 
-def _open_mirror_fd(fd: int) -> TextIO | None:
-    try:
-        return os.fdopen(os.dup(fd), "w", buffering=1, encoding="utf-8", errors="replace")
-    except OSError:
-        return None
+def _mirror_fd_key(fd: int) -> tuple[object, ...]:
+    status = os.fstat(fd)
+    return ("fd", status.st_dev, status.st_ino)
 
 
 def _terminal_mirror_writer() -> TerminalWriter | None:
@@ -649,27 +631,59 @@ def _terminal_mirror_writer() -> TerminalWriter | None:
     if fd_value and IS_POSIX:
         try:
             fd = int(fd_value)
-            status = os.fstat(fd)
+            with _shared_terminal_writers_lock:
+                writer = _shared_terminal_writers.get(_mirror_fd_key(fd))
+                if writer is not None:
+                    return writer
+                # Key by the duplicate, so a close and reuse of *fd* meanwhile can't mislabel it.
+                duplicate = os.dup(fd)
+                key = _mirror_fd_key(duplicate)
+                writer = _shared_terminal_writers.get(key)
+                if writer is not None:
+                    os.close(duplicate)
+                    return writer
+                stream = os.fdopen(duplicate, "w", buffering=1, encoding="utf-8", errors="replace")
+                writer = _shared_terminal_writers[key] = TerminalWriter(stream)
+                return writer
         except (OSError, ValueError):
             return None
-        # A reused fd number names a different file; it gets its own writer.
-        key = ("fd", fd, status.st_dev, status.st_ino)
-        return _shared_terminal_writer(key, lambda: _open_mirror_fd(fd))
     if sys.stderr.isatty():
         return _terminal_writer(sys.stderr)
     return None
 
 
-def _drain_terminal_writers(writers: Iterable[TerminalWriter]) -> bool:
-    """Wait up to :data:`_TERMINAL_EXIT_DRAIN_S` in total for *writers* to write their output."""
-    deadline = time.monotonic() + _TERMINAL_EXIT_DRAIN_S
+def _reset_terminal_writers_after_fork() -> None:
+    global _shared_terminal_writers_lock
+    _shared_terminal_writers_lock = threading.Lock()
+    # The parent's streams may be locked by its writer threads; mirrors reopen their fd.
+    _shared_terminal_writers.clear()
+    for writer in list(_live_terminal_writers):
+        writer._reset()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_terminal_writers_after_fork)
+
+
+def _drain_terminal_writers(writers: Iterable[TerminalWriter], timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
     drained = True
     for writer in list(writers):
         drained = writer.drain(max(0.0, deadline - time.monotonic())) and drained
     return drained
 
 
-atexit.register(_drain_terminal_writers, _live_terminal_writers)
+def drain_terminal_output(timeout: float | None = None) -> bool:
+    """Wait for every :class:`TerminalWriter` to write its queued output.
+
+    :param timeout: Total seconds to wait; defaults to :data:`_TERMINAL_EXIT_DRAIN_S`.
+    :returns: ``True`` when nothing is left to write.
+    """
+    wait_s = _TERMINAL_EXIT_DRAIN_S if timeout is None else timeout
+    return _drain_terminal_writers(_live_terminal_writers, wait_s)
+
+
+atexit.register(drain_terminal_output)
 
 
 def _is_terminal(stream: TextIO | None) -> bool:
@@ -698,7 +712,8 @@ def nonblocking_terminal_stdio() -> Callable[[], None]:
 
     def restore() -> None:
         writers = [stream for stream in wrapped if isinstance(stream, TerminalWriter)]
-        if _drain_terminal_writers(writers) and (sys.stdout, sys.stderr) == wrapped:
+        drained = _drain_terminal_writers(writers, _TERMINAL_EXIT_DRAIN_S)
+        if drained and (sys.stdout, sys.stderr) == wrapped:
             sys.stdout, sys.stderr = originals
 
     return restore

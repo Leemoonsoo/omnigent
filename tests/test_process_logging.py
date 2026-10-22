@@ -93,6 +93,12 @@ def test_terminal_stream_handler_writes_to_explicit_log_fd(
                 os.close(fd)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_terminal_writers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep one test's shared terminal writers out of the next test."""
+    monkeypatch.setattr(process_logging, "_shared_terminal_writers", {})
+
+
 class _FakeTerminal(io.StringIO):
     """In-memory terminal whose writes can be held until the test releases them."""
 
@@ -171,7 +177,7 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
     for text in shown:
         notice = re.fullmatch(
             r"\[omnigent\] (\d+) lines were not shown because this terminal stopped "
-            r"reading output; the log file has every log line\.",
+            r"reading output; log lines are also in the log file\.",
             text,
         )
         if notice is not None:
@@ -256,24 +262,36 @@ def test_terminal_writer_bounds_text_without_a_newline(monkeypatch: pytest.Monke
     assert terminal.getvalue() == "\r#####" * 10
 
 
-def test_terminal_writer_resets_when_the_pid_changes_with_its_lock_held(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A forked child starts its own writer instead of waiting on the parent's lock."""
+def test_terminal_writer_after_fork_ignores_a_lock_the_parent_held() -> None:
+    """The at-fork hook gives a child writer its own lock and thread."""
     terminal = _FakeTerminal()
     writer = TerminalWriter(terminal)
-    parent_pid = os.getpid()
     parent_condition = writer._condition
     # Held by another parent thread at the moment of the fork.
     parent_condition.acquire()
     try:
-        monkeypatch.setattr(os, "getpid", lambda: parent_pid + 1)
+        process_logging._reset_terminal_writers_after_fork()
         writer.write("from the child\n")
         assert writer.drain(5)
     finally:
         parent_condition.release()
 
     assert terminal.getvalue() == "from the child\n"
+
+
+def test_terminal_writer_shows_one_write_larger_than_the_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backlog limits queued text; a large write to an idle terminal is still shown."""
+    monkeypatch.setattr(process_logging, "_TERMINAL_BACKLOG_CHARS", 64)
+    terminal = _FakeTerminal()
+    writer = TerminalWriter(terminal)
+    traceback_text = "".join(f'  File "module_{index}.py", line {index}\n' for index in range(20))
+
+    writer.write(traceback_text)
+    assert writer.drain(5)
+
+    assert terminal.getvalue() == traceback_text
 
 
 def test_nonblocking_terminal_stdio_wraps_only_terminals(monkeypatch: pytest.MonkeyPatch) -> None:
