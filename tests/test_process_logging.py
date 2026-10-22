@@ -194,10 +194,10 @@ def test_terminal_stream_handler_does_not_wait_for_a_stalled_terminal(
 
 
 @pytest.mark.skipif(not IS_POSIX, reason="fd-based terminal mirroring is POSIX-only")
-def test_terminal_stream_handlers_share_one_writer_per_terminal(
+def test_terminal_stream_handlers_share_one_writer_per_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mirrors of one terminal share a writer, so their lines keep the order they were logged."""
+    """Mirrors of one stream or mirror fd share a writer, so their lines keep the order logged."""
     read_fd, write_fd = os.pipe()
     terminal = _FakeTerminal()
     try:
@@ -272,23 +272,6 @@ def test_terminal_writer_bounds_text_without_a_newline(monkeypatch: pytest.Monke
     assert terminal.getvalue() == "\r#####" * 10
 
 
-def test_terminal_writer_after_fork_ignores_a_lock_the_parent_held() -> None:
-    """The at-fork hook gives a child writer its own lock and thread; see the real fork test."""
-    terminal = _FakeTerminal()
-    writer = TerminalWriter(terminal)
-    parent_condition = writer._condition
-    # Held by another parent thread at the moment of the fork.
-    parent_condition.acquire()
-    try:
-        process_logging._reset_terminal_writers_after_fork()
-        writer.write("from the child\n")
-        assert writer.drain(5)
-    finally:
-        parent_condition.release()
-
-    assert terminal.getvalue() == "from the child\n"
-
-
 _FORK_WHILE_WRITING = """
 import os, select, sys, threading, time, warnings
 from omnigent.process_logging import TerminalWriter
@@ -354,10 +337,13 @@ def test_nonblocking_terminal_stdio_wraps_only_terminals(monkeypatch: pytest.Mon
     assert isinstance(sys.stdout, TerminalWriter)
     assert sys.stderr is log_file
     print("✓ Connected")
+    # A stream another component replaced meanwhile stays theirs; stdout is still restored.
+    replacement = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", replacement)
     restore()
 
     assert sys.stdout is terminal
-    assert sys.stderr is log_file
+    assert sys.stderr is replacement
     assert terminal.getvalue() == "✓ Connected\n"
 
 

@@ -450,16 +450,11 @@ _TERMINAL_EXIT_DRAIN_S = 1.0
 
 
 class TerminalWriter:
-    """Text stream that writes to a terminal from a daemon thread.
+    """Text stream that writes queued lines from a daemon thread.
 
-    A terminal whose client stops reading (for example, a disconnected session
-    that leaves the pty open) blocks ``write`` once its buffer fills. Writing
-    through this class never makes the caller wait: complete lines are queued
-    for a writer thread. While more than :data:`_TERMINAL_BACKLOG_CHARS` are
-    queued, new lines are dropped and counted, and a notice reports the count
-    once the terminal catches up. Process log files are written separately and
-    keep every log line. Attributes other than the text-stream methods, such as
-    ``buffer``, belong to the wrapped stream, so binary writes are not queued.
+    Callers never wait on a terminal that stopped reading. Past
+    :data:`_TERMINAL_BACKLOG_CHARS` queued characters, new lines are dropped and
+    counted. Other attributes, such as ``buffer``, go to the wrapped stream unqueued.
     """
 
     def __init__(self, stream: TextIO) -> None:
@@ -627,7 +622,7 @@ class TerminalWriter:
 
 
 _live_terminal_writers: weakref.WeakSet[TerminalWriter] = weakref.WeakSet()
-# One writer per terminal stream or mirror fd, so callers share its thread and line order.
+# One writer per stream object or mirror-fd file, so its callers share a thread and line order.
 _shared_terminal_writers: dict[tuple[object, ...], TerminalWriter] = {}
 _shared_terminal_writers_lock = threading.Lock()
 _streams_replaced_at_fork: list[TextIO] = []
@@ -739,9 +734,14 @@ def nonblocking_terminal_stdio() -> Callable[[], None]:
 
     def restore() -> None:
         writers = [stream for stream in wrapped if isinstance(stream, TerminalWriter)]
-        drained = _drain_terminal_writers(writers, _TERMINAL_EXIT_DRAIN_S)
-        if drained and (sys.stdout, sys.stderr) == wrapped:
-            sys.stdout, sys.stderr = originals
+        # Both streams are usually one terminal, so one stalled writer keeps both wrapped.
+        if not _drain_terminal_writers(writers, _TERMINAL_EXIT_DRAIN_S):
+            return
+        # A stream someone else replaced meanwhile is theirs to restore.
+        if sys.stdout is wrapped[0]:
+            sys.stdout = originals[0]
+        if sys.stderr is wrapped[1]:
+            sys.stderr = originals[1]
 
     return restore
 

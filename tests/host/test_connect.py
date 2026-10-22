@@ -6699,6 +6699,37 @@ def test_run_host_process_prints_to_its_terminal_through_a_writer_thread(
     assert "✓ Connected as 'test-host'\n" in capsys.readouterr().out
 
 
+def test_run_host_process_restores_its_terminal_when_exit_cleanup_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failing exit step must not leave the terminal writers installed."""
+    from omnigent.host import connect as connect_mod
+    from omnigent.host import crash_reporting
+
+    original_streams = (sys.stdout, sys.stderr)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+    monkeypatch.setattr(connect_mod, "_serve_host_until_exit", lambda *_a, **_k: False)
+
+    def fail_restore() -> None:
+        raise RuntimeError("signal handler restore failed")
+
+    monkeypatch.setattr(crash_reporting, "install_host_signal_handlers", lambda: fail_restore)
+    with (
+        patch(
+            "omnigent.host.connect.configure_process_logging",
+            return_value=tmp_path / "host.log",
+        ),
+        pytest.raises(RuntimeError, match="signal handler restore failed"),
+    ):
+        run_host_process(
+            server_url="https://app.example.databricks.com",
+            config_path=tmp_path / "config.yaml",
+        )
+
+    assert (sys.stdout, sys.stderr) == original_streams
+
+
 def test_run_host_process_keys_its_tunnel_from_the_launch_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

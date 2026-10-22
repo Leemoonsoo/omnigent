@@ -5379,14 +5379,17 @@ def _finish_host_exit(
 
     A stop signal during the drain waits for it and then dies by the signal;
     one after the handlers are restored takes its default action, with the
-    exit row already delivered. The terminal streams are restored last.
+    exit row already delivered. The terminal streams are restored last, even
+    if an earlier step raises.
     """
     from omnigent.host import crash_reporting
 
-    crash_reporting.drain_debug_sink()
-    restore_signal_handlers()
-    crash_reporting.await_signal_exit()
-    restore_terminal_stdio()
+    try:
+        crash_reporting.drain_debug_sink()
+        restore_signal_handlers()
+        crash_reporting.await_signal_exit()
+    finally:
+        restore_terminal_stdio()
 
 
 def _serve_host_until_exit(
