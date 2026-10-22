@@ -12,6 +12,7 @@ import sys
 import textwrap
 import threading
 import time
+import weakref
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,14 @@ from omnigent.process_logging import (
     terminal_stream_handler,
     terminal_supports_color,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_terminal_writers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep one test's terminal writers and mirror mode out of the next test."""
+    monkeypatch.setattr(process_logging, "_shared_terminal_writers", {})
+    monkeypatch.setattr(process_logging, "_live_terminal_writers", weakref.WeakSet())
+    monkeypatch.setattr(process_logging, "_threaded_terminal_mirrors", 0)
 
 
 @pytest.mark.skipif(not IS_POSIX, reason="pass_fds is POSIX-only")
@@ -127,13 +136,6 @@ def test_terminal_mirror_keeps_lines_logged_just_before_os_exit() -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert lines == [f"line {index}" for index in range(200)]
-
-
-@pytest.fixture(autouse=True)
-def _isolated_terminal_writers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep one test's shared terminal writers and mirror mode out of the next test."""
-    monkeypatch.setattr(process_logging, "_shared_terminal_writers", {})
-    monkeypatch.setattr(process_logging, "_threaded_terminal_mirrors", False)
 
 
 class _FakeTerminal(io.StringIO):
@@ -263,7 +265,9 @@ def test_terminal_stream_handlers_share_one_writer_per_stream(
     [OSError(5, "Input/output error"), UnicodeEncodeError("ascii", "✓", 0, 1, "not ASCII")],
     ids=["hang-up", "unencodable"],
 )
-def test_terminal_writer_stops_writing_after_a_terminal_error(error: Exception) -> None:
+def test_terminal_writer_stops_writing_after_a_terminal_error(
+    error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
     """A terminal write error ends mirroring instead of retrying or raising to the caller."""
     terminal = _FakeTerminal(fail_with=error)
     writer = TerminalWriter(terminal)
@@ -275,6 +279,11 @@ def test_terminal_writer_stops_writing_after_a_terminal_error(error: Exception) 
 
     assert terminal.write_calls == 1
     assert not writer.writable()
+    # The log file records why the terminal went quiet; the writer thread logs it after failing.
+    deadline = time.monotonic() + 5
+    while "terminal output stopped after a write error" not in caplog.text:
+        assert time.monotonic() < deadline, "the stopped mirror was never logged"
+        time.sleep(0.01)
 
 
 def test_terminal_writer_keeps_partial_lines_until_flush() -> None:
@@ -283,10 +292,34 @@ def test_terminal_writer_keeps_partial_lines_until_flush() -> None:
     writer = TerminalWriter(terminal)
 
     print("Waiting", end="", file=writer)
+    time.sleep(0.05)  # time for the writer thread to write, had the text been queued
+    assert terminal.getvalue() == ""
     print(" for login...", end="", file=writer, flush=True)
     assert writer.drain(5)
 
     assert terminal.getvalue() == "Waiting for login..."
+
+
+def test_terminal_writer_keeps_writing_after_a_refused_thread_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused writer thread (e.g. at shutdown) drops that output, not later output."""
+    terminal = _FakeTerminal()
+    writer = TerminalWriter(terminal)
+    real_start = threading.Thread.start
+    refusals = [RuntimeError("can't create new thread at interpreter shutdown")]
+
+    def start(thread: threading.Thread) -> None:
+        if refusals and thread.name == "omnigent-terminal-writer":
+            raise refusals.pop()
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    writer.write("refused\n")
+    writer.write("written\n")
+    assert writer.drain(5)
+
+    assert terminal.getvalue() == "written\n"
 
 
 def test_terminal_writer_bounds_text_without_a_newline(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -383,6 +416,41 @@ def test_nonblocking_terminal_stdio_wraps_only_terminals(monkeypatch: pytest.Mon
     assert sys.stdout is terminal
     assert sys.stderr is replacement
     assert terminal.getvalue() == "✓ Connected\n"
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="fd-based terminal mirroring is POSIX-only")
+def test_nonblocking_terminal_stdio_routes_handlers_that_already_write_to_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handlers attached before the host starts, e.g. under ``--log-to-stderr``, are moved too."""
+    read_fd, write_fd = os.pipe()
+    logger = logging.getLogger("tests.terminal_routing")
+    monkeypatch.setattr(sys, "stderr", _FakeTerminal())
+    monkeypatch.setenv(LOG_TTY_FD_ENV_VAR, str(write_fd))
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    mirror = terminal_stream_handler()  # synchronous: opened before the opt-in
+    log_file = logging.FileHandler(os.devnull)
+    for handler in (stderr_handler, mirror, log_file):
+        logger.addHandler(handler)
+    restore = nonblocking_terminal_stdio()
+    try:
+        assert isinstance(mirror, logging.StreamHandler)
+        assert stderr_handler.stream is sys.stderr
+        assert isinstance(sys.stderr, TerminalWriter)
+        assert isinstance(mirror.stream, TerminalWriter)
+        # A mirror opened later for the same file shares the existing mirror's writer.
+        later = terminal_stream_handler()
+        assert isinstance(later, logging.StreamHandler)
+        assert later.stream is mirror.stream
+        assert not isinstance(log_file.stream, TerminalWriter)
+    finally:
+        restore()
+        for handler in (stderr_handler, mirror, log_file):
+            logger.removeHandler(handler)
+        log_file.close()
+        for fd in (read_fd, write_fd):
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def test_nonblocking_terminal_stdio_keeps_the_writer_while_the_terminal_is_stalled(

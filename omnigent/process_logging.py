@@ -446,7 +446,7 @@ def process_log_reference(destination: str) -> str:
 _TERMINAL_BACKLOG_CHARS = 1 << 20
 #: Text without a newline is queued once it reaches this many characters.
 _TERMINAL_PARTIAL_LINE_CHARS = 8192
-#: How long a restore or process exit waits, in total, for queued terminal output.
+#: How long a restore, and then the exit-time drain, each wait in total for terminal output.
 _TERMINAL_EXIT_DRAIN_S = 1.0
 
 
@@ -548,8 +548,10 @@ class TerminalWriter:
             try:
                 thread.start()
             except RuntimeError:
-                # Interpreter shutdown refuses new threads; drop output rather than block.
-                self._fail_locked()
+                # E.g. interpreter shutdown refuses new threads: drop this output, not later.
+                self._chunks.clear()
+                self._queued_chars = 0
+                self._condition.notify_all()
                 return
             self._thread = thread
 
@@ -581,10 +583,11 @@ class TerminalWriter:
             try:
                 self._stream.write(chunk)
                 self._stream.flush()
-            except Exception:  # noqa: BLE001 — any write error ends the mirror, never the caller
+            except Exception as exc:  # noqa: BLE001 — any write error ends the mirror, never the caller
                 # The terminal hung up, the stream closed, or it can't encode the text.
                 with self._condition:
                     self._fail_locked()
+                _logger.warning("terminal output stopped after a write error: %r", exc)
                 return
             with self._condition:
                 self._queued_chars -= len(chunk)
@@ -622,6 +625,7 @@ class TerminalWriter:
         return getattr(self._stream, name)
 
 
+_logger = logging.getLogger(__name__)
 _live_terminal_writers: weakref.WeakSet[TerminalWriter] = weakref.WeakSet()
 _live_terminal_writers_lock = threading.Lock()
 # One writer per stream object or mirror-fd file, so its callers share a thread and line order.
@@ -630,8 +634,8 @@ _shared_terminal_writers_lock = threading.Lock()
 _streams_replaced_at_fork: list[TextIO] = []
 
 
-# Set while nonblocking_terminal_stdio() is installed: terminal log mirrors write from a thread.
-_threaded_terminal_mirrors = False
+# Installed nonblocking_terminal_stdio() calls; while any is, mirrors write from a thread.
+_threaded_terminal_mirrors = 0
 
 
 def _terminal_stream() -> TextIO | None:
@@ -691,6 +695,19 @@ def _terminal_mirror_writer() -> TerminalWriter | None:
     return None
 
 
+def _existing_mirror_writer(stream: TextIO) -> TerminalWriter:
+    """Return the writer for a mirror stream opened earlier, shared by its file's later mirrors."""
+    try:
+        key = _mirror_fd_key(stream.fileno())
+    except (AttributeError, OSError, ValueError):
+        return _terminal_writer(stream)
+    with _shared_terminal_writers_lock:
+        writer = _shared_terminal_writers.get(key)
+        if writer is None:
+            writer = _shared_terminal_writers[key] = TerminalWriter(stream)
+        return writer
+
+
 def _reset_terminal_writers_after_fork() -> None:
     global _shared_terminal_writers_lock, _live_terminal_writers_lock
     _shared_terminal_writers_lock = threading.Lock()
@@ -738,25 +755,34 @@ def _is_terminal(stream: TextIO | None) -> bool:
 
 
 def nonblocking_terminal_stdio() -> Callable[[], None]:
-    """Route ``sys.stdout`` and ``sys.stderr`` through :class:`TerminalWriter`.
+    """Route terminal output through :class:`TerminalWriter` instances.
 
-    Only streams attached to a terminal are wrapped; files and pipes are left
-    as they are. Terminal log mirrors created while this is installed also
-    write through a writer. A long-running process that prints and logs from
-    an event loop calls this so a terminal that stops reading cannot stall the
-    loop; other processes keep synchronous output, which ``os._exit`` cannot lose.
+    ``sys.stdout`` and ``sys.stderr`` are wrapped when they are terminals;
+    files and pipes are left as they are. While this is installed, terminal log
+    mirrors (``OMNIGENT_LOG_TTY_FD`` too) write through a writer, including
+    logging handlers that already write to a wrapped stream or mirror. A
+    long-running process that prints and logs from an event loop calls this so
+    a terminal that stops reading cannot stall the loop; other processes keep
+    synchronous output, which ``os._exit`` cannot lose.
 
     :returns: A callable that waits briefly for queued output, then restores
         the original streams. It leaves a stalled terminal wrapped, so exit
         cannot block on it.
     """
     global _threaded_terminal_mirrors
-    _threaded_terminal_mirrors = True
+    _threaded_terminal_mirrors += 1
     originals = (sys.stdout, sys.stderr)
     wrapped = tuple(
         _terminal_writer(stream) if _is_terminal(stream) else stream for stream in originals
     )
     sys.stdout, sys.stderr = cast(tuple[TextIO, TextIO], wrapped)
+    rerouted = _route_terminal_log_handlers(
+        {
+            id(original): writer
+            for original, writer in zip(originals, wrapped, strict=True)
+            if isinstance(writer, TerminalWriter)
+        }
+    )
 
     def restore() -> None:
         global _threaded_terminal_mirrors
@@ -769,9 +795,44 @@ def nonblocking_terminal_stdio() -> Callable[[], None]:
             sys.stdout = originals[0]
         if sys.stderr is wrapped[1]:
             sys.stderr = originals[1]
-        _threaded_terminal_mirrors = False
+        for handler, stream in rerouted:
+            if isinstance(handler.stream, TerminalWriter):
+                handler.setStream(stream)
+        _threaded_terminal_mirrors -= 1
 
     return restore
+
+
+def _route_terminal_log_handlers(
+    writers_by_stream: dict[int, TerminalWriter],
+) -> list[tuple[logging.StreamHandler[TextIO], TextIO]]:
+    """Point existing handlers for a wrapped stream, or a terminal mirror, at a writer.
+
+    :returns: Each rerouted handler with the stream it wrote to before.
+    """
+    rerouted: list[tuple[logging.StreamHandler[TextIO], TextIO]] = []
+    loggers = [logging.getLogger()]
+    loggers += [
+        logger
+        for logger in list(logging.Logger.manager.loggerDict.values())
+        if isinstance(logger, logging.Logger)
+    ]
+    for logger in loggers:
+        for handler in list(logger.handlers):
+            if not isinstance(handler, logging.StreamHandler) or isinstance(
+                handler, logging.FileHandler
+            ):
+                continue
+            stream = handler.stream
+            if isinstance(stream, TerminalWriter):
+                continue
+            writer = writers_by_stream.get(id(stream))
+            if writer is None and getattr(handler, "_omnigent_process_log_stderr", False):
+                writer = _existing_mirror_writer(stream)
+            if writer is not None:
+                handler.setStream(cast(TextIO, writer))
+                rerouted.append((handler, stream))
+    return rerouted
 
 
 def terminal_supports_color() -> bool:

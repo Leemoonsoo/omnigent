@@ -6665,14 +6665,14 @@ def test_run_host_process_mirrors_structured_logs_on_foreground_tty(
     configure_logging.assert_called_once_with("host", log_to_stderr=True)
 
 
-@pytest.mark.parametrize("exit_step_fails", [False, True], ids=["clean-exit", "exit-step-raises"])
+@pytest.mark.parametrize("failing_step", [None, "startup", "exit"])
 def test_run_host_process_prints_to_its_terminal_through_a_writer_thread(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    exit_step_fails: bool,
+    failing_step: str | None,
 ) -> None:
-    """The host prints through terminal writers and restores its streams, even if exit fails."""
+    """The host prints through terminal writers and restores its streams, even if a step fails."""
     from omnigent import process_logging
     from omnigent.host import connect as connect_mod
     from omnigent.host import crash_reporting
@@ -6689,32 +6689,39 @@ def test_run_host_process_prints_to_its_terminal_through_a_writer_thread(
         print("✓ Connected as 'test-host'")
         return False
 
+    def fail(message: str) -> None:
+        raise RuntimeError(message)
+
     monkeypatch.setattr(connect_mod, "_serve_host_until_exit", serve)
+    configure_logging = patch(
+        "omnigent.host.connect.configure_process_logging", return_value=tmp_path / "host.log"
+    )
     expected_error: contextlib.AbstractContextManager[object] = contextlib.nullcontext()
-    if exit_step_fails:
+    if failing_step == "startup":
+        configure_logging = patch(
+            "omnigent.host.connect.configure_process_logging",
+            side_effect=lambda *_a, **_k: fail("logging setup failed"),
+        )
+        expected_error = pytest.raises(RuntimeError, match="logging setup failed")
+    elif failing_step == "exit":
 
         def fail_restore() -> None:
-            raise RuntimeError("signal handler restore failed")
+            fail("signal handler restore failed")
 
         monkeypatch.setattr(crash_reporting, "install_host_signal_handlers", lambda: fail_restore)
         expected_error = pytest.raises(RuntimeError, match="signal handler restore failed")
-    with (
-        patch(
-            "omnigent.host.connect.configure_process_logging",
-            return_value=tmp_path / "host.log",
-        ),
-        expected_error,
-    ):
+    with configure_logging, expected_error:
         run_host_process(
             server_url="https://app.example.databricks.com",
             config_path=tmp_path / "config.yaml",
         )
 
-    [(stdout, stderr)] = streams_while_serving
-    assert isinstance(stdout, TerminalWriter)
-    assert isinstance(stderr, TerminalWriter)
     assert (sys.stdout, sys.stderr) == original_streams
-    assert "✓ Connected as 'test-host'\n" in capsys.readouterr().out
+    if failing_step != "startup":
+        [(stdout, stderr)] = streams_while_serving
+        assert isinstance(stdout, TerminalWriter)
+        assert isinstance(stderr, TerminalWriter)
+        assert "✓ Connected as 'test-host'\n" in capsys.readouterr().out
 
 
 def test_run_host_process_keys_its_tunnel_from_the_launch_config(
