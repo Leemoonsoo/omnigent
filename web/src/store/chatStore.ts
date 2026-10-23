@@ -1494,10 +1494,7 @@ function waitForInitialDispatch(conversationId: string, tempId: string): Promise
     // One deadline at a time: the launch's while the sandbox starts, then the model's.
     let timer: ReturnType<typeof setTimeout> | undefined;
     let deadline: "launch" | "model" | undefined;
-    let settled = false;
     const finish = (ready: boolean, error?: Error) => {
-      if (settled) return;
-      settled = true;
       clearTimeout(timer);
       unsubscribe();
       unsubscribeDisposed();
@@ -1509,13 +1506,16 @@ function waitForInitialDispatch(conversationId: string, tempId: string): Promise
       clearTimeout(timer);
       deadline = phase;
       timer = setTimeout(() => {
+        if (phase === "launch") {
+          finish(false, new Error(message));
+          return;
+        }
         // The stream does not replay `session.model`, so a report this tab missed
         // (a dropped stream, a sleeping laptop) would fail a ready runner's message.
-        const recheck =
-          phase === "model" ? adoptSnapshotModelReport(conversationId) : Promise.resolve();
-        void recheck.then(() => {
+        void adoptSnapshotModel(conversationId).then(() => {
           check();
-          finish(false, new Error(message));
+          // A launch that began during the read has its own deadline.
+          if (deadline === phase) finish(false, new Error(message));
         });
       }, ms);
     };
@@ -1569,10 +1569,10 @@ function waitForInitialDispatch(conversationId: string, tempId: string): Promise
 }
 
 /**
- * Settle a seeded model the session snapshot has since reported, on the same
- * terms `sessionBindingPatch` applies at bind.
+ * Settle a seeded model once the session snapshot shows one, on the same terms
+ * `sessionBindingPatch` applies at bind.
  */
-function snapshotModelReportPatch(
+function snapshotModelPatch(
   session: Session,
   s: Pick<ConversationState, "sessionModelSeeded">,
 ): Partial<ConversationState> {
@@ -1581,8 +1581,8 @@ function snapshotModelReportPatch(
     : {};
 }
 
-/** Apply a model report this tab's stream missed, from a fresh session snapshot. */
-async function adoptSnapshotModelReport(conversationId: string): Promise<void> {
+/** Adopt the model a fresh session snapshot shows, in case this tab's stream missed it. */
+async function adoptSnapshotModel(conversationId: string): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS);
   let session: Session;
@@ -1593,7 +1593,7 @@ async function adoptSnapshotModelReport(conversationId: string): Promise<void> {
   } finally {
     clearTimeout(timeout);
   }
-  setterFor(conversationId)((s) => snapshotModelReportPatch(session, s));
+  setterFor(conversationId)((s) => snapshotModelPatch(session, s));
 }
 
 /**
@@ -5186,7 +5186,7 @@ function reconnectStatusPatch(
     ...launchSnapshotPatch(session, s),
     // A `session.model` missed in the gap would otherwise hold a first
     // message on `waitForInitialDispatch` until its deadline.
-    ...snapshotModelReportPatch(session, s),
+    ...snapshotModelPatch(session, s),
   };
   // Recover the background-shell tally across the gap too, so the spinner
   // returns to "N background tasks still running" rather than vanishing on reconnect.

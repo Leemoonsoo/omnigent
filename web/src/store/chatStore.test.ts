@@ -3912,7 +3912,10 @@ describe("chatStore — first message during native model startup", () => {
     );
   }
 
-  function reportSandbox(stage: "ready" | "failed", error: string | null = null): void {
+  function reportSandbox(
+    stage: "provisioning" | "ready" | "failed",
+    error: string | null = null,
+  ): void {
     handleSessionEvent(
       { type: "session_sandbox_status", conversationId: sessionId, stage, error },
       sessionId,
@@ -4664,6 +4667,20 @@ describe("chatStore — first message during native model startup", () => {
         }),
       ]),
     );
+  });
+
+  it("waits on a sandbox launch that starts during the deadline re-read", async () => {
+    await beginInBackground();
+    const snapshots = parkSnapshots();
+    await vi.advanceTimersByTimeAsync(180_000);
+    reportSandbox("provisioning");
+    snapshots.release();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const state = conversationRegistry.peek(sessionId)?.getState();
+    expect(eventBodies()).toEqual([]);
+    expect(state?.failedSendDraft).toBeNull();
+    expect(state?.pendingUserMessages[0]?.initialDraft).toBeDefined();
   });
 
   it("abandons the waiting send when its conversation is disposed", async () => {
