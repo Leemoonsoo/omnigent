@@ -525,8 +525,7 @@ class TerminalWriter:
         """
         self.flush()
         with self._condition:
-            # Not the character count, which only bounds the backlog: an interrupt between a
-            # queue and its count update must not make the writer look forever busy.
+            # Ignore _queued_chars, which an interrupted update can leave off.
             drained = self._condition.wait_for(
                 lambda: not self._chunks and not self._writing and not self._dropped_lines,
                 timeout,
@@ -692,14 +691,22 @@ def _terminal_mirror_writer() -> TerminalWriter | None:
                 writer = _shared_terminal_writers.get(_mirror_fd_key(fd))
                 if writer is not None:
                     return writer
-                # Key by the duplicate, so a close and reuse of *fd* meanwhile can't mislabel it.
+                # Key by the dup, in case fd is closed and reused meanwhile.
                 duplicate = os.dup(fd)
-                key = _mirror_fd_key(duplicate)
-                writer = _shared_terminal_writers.get(key)
-                if writer is not None:
+                try:
+                    key = _mirror_fd_key(duplicate)
+                    writer = _shared_terminal_writers.get(key)
+                    stream = None
+                    if writer is None:
+                        stream = os.fdopen(
+                            duplicate, "w", buffering=1, encoding="utf-8", errors="replace"
+                        )
+                except BaseException:
+                    os.close(duplicate)
+                    raise
+                if stream is None:
                     os.close(duplicate)
                     return writer
-                stream = os.fdopen(duplicate, "w", buffering=1, encoding="utf-8", errors="replace")
                 writer = _shared_terminal_writers[key] = TerminalWriter(stream)
                 return writer
         except (OSError, ValueError):
@@ -730,6 +737,7 @@ def _reset_terminal_writers_after_fork() -> None:
         writer._reopen_after_fork()
 
 
+# No host path forks while writers are live today; this keeps a future fork from deadlocking.
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_terminal_writers_after_fork)
 

@@ -246,8 +246,15 @@ def test_terminal_stream_handlers_share_one_writer_per_stream(
         first, second = terminal_stream_handler(), terminal_stream_handler()
         assert isinstance(first, logging.StreamHandler)
         assert isinstance(second, logging.StreamHandler)
-        assert isinstance(first.stream, TerminalWriter)
-        assert first.stream is second.stream
+        writer = first.stream
+        assert isinstance(writer, TerminalWriter)
+        assert second.stream is writer
+        for handler in (first, second):
+            handler.setFormatter(logging.Formatter("%(message)s"))
+        for index in range(20):
+            (first, second)[index % 2].handle(_record("line %d", index))
+        assert writer.drain(5)
+        assert os.read(read_fd, 65536).decode().splitlines() == [f"line {i}" for i in range(20)]
 
         monkeypatch.delenv(LOG_TTY_FD_ENV_VAR)
         mirror = terminal_stream_handler()
@@ -502,6 +509,72 @@ def test_nonblocking_terminal_stdio_routes_handlers_that_already_write_to_the_te
         log_file.close()
         with contextlib.suppress(OSError):
             os.close(write_fd)
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="fd-based terminal mirroring is POSIX-only")
+def test_terminal_mirror_closes_its_dup_when_it_cannot_open_the_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mirror that fails after duplicating its fd closes the duplicate."""
+    read_fd, write_fd = os.pipe()
+    real_key = process_logging._mirror_fd_key
+    keyed: list[int] = []
+
+    def key_fails_for_the_duplicate(fd: int) -> tuple[object, ...]:
+        keyed.append(fd)
+        if len(keyed) == 2:
+            raise OSError(9, "Bad file descriptor")
+        return real_key(fd)
+
+    monkeypatch.setattr(process_logging, "_mirror_fd_key", key_fails_for_the_duplicate)
+    monkeypatch.setenv(LOG_TTY_FD_ENV_VAR, str(write_fd))
+    restore = nonblocking_terminal_stdio()
+    try:
+        # dup() returns the lowest free fd, so a leaked duplicate would take this number.
+        lowest_free = os.dup(write_fd)
+        os.close(lowest_free)
+        handler = terminal_stream_handler()
+        again = os.dup(write_fd)
+        os.close(again)
+    finally:
+        restore()
+        for fd in (read_fd, write_fd):
+            os.close(fd)
+
+    assert isinstance(handler, logging.NullHandler)
+    assert len(keyed) == 2
+    assert again == lowest_free
+
+
+def test_nonblocking_terminal_stdio_nested_installs_restore_latest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inner restore leaves the outer install in place; the outer one puts everything back."""
+    terminal = _FakeTerminal()
+    monkeypatch.setattr(sys, "stdout", terminal)
+    logger = logging.getLogger("tests.terminal_nesting")
+    handler = logging.StreamHandler(terminal)
+    logger.addHandler(handler)
+    try:
+        outer = nonblocking_terminal_stdio()
+        writer = sys.stdout
+        assert isinstance(writer, TerminalWriter)
+        inner = nonblocking_terminal_stdio()
+        assert sys.stdout is writer
+        assert handler.stream is writer
+        assert process_logging._threaded_terminal_mirrors == 2
+
+        inner()
+        assert sys.stdout is writer
+        assert handler.stream is writer
+        assert process_logging._threaded_terminal_mirrors == 1
+
+        outer()
+        assert sys.stdout is terminal
+        assert handler.stream is terminal
+        assert process_logging._threaded_terminal_mirrors == 0
+    finally:
+        logger.removeHandler(handler)
 
 
 def test_nonblocking_terminal_stdio_keeps_the_writer_while_the_terminal_is_stalled(
