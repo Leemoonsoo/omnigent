@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -988,9 +989,16 @@ def _codex_item_texts(imported: LocalSessionImport) -> list[str]:
 
 
 def _write_codex_rollout_with_compaction(
-    tmp_path: Path, session_id: str, *, extra_pre: list[dict] | None = None
+    tmp_path: Path,
+    session_id: str,
+    *,
+    extra_pre: list[dict] | None = None,
+    compaction: dict[str, object] | None = None,
 ) -> Path:
-    """Write a Codex rollout with a ``compacted`` record between two turns."""
+    """Write a Codex rollout with a ``compacted`` record between two turns.
+
+    ``compaction`` adds or overrides fields of that record's payload.
+    """
     rollout = (
         tmp_path
         / "sessions"
@@ -1033,6 +1041,7 @@ def _write_codex_rollout_with_compaction(
                     }
                 ],
                 "window_id": 1,
+                **(compaction or {}),
             },
         }
     )
@@ -1075,10 +1084,27 @@ def _codex_compaction_baselines(imported: LocalSessionImport) -> list[list[str]]
     ]
 
 
-def test_load_codex_session_keeps_history_and_records_compaction_boundary(tmp_path: Path) -> None:
-    """Every turn stays visible; the ``compacted`` record becomes a compaction item in place."""
+@pytest.mark.parametrize(
+    ("compaction", "summary", "window_id"),
+    [
+        ({}, "[Codex compaction — context was compacted in Codex]", 1),
+        (
+            {"message": "Summary of turn 1.", "window_id": "01a11f4f-af66-74e3-92a6-6ea6e33fd77d"},
+            "Summary of turn 1.",
+            "01a11f4f-af66-74e3-92a6-6ea6e33fd77d",
+        ),
+    ],
+    ids=["fallback-summary", "message-and-uuid-window"],
+)
+def test_load_codex_session_keeps_history_and_records_compaction_boundary(
+    tmp_path: Path, compaction: dict[str, object], summary: str, window_id: int | str
+) -> None:
+    """Every turn stays visible; the ``compacted`` record becomes a compaction item in place.
+
+    Its ``message`` becomes the summary, else a fixed note, and its ``window_id`` is kept.
+    """
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    _write_codex_rollout_with_compaction(tmp_path, session_id)
+    _write_codex_rollout_with_compaction(tmp_path, session_id, compaction=compaction)
 
     imported = load_codex_session(session_id, codex_home=tmp_path)
 
@@ -1098,54 +1124,10 @@ def test_load_codex_session_keeps_history_and_records_compaction_boundary(tmp_pa
     # The replacement_history baseline rides on the compaction item, as a live
     # codex-native session persists it, so a cold resume rebuilds the same context.
     assert _codex_compaction_baselines(imported) == [["compaction summary baseline"]]
-    # The record carries no ``message``, so the summary falls back to a fixed note.
-    [compaction] = [item for item in imported.items if item.type == "compaction"]
-    assert compaction.data.summary == "[Codex compaction — context was compacted in Codex]"
-    assert imported.items[2].data.model_dump()["window_id"] == 1
-
-
-def test_load_codex_session_carries_compaction_summary_and_window(tmp_path: Path) -> None:
-    """The compacted record's ``message`` and uuid ``window_id`` land on the compaction item."""
-    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    rollout = tmp_path / "sessions" / "2026" / "10" / "02" / f"rollout-x-{session_id}.jsonl"
-    rollout.parent.mkdir(parents=True)
-    window_id = "01a11f4f-af66-74e3-92a6-6ea6e33fd77d"
-    records = [
-        {"type": "session_meta", "payload": {"id": session_id, "cwd": "/repo"}},
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "first question"}],
-            },
-        },
-        {
-            "type": "compacted",
-            "payload": {
-                "message": "Summary of the first question.",
-                "replacement_history": [
-                    {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": "Summary of the first question."}
-                        ],
-                    }
-                ],
-                "window_id": window_id,
-            },
-        },
-    ]
-    rollout.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
-
-    imported = load_codex_session(session_id, codex_home=tmp_path)
-
-    assert [item.type for item in imported.items] == ["message", "compaction"]
-    compaction = imported.items[1].data.model_dump()
-    assert compaction["summary"] == "Summary of the first question."
-    assert compaction["window_id"] == window_id
-    assert imported.title == "first question"
+    compaction_data = imported.items[2].data.model_dump()
+    assert compaction_data["summary"] == summary
+    assert compaction_data["window_id"] == window_id
+    assert imported.title == "pre compaction question"
 
 
 def test_load_codex_session_records_each_compaction_in_order(tmp_path: Path) -> None:
@@ -1287,48 +1269,40 @@ def test_load_codex_session_keeps_full_history_past_two_mb(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    ("cap", "trimmed"),
-    [(5, False), (4, True), (2, True)],
-    ids=["at-cap", "over-cap", "suffix-over-cap"],
+    ("cap", "compacted", "trimmed"),
+    [(5, True, False), (4, True, True), (2, True, True), (2, False, False)],
+    ids=["at-cap", "over-cap", "suffix-over-cap", "over-cap-without-compaction"],
 )
 def test_load_codex_session_trims_to_the_last_compaction_only_above_the_item_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap: int, trimmed: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap: int, compacted: bool, trimmed: bool
 ) -> None:
     """Up to the item cap the whole history imports; past it, the last compaction onward.
 
-    A suffix still over the cap is not cut further, so the API rejects it whole.
+    A suffix still over the cap is not cut further, and a thread with no compaction
+    stays whole, so the API rejects either one.
     """
     monkeypatch.setattr(local_import, "MAX_IMPORT_ITEMS", cap)
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    _write_codex_rollout_with_compaction(tmp_path, session_id)
-
-    imported = load_codex_session(session_id, codex_home=tmp_path)
-
     post = ["post compaction question", "post compaction answer"]
     pre = ["pre compaction question", "pre compaction answer"]
-    assert _codex_item_texts(imported) == (post if trimmed else pre + post)
-    assert imported.items[0].type == ("compaction" if trimmed else "message")
-    assert _codex_compaction_baselines(imported) == [["compaction summary baseline"]]
-    baselines, replayed = _codex_cold_resume(imported, cwd=tmp_path)
-    assert baselines == [["compaction summary baseline"]]
-    assert replayed == post
-
-
-def test_load_codex_session_keeps_an_over_cap_thread_with_no_compaction_whole(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With no compaction to trim to, an over-cap thread imports whole for the API to reject."""
-    monkeypatch.setattr(local_import, "MAX_IMPORT_ITEMS", 2)
-    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
-    _write_codex_turns(
-        tmp_path / "sessions" / "2026" / "10" / "02" / f"rollout-x-{session_id}.jsonl",
-        session_id,
-        [("question 1", "answer 1"), ("question 2", "answer 2")],
-    )
+    if compacted:
+        _write_codex_rollout_with_compaction(tmp_path, session_id)
+    else:
+        _write_codex_turns(
+            tmp_path / "sessions" / "2026" / "10" / "02" / f"rollout-x-{session_id}.jsonl",
+            session_id,
+            [(pre[0], pre[1]), (post[0], post[1])],
+        )
 
     imported = load_codex_session(session_id, codex_home=tmp_path)
 
-    assert len(imported.items) == 4
+    assert _codex_item_texts(imported) == (post if trimmed else pre + post)
+    assert imported.items[0].type == ("compaction" if trimmed else "message")
+    baseline = [["compaction summary baseline"]] if compacted else []
+    assert _codex_compaction_baselines(imported) == baseline
+    baselines, replayed = _codex_cold_resume(imported, cwd=tmp_path)
+    assert baselines == baseline
+    assert replayed == (post if compacted else pre + post)
 
 
 def _write_codex_rollout(
@@ -1556,6 +1530,74 @@ def test_load_codex_session_falls_back_to_filename_when_rollout_path_is_stale(
 
     assert _codex_item_texts(imported) == [f"{newer} question", f"{newer} answer"]
     assert imported.archived is (newer == "archived")
+
+
+@pytest.mark.parametrize("recorded", ["absolute-outside", "relative-escape", "not-jsonl"])
+def test_load_codex_session_ignores_a_rollout_path_outside_the_rollout_directories(
+    tmp_path: Path, recorded: str
+) -> None:
+    """Only a ``.jsonl`` under ``sessions/`` or ``archived_sessions/`` can be a recorded rollout.
+
+    Any other ``rollout_path`` falls back to the filename match inside the home.
+    """
+    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    home = tmp_path / "codex"
+    name = f"rollout-2026-10-02T09-00-00-{session_id}.jsonl"
+    _write_codex_turns(
+        home / "sessions" / "2026" / "10" / "02" / name,
+        session_id,
+        [("inside question", "inside answer")],
+    )
+    outside = tmp_path / "elsewhere" / name
+    _write_codex_turns(outside, session_id, [("outside question", "outside answer")])
+    not_jsonl = home / "sessions" / "notes.txt"
+    _write_codex_turns(not_jsonl, session_id, [("notes question", "notes answer")])
+    rollout_path = {
+        "absolute-outside": outside,
+        "relative-escape": Path("sessions") / ".." / ".." / "elsewhere" / name,
+        "not-jsonl": not_jsonl,
+    }[recorded]
+    _write_codex_threads_db(
+        home,
+        session_id,
+        title="question 1",
+        first_user_message="question 1",
+        rollout_path=rollout_path,
+    )
+
+    imported = load_codex_session(session_id, codex_home=home)
+
+    assert _codex_item_texts(imported) == ["inside question", "inside answer"]
+
+
+@pytest.mark.parametrize("newest_store", ["corrupt", "no-threads-table"])
+def test_load_codex_session_does_not_read_an_older_store_when_the_newest_fails(
+    tmp_path: Path, newest_store: str
+) -> None:
+    """An unreadable newest ``state_<n>.sqlite`` leaves no row, not an older store's stale one."""
+    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    _write_codex_rollout(tmp_path, session_id, first_message="current question")
+    _write_codex_threads_db(
+        tmp_path,
+        session_id,
+        title="Stale title",
+        first_user_message="current question",
+        archived=True,
+    )
+    newest = tmp_path / "state_6.sqlite"
+    if newest_store == "corrupt":
+        newest.write_bytes(b"not a sqlite database" * 64)
+    else:
+        con = sqlite3.connect(newest)
+        con.execute("CREATE TABLE other (id TEXT)")
+        con.commit()
+        con.close()
+
+    imported = load_codex_session(session_id, codex_home=tmp_path)
+
+    assert _codex_item_texts(imported) == ["current question"]
+    assert imported.native_title is None
+    assert imported.archived is False
 
 
 def test_load_codex_session_imports_metadata_only_fork_from_its_base(tmp_path: Path) -> None:
@@ -2148,6 +2190,64 @@ def test_codex_discovery_includes_configured_and_private_homes(
     assert _codex_item_texts(newest_duplicate) == ["regular newest"]
     scoped_duplicate = load_codex_session(duplicate_id, codex_home=private_home)
     assert _codex_item_texts(scoped_duplicate) == ["private older"]
+
+
+def test_load_codex_session_reads_a_private_fork_whose_base_is_in_another_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thread in a later Codex home uses that home's thread store; its base can be elsewhere.
+
+    The store's ``rollout_path``, title, and archive flag come from the home holding the
+    thread, and the fork base resolves from ``~/.codex``.
+    """
+    home = tmp_path / "home"
+    bridge_root = tmp_path / "bridge-root"
+    private_home = bridge_root / "private-bridge" / "codex-home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "configured-codex"))
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", bridge_root)
+    parent_id = "019f7777-0001-7000-8000-000000000021"
+    child_id = "019f7777-0001-7000-8000-000000000022"
+    parent = CodexRollout(parent_id, cwd="/repo")
+    parent.turn(1, "parent question", "parent answer")
+    cutoff = parent.next_ordinal
+    parent.turn(2, "after the fork", "after the fork")
+    parent.write(
+        home / ".codex" / "sessions" / "2026" / "10" / "02" / f"rollout-x-{parent_id}.jsonl"
+    )
+    sessions = private_home / "sessions" / "2026" / "10" / "02"
+    history_base = {"thread_id": parent_id, "end_ordinal_exclusive": cutoff}
+    _write_codex_turns(
+        sessions / f"rollout-2026-10-02T10-00-00-{child_id}.jsonl",
+        child_id,
+        [("older child question", "older child answer")],
+        start_ordinal=cutoff,
+        history_base=history_base,
+    )
+    current = sessions / "rollout-2026-10-02T10-30-00-019f7777-0001-7000-8000-000000000023.jsonl"
+    _write_codex_turns(
+        current,
+        child_id,
+        [("child question", "child answer")],
+        start_ordinal=cutoff,
+        history_base=history_base,
+    )
+    write_codex_thread_store(
+        private_home,
+        [CodexThreadRow(child_id, "Private fork", "child question", current, archived=True)],
+    )
+
+    imported = load_codex_session(child_id)
+
+    assert _codex_item_texts(imported) == [
+        "parent question",
+        "parent answer",
+        "child question",
+        "child answer",
+    ]
+    assert imported.native_title == "Private fork"
+    assert imported.archived is True
 
 
 def test_codex_explicit_home_does_not_expand_to_private_storage(

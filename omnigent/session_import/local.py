@@ -19,7 +19,6 @@ from omnigent.harnesses.claude_native.bridge import (
     read_transcript_items_from_offset,
 )
 from omnigent.harnesses.codex_native.bridge import bridge_root
-from omnigent.harnesses.codex_native.main import _CODEX_THREAD_ID_RE
 from omnigent.harnesses.kimi_native.credentials import resolve_user_kimi_home
 from omnigent.harnesses.kimi_native.forwarder import (
     read_kimi_wire_items,
@@ -137,14 +136,6 @@ def _is_safe_pi_import_session_id(session_id: str) -> bool:
     return (
         len(session_id) <= _MAX_EXTERNAL_SESSION_ID_LENGTH
         and _PI_IMPORT_SESSION_ID_RE.fullmatch(session_id) is not None
-    )
-
-
-def _is_codex_thread_id(value: str) -> bool:
-    """Match Codex's uuid thread ids within the import API's identity limit."""
-    return (
-        len(value) <= _MAX_EXTERNAL_SESSION_ID_LENGTH
-        and _CODEX_THREAD_ID_RE.fullmatch(value) is not None
     )
 
 
@@ -712,25 +703,20 @@ def _codex_rollout_ids(path: Path) -> tuple[str, str] | None:
 
 
 def _find_codex_rollout_file(home: Path, codex_id: str, *, by_rollout_id: bool) -> Path | None:
-    """Newest active or archived rollout whose filename carries ``codex_id``."""
-    if not _is_codex_thread_id(codex_id):
-        return None
+    """Newest rollout in ``home`` whose filename carries ``codex_id``, as discovery lists them."""
     selected: Path | None = None
     selected_mtime = 0.0
-    for root in (home / "sessions", home / "archived_sessions"):
-        if not root.is_dir():
+    for path in _codex_rollout_paths(home):
+        ids = _codex_rollout_ids(path)
+        if ids is None or ids[1 if by_rollout_id else 0] != codex_id:
             continue
-        for path in root.glob(f"**/rollout-*{codex_id}*.jsonl"):
-            ids = _codex_rollout_ids(path)
-            if ids is None or ids[1 if by_rollout_id else 0] != codex_id or not path.is_file():
-                continue
-            try:
-                modified_at = path.stat().st_mtime
-            except OSError:
-                continue
-            if selected is None or modified_at > selected_mtime:
-                selected = path
-                selected_mtime = modified_at
+        try:
+            modified_at = path.stat().st_mtime
+        except OSError:
+            continue
+        if selected is None or modified_at > selected_mtime:
+            selected = path
+            selected_mtime = modified_at
     return selected
 
 
@@ -767,7 +753,10 @@ def _codex_state_db_version(path: Path) -> int:
 
 
 def _codex_thread_row(home: Path, session_id: str) -> dict[str, object] | None:
-    """Thread row from the newest ``state_<n>.sqlite``; its columns vary by Codex version."""
+    """Thread row from the newest ``state_<n>.sqlite``; its columns vary by Codex version.
+
+    An unreadable store yields no row rather than an older store's stale one.
+    """
     dbs = sorted(home.glob("state_*.sqlite"), key=_codex_state_db_version, reverse=True)
     for db in dbs:
         try:
@@ -779,7 +768,7 @@ def _codex_thread_row(home: Path, session_id: str) -> dict[str, object] | None:
             finally:
                 con.close()
         except sqlite3.Error:
-            continue
+            return None
         if row is not None:
             return dict(row)
     return None
@@ -807,13 +796,14 @@ def _codex_native_title(
 
 
 def _codex_recorded_rollout(home: Path, thread_row: dict[str, object] | None) -> Path | None:
-    """Return the rollout file the thread store names for a thread, if it exists."""
+    """Return the rollout the thread store names, if it is a file under this home's rollouts."""
     recorded = thread_row.get("rollout_path") if thread_row else None
     if not isinstance(recorded, str) or not recorded.strip():
         return None
-    path = Path(recorded.strip()).expanduser()
-    if not path.is_absolute():
-        path = home / path
+    path = (home / Path(recorded.strip()).expanduser()).resolve()
+    roots = ((home / "sessions").resolve(), (home / "archived_sessions").resolve())
+    if not any(root in path.parents for root in roots):
+        return None
     return path if path.suffix == ".jsonl" and path.is_file() else None
 
 
@@ -883,13 +873,23 @@ def _codex_record_ordinal(record: dict[str, object], position: int) -> int:
     return position
 
 
+def _codex_base_rollout(homes: Sequence[Path], rollout_id: str) -> Path | None:
+    """Return a fork base's rollout from the first home, in order, that holds it."""
+    for home in homes:
+        path = _find_codex_rollout_file(home, rollout_id, by_rollout_id=True)
+        if path is not None:
+            return path
+    return None
+
+
 def _codex_inherited_records(
-    home: Path, meta: dict[str, object], *, seen: set[str], limit: int | None = None
+    homes: Sequence[Path], meta: dict[str, object], *, seen: set[str], limit: int | None = None
 ) -> Iterator[dict[str, object]]:
     """Yield the records a rollout inherits through ``history_base``, oldest first.
 
     ``history_base.thread_id`` names the base *rollout*, whose id differs from its thread id
     after a revert. ``seen`` holds rollout ids; ``limit`` caps nested cutoffs at the outer one.
+    Bases are looked up in ``homes`` in order, so the fork's own home goes first.
     """
     base = meta.get("history_base")
     if not isinstance(base, dict):
@@ -907,7 +907,7 @@ def _codex_inherited_records(
     if limit is not None:
         end = min(end, limit)
     seen.add(base_id)
-    base_path = _find_codex_rollout_file(home, base_id, by_rollout_id=True)
+    base_path = _codex_base_rollout(homes, base_id)
     if base_path is None:
         return
     records = _codex_rollout_records(base_path)
@@ -916,7 +916,7 @@ def _codex_inherited_records(
         return
     if first.get("type") == "session_meta":
         yield from _codex_inherited_records(
-            home, cast(dict[str, object], first["payload"]), seen=seen, limit=end
+            homes, cast(dict[str, object], first["payload"]), seen=seen, limit=end
         )
     for position, record in enumerate(chain([first], records)):
         # Paginated rollouts append records in ordinal order.
@@ -1008,7 +1008,8 @@ def load_codex_session(
     codex_home: Path | None = None,
 ) -> LocalSessionImport:
     """Load one Codex thread: thread-store rollout, inherited fork history, compaction items."""
-    selected = _codex_thread_location(_codex_storage_homes(codex_home), session_id)
+    homes = _codex_storage_homes(codex_home)
+    selected = _codex_thread_location(homes, session_id)
     if selected is None:
         raise SessionImportNotFoundError(f"Codex session {session_id!r} was not found")
     rollout_path, home, thread_row = selected
@@ -1022,7 +1023,9 @@ def load_codex_session(
     )
     own_ids = _codex_rollout_ids(rollout_path)
     inherited = _codex_inherited_records(
-        home, meta, seen={own_ids[1] if own_ids is not None else session_id}
+        _unique_paths((home, *homes)),
+        meta,
+        seen={own_ids[1] if own_ids is not None else session_id},
     )
     items, workspace = _codex_items_from_records(
         chain(inherited, [] if first is None else [first], own_records)
