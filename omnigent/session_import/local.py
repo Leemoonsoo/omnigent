@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -33,12 +34,16 @@ from omnigent.harnesses.opencode_native.app_server import (
     find_opencode_cli,
 )
 from omnigent.harnesses.opencode_native.forwarder import opencode_tool_output_text
+from omnigent.host.frames import IMPORT_SESSION_MAX_REASSEMBLED_CHARS
 from omnigent.session_import.models import (
     MAX_IMPORT_ITEMS,
     ImportSource,
     LocalSessionImport,
     SessionImportNotFoundError,
+    import_item_payload,
 )
+
+_logger = logging.getLogger(__name__)
 
 _PI_IMPORT_SESSION_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 _OPENCODE_IMPORT_SESSION_ID_RE = re.compile(r"ses_[A-Za-z0-9_-]+")
@@ -46,9 +51,8 @@ _MAX_EXTERNAL_SESSION_ID_LENGTH = 128
 _MAX_RESPONSE_ID_LENGTH = 64
 _OPENCODE_COMMAND_TIMEOUT_SECONDS = 120
 
-# Claude transcript byte size past which an import keeps only the last compaction
-# summary onward; Codex does not use this byte-size trim (each ``compacted`` record
-# becomes a compaction item). See docs/session-compaction.md.
+# Claude transcript size above which import keeps only the last compaction onward.
+# See docs/session-compaction.md.
 _IMPORT_COMPACT_TRIM_BYTES = 2 * 1024 * 1024
 
 
@@ -772,7 +776,8 @@ def _codex_thread_row(home: Path, session_id: str) -> dict[str, object] | None:
                 row = con.execute("SELECT * FROM threads WHERE id = ?", (session_id,)).fetchone()
             finally:
                 con.close()
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            _logger.warning("Codex thread store %s could not be read: %s", db, exc)
             return None
         if row is not None:
             return dict(row)
@@ -819,19 +824,18 @@ def _codex_recorded_rollout(home: Path, thread_row: dict[str, object] | None) ->
 def _codex_thread_location(
     homes: Sequence[Path], session_id: str, rollouts: Sequence[_CodexRolloutFile]
 ) -> tuple[Path, Path, dict[str, object] | None] | None:
-    """Return a thread's newest rollout across Codex homes, with its home and thread row.
+    """Resolve the thread's newest rollout across Codex homes, preferring ``threads.rollout_path``.
 
-    Within a home, the thread store's ``rollout_path`` wins over the filename match.
-    Thread stores are read in the first home and in each home holding a rollout named
-    for the thread; a later home whose only rollout has another name is not searched.
+    Returns that rollout, its home, and the home's thread row.
     """
-    named = [rollout for rollout in rollouts if rollout.thread_id == session_id]
     selected: tuple[Path, Path, dict[str, object] | None] | None = None
     selected_mtime = 0.0
-    for home in _unique_paths((*homes[:1], *(rollout.home for rollout in named))):
+    for home in homes:
         thread_row = _codex_thread_row(home, session_id)
         rollout_path = _codex_recorded_rollout(home, thread_row) or _newest_codex_rollout(
-            rollout.path for rollout in named if rollout.home == home
+            rollout.path
+            for rollout in rollouts
+            if rollout.home == home and rollout.thread_id == session_id
         )
         if rollout_path is None:
             continue
@@ -908,11 +912,10 @@ def _codex_inherited_records(
     *,
     seen: set[str],
 ) -> Iterator[dict[str, object]]:
-    """Yield the records a rollout inherits through ``history_base``, oldest first.
+    """Yield inherited rollout records oldest first; each cutoff is capped by its descendant's.
 
-    ``history_base.thread_id`` names the base *rollout*, whose id differs from its thread id
-    after a revert. ``seen`` holds rollout ids, and each cutoff is capped at the one below it.
-    Bases are looked up in ``homes`` in order, so the fork's own home goes first.
+    ``history_base.thread_id`` names the base rollout, and ``seen`` holds rollout ids so a
+    cycle stops. Bases are looked up in ``homes`` in order, the fork's own home first.
     """
     # (base rollout, cutoff, ordinal of its first record), nearest base first.
     lineage: list[tuple[Path, int, int]] = []
@@ -997,16 +1000,29 @@ def _codex_items_from_records(
     return items, workspace
 
 
+# Session JSON the server reassembles for one import, less room for its fields besides items.
+_MAX_IMPORT_ITEMS_JSON_CHARS = IMPORT_SESSION_MAX_REASSEMBLED_CHARS - 64 * 1024
+
+
+def _import_items_json_chars(items: Sequence[NewConversationItem]) -> int:
+    """Length of the items' JSON array as sent, without building the whole string."""
+    sizes = [len(json.dumps(import_item_payload(item))) for item in items]
+    return 2 + sum(sizes) + 2 * max(len(sizes) - 1, 0)
+
+
 def _codex_items_within_import_cap(
     items: list[NewConversationItem],
 ) -> list[NewConversationItem]:
-    """Trim an import above ``MAX_IMPORT_ITEMS`` to its last compaction onward.
+    """Trim an import too large to send whole to its last compaction onward.
 
-    Up to the cap the whole history imports. Past it the import API would reject
-    the session, so keep the last compaction item and everything after it, the
+    Within ``MAX_IMPORT_ITEMS`` items and the server's session-size cap, the whole history
+    imports. Past either, keep the last compaction item and everything after it, the
     context a cold resume rebuilds from. Without a compaction, nothing is trimmed.
     """
-    if len(items) <= MAX_IMPORT_ITEMS:
+    if (
+        len(items) <= MAX_IMPORT_ITEMS
+        and _import_items_json_chars(items) <= _MAX_IMPORT_ITEMS_JSON_CHARS
+    ):
         return items
     compactions = [index for index, item in enumerate(items) if item.type == "compaction"]
     return items[compactions[-1] :] if compactions else items

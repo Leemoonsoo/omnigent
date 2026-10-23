@@ -6975,6 +6975,7 @@ def import_session_command(
     from omnigent.session_import import (
         ImportSource,
         SessionImportNotFoundError,
+        import_item_payload,
     )
     from omnigent.session_import.local import (
         list_recent_local_session_ids,
@@ -7049,14 +7050,7 @@ def import_session_command(
             "title": imported.native_title,
             "archived": imported.archived,
             "force": force,
-            "items": [
-                {
-                    "type": item.type,
-                    "response_id": item.response_id,
-                    "data": item.data.model_dump(mode="json", exclude_none=True),
-                }
-                for item in imported.items
-            ],
+            "items": [import_item_payload(item) for item in imported.items],
         }
         if host_identity is not None:
             payload["host_id"] = host_identity.host_id

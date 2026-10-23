@@ -59,11 +59,19 @@ from the last compaction item and so starts with the same context Codex itself
 would hold. A `compacted` record with no usable `replacement_history` is
 skipped.
 
+The loader reads the rollout the thread store names (`threads.rollout_path`),
+else the newest rollout named for the thread, and first adds the history a fork
+or a reverted thread inherits through its `history_base`. The server points
+each imported compaction's `last_item_id` at the item stored just before it, or
+at the compaction itself when it comes first, so the runtime history loader
+starts after it.
+
 The import API caps a session at 100,000 normalized items (`MAX_IMPORT_ITEMS` in
-`omnigent/session_import/models.py`). A Codex thread whose full history exceeds
-the cap is trimmed to its last compaction item and everything after it. A thread
-with no compaction stays whole, and a trimmed suffix still over the cap is not
-cut further, so the API rejects either one.
+`omnigent/session_import/models.py`), and the server reassembles at most
+512 Mi characters of JSON for one session from a host. A Codex thread whose
+full history exceeds either cap is trimmed to its last compaction item and
+everything after it. A thread with no compaction stays whole, and a trimmed
+suffix still over a cap is not cut further, so its import fails.
 
 A thread Codex archived (`threads.archived`, or a rollout under
 `archived_sessions/`) imports as an archived session, archived at the import

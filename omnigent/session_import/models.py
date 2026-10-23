@@ -15,6 +15,16 @@ ImportSource = Literal["claude", "codex", "kimi", "kiro", "opencode", "pi", "qwe
 # session; the Codex loader may first trim it to its last compaction.
 MAX_IMPORT_ITEMS = 100_000
 
+
+def import_item_payload(item: NewConversationItem) -> dict[str, object]:
+    """Serialize one imported item as the import API and host frames carry it."""
+    return {
+        "type": item.type,
+        "response_id": item.response_id,
+        "data": item.data.model_dump(mode="json", exclude_none=True),
+    }
+
+
 IMPORT_SOURCE_LABEL_KEY = "omnigent.import.source"
 IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY = "omnigent.import.external_session_id"
 IMPORT_PROVENANCE_LABEL_KEYS = frozenset(

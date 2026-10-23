@@ -171,9 +171,7 @@ _SEARCH_STATEMENT_TIMEOUT_MS = 15_000
 # single statement it always was.
 _LIST_ITEMS_MAX_ROWS_PER_STATEMENT = 200
 
-# Stable ids per statement in ``append``'s idempotency probe: each is a bind
-# parameter, and an import can carry more than one statement may bind (SQLite
-# 32,766; PostgreSQL 65,535). Each can match a full row, so use the read bound.
+# Max stable ids bound per idempotency-probe statement; each can match a full row.
 _APPEND_STABLE_ID_PROBE_BATCH = _LIST_ITEMS_MAX_ROWS_PER_STATEMENT
 
 # How many co-located sessions ``has_other_live_session_in_workspace`` will

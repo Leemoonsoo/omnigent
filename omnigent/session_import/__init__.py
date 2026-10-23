@@ -8,6 +8,7 @@ from omnigent.session_import.models import (
     ImportSource,
     LocalSessionImport,
     SessionImportNotFoundError,
+    import_item_payload,
     title_from_items,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "ImportSource",
     "LocalSessionImport",
     "SessionImportNotFoundError",
+    "import_item_payload",
     "title_from_items",
 ]

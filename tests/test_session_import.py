@@ -1269,19 +1269,33 @@ def test_load_codex_session_keeps_full_history_past_two_mb(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    ("cap", "compacted", "trimmed"),
-    [(5, True, False), (4, True, True), (2, True, True), (2, False, False)],
-    ids=["at-cap", "over-cap", "suffix-over-cap", "over-cap-without-compaction"],
+    ("cap", "json_chars_cap", "compacted", "trimmed"),
+    [
+        (5, None, True, False),
+        (4, None, True, True),
+        (2, None, True, True),
+        (2, None, False, False),
+        (5, 400, True, True),
+    ],
+    ids=["at-cap", "over-cap", "suffix-over-cap", "over-cap-without-compaction", "over-size-cap"],
 )
 def test_load_codex_session_trims_to_the_last_compaction_only_above_the_item_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap: int, compacted: bool, trimmed: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cap: int,
+    json_chars_cap: int | None,
+    compacted: bool,
+    trimmed: bool,
 ) -> None:
-    """Up to the item cap the whole history imports; past it, the last compaction onward.
+    """Within the item and size caps the whole history imports; past either, the last
+    compaction onward.
 
-    A suffix still over the cap is not cut further, and a thread with no compaction
-    stays whole, so the API rejects either one.
+    A suffix still over a cap is not cut further, and a thread with no compaction
+    stays whole, so the import fails for either one.
     """
     monkeypatch.setattr(local_import, "MAX_IMPORT_ITEMS", cap)
+    if json_chars_cap is not None:
+        monkeypatch.setattr(local_import, "_MAX_IMPORT_ITEMS_JSON_CHARS", json_chars_cap)
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     post = ["post compaction question", "post compaction answer"]
     pre = ["pre compaction question", "pre compaction answer"]
@@ -1532,13 +1546,16 @@ def test_load_codex_session_falls_back_to_filename_when_rollout_path_is_stale(
     assert imported.archived is (newer == "archived")
 
 
-@pytest.mark.parametrize("recorded", ["absolute-outside", "relative-escape", "not-jsonl"])
+@pytest.mark.parametrize(
+    "recorded", ["absolute-outside", "relative-escape", "not-jsonl", "relative-inside"]
+)
 def test_load_codex_session_ignores_a_rollout_path_outside_the_rollout_directories(
     tmp_path: Path, recorded: str
 ) -> None:
     """Only a ``.jsonl`` under ``sessions/`` or ``archived_sessions/`` can be a recorded rollout.
 
-    Any other ``rollout_path`` falls back to the filename match inside the home.
+    A relative path inside them resolves against the home; any other ``rollout_path``
+    falls back to the filename match inside the home.
     """
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     home = tmp_path / "codex"
@@ -1552,10 +1569,14 @@ def test_load_codex_session_ignores_a_rollout_path_outside_the_rollout_directori
     _write_codex_turns(outside, session_id, [("outside question", "outside answer")])
     not_jsonl = home / "sessions" / "notes.txt"
     _write_codex_turns(not_jsonl, session_id, [("notes question", "notes answer")])
+    current_name = "rollout-x-019f680e-3edc-7fa3-9d50-1c4be395fa27.jsonl"
+    current = Path("sessions") / "2026" / "10" / "02" / current_name
+    _write_codex_turns(home / current, session_id, [("recorded question", "recorded answer")])
     rollout_path = {
         "absolute-outside": outside,
         "relative-escape": Path("sessions") / ".." / ".." / "elsewhere" / name,
         "not-jsonl": not_jsonl,
+        "relative-inside": current,
     }[recorded]
     _write_codex_threads_db(
         home,
@@ -1567,7 +1588,8 @@ def test_load_codex_session_ignores_a_rollout_path_outside_the_rollout_directori
 
     imported = load_codex_session(session_id, codex_home=home)
 
-    assert _codex_item_texts(imported) == ["inside question", "inside answer"]
+    used = "recorded" if recorded == "relative-inside" else "inside"
+    assert _codex_item_texts(imported) == [f"{used} question", f"{used} answer"]
 
 
 @pytest.mark.parametrize(
@@ -1580,7 +1602,11 @@ def test_load_codex_session_ignores_a_rollout_path_outside_the_rollout_directori
     ],
 )
 def test_load_codex_session_reads_an_older_store_only_for_a_thread_the_newest_lacks(
-    tmp_path: Path, newest_store: str, title: str | None, archived: bool
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    newest_store: str,
+    title: str | None,
+    archived: bool,
 ) -> None:
     """An older ``state_<n>.sqlite`` answers only when the newest is readable and lacks the row.
 
@@ -1613,11 +1639,14 @@ def test_load_codex_session_reads_an_older_store_only_for_a_thread_the_newest_la
         con.commit()
         con.close()
 
-    imported = load_codex_session(session_id, codex_home=tmp_path)
+    with caplog.at_level("WARNING", logger=local_import.__name__):
+        imported = load_codex_session(session_id, codex_home=tmp_path)
 
     assert _codex_item_texts(imported) == ["current question"]
     assert imported.native_title == title
     assert imported.archived is archived
+    unreadable = newest_store in ("corrupt", "no-threads-table")
+    assert ("could not be read" in caplog.text) is unreadable
 
 
 def test_load_codex_session_follows_a_symlinked_sessions_root(tmp_path: Path) -> None:
@@ -2254,14 +2283,17 @@ def test_codex_discovery_includes_configured_and_private_homes(
     assert _codex_item_texts(scoped_duplicate) == ["private older"]
 
 
+@pytest.mark.parametrize("named_rollout", [True, False], ids=["named-rollout", "store-only"])
 def test_load_codex_session_reads_a_private_fork_whose_base_is_in_another_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    named_rollout: bool,
 ) -> None:
     """A thread in a later Codex home uses that home's thread store; its base can be elsewhere.
 
     The store's ``rollout_path``, title, and archive flag come from the home holding the
-    thread, and the fork base resolves from ``~/.codex``.
+    thread, even with no rollout there named for it, and the fork base resolves from
+    ``~/.codex``.
     """
     home = tmp_path / "home"
     bridge_root = tmp_path / "bridge-root"
@@ -2280,13 +2312,14 @@ def test_load_codex_session_reads_a_private_fork_whose_base_is_in_another_home(
     )
     sessions = private_home / "sessions" / "2026" / "10" / "02"
     history_base = {"thread_id": parent_id, "end_ordinal_exclusive": cutoff}
-    _write_codex_turns(
-        sessions / f"rollout-2026-10-02T10-00-00-{child_id}.jsonl",
-        child_id,
-        [("older child question", "older child answer")],
-        start_ordinal=cutoff,
-        history_base=history_base,
-    )
+    if named_rollout:
+        _write_codex_turns(
+            sessions / f"rollout-2026-10-02T10-00-00-{child_id}.jsonl",
+            child_id,
+            [("older child question", "older child answer")],
+            start_ordinal=cutoff,
+            history_base=history_base,
+        )
     current = sessions / "rollout-2026-10-02T10-30-00-019f7777-0001-7000-8000-000000000023.jsonl"
     _write_codex_turns(
         current,
