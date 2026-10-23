@@ -303,26 +303,6 @@ def test_terminal_writer_stops_writing_after_a_terminal_error(
     assert "✓" not in caplog.text  # the rejected text stays out of the log file
 
 
-def test_terminal_writer_drops_a_chunk_when_a_non_blocking_terminal_is_full() -> None:
-    """``EAGAIN`` from a terminal set non-blocking drops that chunk, not all later output."""
-    terminal = _FakeTerminal(fail_with=BlockingIOError(11, "Resource temporarily unavailable"))
-    writer = TerminalWriter(terminal)
-    writer.write("dropped\n")
-    deadline = time.monotonic() + 5
-    while not writer.drain(0.01) and writer._chunks:
-        assert time.monotonic() < deadline, "the refused chunk was never dropped"
-    terminal.fail_with = None
-
-    writer.write("shown\n")
-    assert writer.drain(5)
-
-    assert writer.writable()
-    assert terminal.getvalue() == (
-        "[omnigent] 1 line was not shown because this terminal stopped reading output; "
-        "any log lines among them are in the log file.\nshown\n"
-    )
-
-
 def test_terminal_writer_stops_when_it_cannot_reopen_after_fork() -> None:
     """A forked child that can't get its own fd must not write to the inherited stream."""
     writer = TerminalWriter(_FakeTerminal())  # no fileno() to duplicate
@@ -494,10 +474,12 @@ def test_nonblocking_terminal_stdio_routes_handlers_that_already_write_to_the_te
     monkeypatch.setenv(LOG_TTY_FD_ENV_VAR, str(write_fd))
     stderr_handler = logging.StreamHandler(sys.stderr)
     mirror = terminal_stream_handler()  # synchronous: opened before the opt-in
+    other_mirror = terminal_stream_handler()  # a second one, on its own dup of the same fd
     assert isinstance(mirror, logging.StreamHandler)
-    mirror_stream = mirror.stream
+    assert isinstance(other_mirror, logging.StreamHandler)
+    mirror_stream, other_mirror_stream = mirror.stream, other_mirror.stream
     log_file = logging.FileHandler(os.devnull)
-    handlers: list[logging.Handler] = [stderr_handler, mirror, log_file]
+    handlers: list[logging.Handler] = [stderr_handler, mirror, other_mirror, log_file]
     for handler in handlers:
         logger.addHandler(handler)
     restore = nonblocking_terminal_stdio()
@@ -506,6 +488,7 @@ def test_nonblocking_terminal_stdio_routes_handlers_that_already_write_to_the_te
         assert isinstance(sys.stderr, TerminalWriter)
         writer = mirror.stream
         assert isinstance(writer, TerminalWriter)
+        assert other_mirror.stream is writer
         assert not isinstance(log_file.stream, TerminalWriter)
         # A mirror opened later for the same file shares the existing mirror's writer.
         later = terminal_stream_handler()
@@ -532,6 +515,7 @@ def test_nonblocking_terminal_stdio_routes_handlers_that_already_write_to_the_te
         assert sys.stderr is terminal
         assert stderr_handler.stream is terminal
         assert mirror.stream is mirror_stream
+        assert other_mirror.stream is other_mirror_stream
         assert not isinstance(later.stream, TerminalWriter)
         assert process_logging._threaded_terminal_mirrors == 0
         restore()

@@ -446,7 +446,7 @@ def process_log_reference(destination: str) -> str:
 _TERMINAL_BACKLOG_CHARS = 1 << 20
 #: Text without a newline is queued once it reaches this many characters.
 _TERMINAL_PARTIAL_LINE_CHARS = 8192
-#: How long a restore, and then the exit-time drain, each wait in total for terminal output.
+#: Total timeout for a restore, and again for the exit-time drain.
 _TERMINAL_EXIT_DRAIN_S = 1.0
 
 
@@ -595,16 +595,6 @@ class TerminalWriter:
             try:
                 self._stream.write(chunk)
                 self._stream.flush()
-            except (BlockingIOError, InterruptedError):
-                # E.g. a child sharing the terminal made it non-blocking, and it is full:
-                # drop this chunk as if the terminal had stalled, rather than stop.
-                with self._condition:
-                    self._writing = False
-                    self._queued_chars = max(0, self._queued_chars - len(chunk))
-                    self._dropped_lines += max(1, chunk.count("\n"))
-                    self._condition.notify_all()
-                time.sleep(0.05)
-                continue
             except Exception as exc:  # noqa: BLE001 — any write error ends the mirror, never the caller
                 # The terminal hung up, the stream closed, or it can't encode the text.
                 with self._condition:
@@ -754,7 +744,7 @@ def _reset_terminal_writers_after_fork() -> None:
         writer._reopen_after_fork()
 
 
-# No host path forks while writers are live today; this keeps a future fork from deadlocking.
+# Reset inherited writers so a forked child cannot deadlock; no host path forks this way yet.
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_terminal_writers_after_fork)
 
@@ -783,6 +773,7 @@ def drain_terminal_output(timeout: float | None = None) -> bool:
     return _drain_terminal_writers(waiting, wait_s) and len(waiting) == len(writers)
 
 
+# Runs before atexit callbacks registered earlier, so output they queue is not drained.
 atexit.register(drain_terminal_output)
 
 
@@ -817,10 +808,14 @@ def nonblocking_terminal_stdio() -> Callable[[], None]:
         if isinstance(writer, TerminalWriter)
     }
     for handler in _terminal_stream_handlers():
+        if isinstance(handler.stream, TerminalWriter):
+            continue  # an outer install already moved it
         writer = writers_by_stream.get(id(handler.stream))
         if writer is None and getattr(handler, "_omnigent_process_log_stderr", False):
             writer = _existing_mirror_writer(handler.stream)
         if writer is not None:
+            # Two mirrors of one file share a writer, so remember each one's own stream.
+            handler.__dict__["_omnigent_stream_before_writer"] = handler.stream
             _swap_handler_stream(handler, cast(TextIO, writer))
     restored = False
 
@@ -829,7 +824,7 @@ def nonblocking_terminal_stdio() -> Callable[[], None]:
         global _threaded_terminal_mirrors
         if restored:
             return
-        # Every writer, mirrors' too: one blocked mid-write holds its stream's lock.
+        # Drain every writer first; one blocked mid-write holds its stream's lock.
         with _live_terminal_writers_lock:
             writers = list(_live_terminal_writers)
         if not _drain_terminal_writers(writers, _TERMINAL_EXIT_DRAIN_S):
@@ -844,7 +839,8 @@ def nonblocking_terminal_stdio() -> Callable[[], None]:
         if not _threaded_terminal_mirrors:
             for handler in _terminal_stream_handlers():
                 if isinstance(handler.stream, TerminalWriter):
-                    _swap_handler_stream(handler, handler.stream._stream)
+                    original = handler.__dict__.pop("_omnigent_stream_before_writer", None)
+                    _swap_handler_stream(handler, original or handler.stream._stream)
 
     return restore
 
