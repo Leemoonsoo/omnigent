@@ -8747,7 +8747,7 @@ async def test_handle_import_local_all_streams_a_frame_per_session(
             items=[item],
             title=f"{source} title",
             source=source,
-            archived=False,
+            archived=source == "codex",
         )
 
     monkeypatch.setattr(
@@ -8770,10 +8770,11 @@ async def test_handle_import_local_all_streams_a_frame_per_session(
     session_frames = [f for f in frames if isinstance(f, HostImportLocalSessionFrame)]
     done_frames = [f for f in frames if isinstance(f, HostImportLocalDoneFrame)]
 
-    # One frame per session, each tagged with its own source + title + the total.
+    # One frame per session, each tagged with its own source, title, archive state and the total.
     assert {
-        (f.session.external_session_id, f.session.source, f.session.title) for f in session_frames
-    } == {("c1", "claude", "claude title"), ("x1", "codex", "codex title")}
+        (f.session.external_session_id, f.session.source, f.session.title, f.session.archived)
+        for f in session_frames
+    } == {("c1", "claude", "claude title", False), ("x1", "codex", "codex title", True)}
     assert all(f.total == 2 for f in session_frames)
     assert len(done_frames) == 1 and done_frames[0].status == "ok"
 

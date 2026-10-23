@@ -2570,11 +2570,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             # SQLite the database-level lock already serializes.
             self._lock_conversation(session, conversation_id)
 
-            # Idempotent-append probe, in batches of _APPEND_STABLE_ID_PROBE_BATCH
-            # ids. Rows already persisted under a stable id ARE those items'
-            # append result; running under the lock just taken serializes with
-            # a concurrent retry (READ COMMITTED gives each statement a fresh
-            # snapshot after the lock wait), so it cannot double-insert.
+            # Idempotent-append probe: rows already stored under a stable id are
+            # those items' result. Each id is a bind parameter, so probe in bounded
+            # batches; the lock just taken serializes concurrent retries.
             stable_ids = list(
                 dict.fromkeys(item.stable_id for item in items if item.stable_id is not None)
             )

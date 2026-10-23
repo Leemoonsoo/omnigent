@@ -60,7 +60,9 @@ skipped.
 
 The import API caps a session at 100,000 normalized items (`MAX_IMPORT_ITEMS` in
 `omnigent/session_import/models.py`). A Codex thread whose full history exceeds
-the cap is trimmed to its last compaction item and everything after it, the
-range Codex imports kept above 2 MB before they imported full history. A thread
+the cap is trimmed to its last compaction item and everything after it. A thread
 with no compaction stays whole, and a trimmed suffix still over the cap is not
 cut further, so the API rejects either one.
+
+A thread Codex archived (`threads.archived`, or a rollout under
+`archived_sessions/`) imports as an archived session.

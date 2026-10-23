@@ -1253,16 +1253,20 @@ async def test_local_import_archives_sessions_the_harness_had_archived(
     assert ARCHIVED_AT_LABEL_KEY not in active.labels
 
 
+@pytest.mark.parametrize("force", [False, True], ids=["first-import", "force-replace"])
 async def test_import_session_archives_when_requested(
     client: httpx.AsyncClient,
     db_uri: str,
+    force: bool,
 ) -> None:
-    """The CLI's ``archived`` flag files the imported session under Archived sessions."""
+    """The CLI's ``archived`` flag files the imported session under Archived sessions.
+
+    A forced re-import of an active copy replaces it with an archived one.
+    """
     _seed_claude_agent(db_uri)
-    payload = {
+    payload: dict[str, object] = {
         "source": "claude",
         "external_session_id": "claude-archived-1",
-        "archived": True,
         "items": [
             {
                 "type": "message",
@@ -1274,10 +1278,15 @@ async def test_import_session_archives_when_requested(
             }
         ],
     }
+    if force:
+        active = await client.post("/v1/imports", json=payload)
+        assert active.status_code == 201
 
-    created = await client.post("/v1/imports", json=payload)
+    created = await client.post("/v1/imports", json={**payload, "archived": True, "force": force})
 
     assert created.status_code == 201
+    if force:
+        assert created.json()["session_id"] == active.json()["session_id"]
     conversation = SqlAlchemyConversationStore(db_uri).get_conversation(
         created.json()["session_id"]
     )
@@ -1287,8 +1296,8 @@ async def test_import_session_archives_when_requested(
 
 @pytest.mark.parametrize(
     "before",
-    [["turn"], [], ["turn", "compaction"]],
-    ids=["after-a-turn", "leading", "adjacent-compactions"],
+    [["turn"], [], ["turn", "compaction"], ["compaction"]],
+    ids=["after-a-turn", "leading", "adjacent-compactions", "after-a-leading-compaction"],
 )
 async def test_import_anchors_compactions_to_the_item_before_them(
     client: httpx.AsyncClient,
@@ -1298,7 +1307,8 @@ async def test_import_anchors_compactions_to_the_item_before_them(
     """An imported compaction's cursor names a stored item, so history loads from it.
 
     A compaction imported first names itself, since nothing is stored before it, and
-    one right after another compaction names that compaction.
+    one right after another compaction names that compaction, reusing its id when the
+    earlier one already named itself.
     """
     from omnigent.runtime.workflow import _load_initial_history
 
