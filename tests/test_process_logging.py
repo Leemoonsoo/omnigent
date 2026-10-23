@@ -104,25 +104,33 @@ def test_terminal_stream_handler_writes_to_explicit_log_fd(
                 os.close(fd)
 
 
-_LOG_THEN_HARD_EXIT = """
-import logging, os
-from omnigent.process_logging import terminal_stream_handler
+_LOG_THEN_EXIT = """
+import logging, os, sys
+from omnigent.process_logging import nonblocking_terminal_stdio, terminal_stream_handler
 
+if OPT_IN:
+    nonblocking_terminal_stdio()
 handler = terminal_stream_handler()
 handler.setFormatter(logging.Formatter("%(message)s"))
 for index in range(200):
     handler.handle(logging.makeLogRecord({"msg": "line %d", "args": (index,)}))
-os._exit(0)
+EXIT_CALL
 """
 
 
 @pytest.mark.skipif(not IS_POSIX, reason="fd-based terminal mirroring is POSIX-only")
-def test_terminal_mirror_keeps_lines_logged_just_before_os_exit() -> None:
-    """Outside the host's opt-in the mirror writes synchronously, so ``os._exit`` loses nothing."""
+@pytest.mark.parametrize(
+    ("opt_in", "exit_call"),
+    [(False, "os._exit(0)"), (True, "sys.exit(0)")],
+    ids=["synchronous-then-os-exit", "threaded-then-normal-exit"],
+)
+def test_terminal_mirror_keeps_lines_logged_just_before_exit(opt_in: bool, exit_call: str) -> None:
+    """Outside the opt-in ``os._exit`` loses nothing; inside it the exit drain writes the rest."""
+    script = textwrap.dedent(_LOG_THEN_EXIT).replace("OPT_IN", str(opt_in))
     read_fd, write_fd = os.pipe()
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(_LOG_THEN_HARD_EXIT)],
+            [sys.executable, "-c", script.replace("EXIT_CALL", exit_call)],
             env={**os.environ, LOG_TTY_FD_ENV_VAR: str(write_fd)},
             pass_fds=(write_fd,),
             capture_output=True,
@@ -144,7 +152,7 @@ class _FakeTerminal(io.StringIO):
     def __init__(self, *, tty: bool = True, fail_with: Exception | None = None) -> None:
         super().__init__()
         self._tty = tty
-        self._fail_with = fail_with
+        self.fail_with = fail_with
         self.reading = threading.Event()
         self.reading.set()
         self.write_calls = 0
@@ -154,8 +162,8 @@ class _FakeTerminal(io.StringIO):
 
     def write(self, text: str) -> int:
         self.write_calls += 1
-        if self._fail_with is not None:
-            raise self._fail_with
+        if self.fail_with is not None:
+            raise self.fail_with
         self.reading.wait()
         return super().write(text)
 
@@ -295,6 +303,35 @@ def test_terminal_writer_stops_writing_after_a_terminal_error(
     assert "✓" not in caplog.text  # the rejected text stays out of the log file
 
 
+def test_terminal_writer_drops_a_chunk_when_a_non_blocking_terminal_is_full() -> None:
+    """``EAGAIN`` from a terminal set non-blocking drops that chunk, not all later output."""
+    terminal = _FakeTerminal(fail_with=BlockingIOError(11, "Resource temporarily unavailable"))
+    writer = TerminalWriter(terminal)
+    writer.write("dropped\n")
+    deadline = time.monotonic() + 5
+    while not writer.drain(0.01) and writer._chunks:
+        assert time.monotonic() < deadline, "the refused chunk was never dropped"
+    terminal.fail_with = None
+
+    writer.write("shown\n")
+    assert writer.drain(5)
+
+    assert writer.writable()
+    assert terminal.getvalue() == (
+        "[omnigent] 1 line was not shown because this terminal stopped reading output; "
+        "any log lines among them are in the log file.\nshown\n"
+    )
+
+
+def test_terminal_writer_stops_when_it_cannot_reopen_after_fork() -> None:
+    """A forked child that can't get its own fd must not write to the inherited stream."""
+    writer = TerminalWriter(_FakeTerminal())  # no fileno() to duplicate
+
+    writer._reopen_after_fork()
+
+    assert not writer.writable()
+
+
 def test_terminal_writer_keeps_partial_lines_until_flush() -> None:
     """Text without a newline is written once it is flushed, as ``print(..., end="")`` expects."""
     terminal = _FakeTerminal()
@@ -310,14 +347,13 @@ def test_terminal_writer_keeps_partial_lines_until_flush() -> None:
 
 
 def test_terminal_writer_drains_even_when_its_character_count_is_off() -> None:
-    """An interrupt between queueing a chunk and counting it must not make drain() hang."""
+    """An interrupt between queueing a chunk and counting or announcing it can't hang drain()."""
     terminal = _FakeTerminal()
     writer = TerminalWriter(terminal)
     writer.write("first\n")
     assert writer.drain(5)
-    with writer._condition:  # as if interrupted after the append, before the count
+    with writer._condition:  # as if interrupted after the append, before the count and notify
         writer._chunks.append("second\n")
-        writer._condition.notify_all()
 
     assert writer.drain(5)
     assert terminal.getvalue() == "first\nsecond\n"

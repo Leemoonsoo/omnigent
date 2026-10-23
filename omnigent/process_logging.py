@@ -456,7 +456,9 @@ class TerminalWriter:
     Callers never wait on a terminal that stopped reading. Past
     :data:`_TERMINAL_BACKLOG_CHARS` queued characters, new lines are dropped and
     counted. Other attributes, such as ``buffer`` and ``close``, go to the wrapped
-    stream unqueued, so they stay synchronous.
+    stream unqueued, so they stay synchronous. ``flush()`` only queues, so text
+    written to the terminal by other means, or through another writer, can
+    appear before queued text.
     """
 
     def __init__(self, stream: TextIO) -> None:
@@ -489,6 +491,8 @@ class TerminalWriter:
                 errors=self._stream.errors,
             )
         except (AttributeError, OSError, ValueError):
+            # Writing to the inherited stream could wait on that lock forever.
+            self._stream_failed = True
             return
         # Freeing the old stream would flush it, which waits on that lock.
         _streams_replaced_at_fork.append(self._stream)
@@ -525,6 +529,8 @@ class TerminalWriter:
         """
         self.flush()
         with self._condition:
+            # Wake the writer in case an interrupted queue skipped its notify.
+            self._condition.notify_all()
             # Ignore _queued_chars, which an interrupted update can leave off.
             drained = self._condition.wait_for(
                 lambda: not self._chunks and not self._writing and not self._dropped_lines,
@@ -589,6 +595,16 @@ class TerminalWriter:
             try:
                 self._stream.write(chunk)
                 self._stream.flush()
+            except (BlockingIOError, InterruptedError):
+                # E.g. a child sharing the terminal made it non-blocking, and it is full:
+                # drop this chunk as if the terminal had stalled, rather than stop.
+                with self._condition:
+                    self._writing = False
+                    self._queued_chars = max(0, self._queued_chars - len(chunk))
+                    self._dropped_lines += max(1, chunk.count("\n"))
+                    self._condition.notify_all()
+                time.sleep(0.05)
+                continue
             except Exception as exc:  # noqa: BLE001 — any write error ends the mirror, never the caller
                 # The terminal hung up, the stream closed, or it can't encode the text.
                 with self._condition:
@@ -644,6 +660,7 @@ _live_terminal_writers_lock = threading.Lock()
 # One writer per stream object or mirror-fd file, so its callers share a thread and line order.
 _shared_terminal_writers: dict[tuple[object, ...], TerminalWriter] = {}
 _shared_terminal_writers_lock = threading.Lock()
+# Kept open in a forked child, so a reader of the old fd sees EOF only when the child exits.
 _streams_replaced_at_fork: list[TextIO] = []
 
 
@@ -777,14 +794,11 @@ def _is_terminal(stream: TextIO | None) -> bool:
 
 
 def nonblocking_terminal_stdio() -> Callable[[], None]:
-    """Route terminal output through :class:`TerminalWriter` instances.
+    """Route terminal stdio and terminal log handlers through :class:`TerminalWriter`.
 
-    ``sys.stdout`` and ``sys.stderr`` are wrapped when they are terminals;
-    files and pipes are left as they are. While this is installed, terminal log
-    mirrors (``OMNIGENT_LOG_TTY_FD`` too) write through a writer, including
-    logging handlers that already write to a wrapped stream or mirror. A
-    long-running process that prints and logs from an event loop calls this so
-    a terminal that stops reading cannot stall the loop.
+    ``sys.stdout`` and ``sys.stderr`` are wrapped only when they are terminals.
+    While installed, terminal mirrors (``OMNIGENT_LOG_TTY_FD`` too) write through
+    writers, including handlers that existed before the install.
 
     :returns: A restore callable that waits briefly for queued output, leaves
         the writers in place while a terminal is stalled, and does nothing once
