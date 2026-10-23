@@ -4669,13 +4669,14 @@ describe("chatStore — first message during native model startup", () => {
     );
   });
 
-  it("waits on a sandbox launch that starts during the deadline re-read", async () => {
+  it("gives the model a fresh deadline after a launch during the deadline re-read", async () => {
     await beginInBackground();
     const snapshots = parkSnapshots();
     await vi.advanceTimersByTimeAsync(180_000);
     reportSandbox("provisioning");
+    reportSandbox("ready");
     snapshots.release();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(179_000);
 
     const state = conversationRegistry.peek(sessionId)?.getState();
     expect(eventBodies()).toEqual([]);

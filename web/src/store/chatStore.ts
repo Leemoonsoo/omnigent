@@ -1494,7 +1494,12 @@ function waitForInitialDispatch(conversationId: string, tempId: string): Promise
     // One deadline at a time: the launch's while the sandbox starts, then the model's.
     let timer: ReturnType<typeof setTimeout> | undefined;
     let deadline: "launch" | "model" | undefined;
+    // Counts armed deadlines, so a model re-read can tell whether a newer one replaced it.
+    let armedDeadlines = 0;
+    let settled = false;
     const finish = (ready: boolean, error?: Error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       unsubscribe();
       unsubscribeDisposed();
@@ -1505,6 +1510,7 @@ function waitForInitialDispatch(conversationId: string, tempId: string): Promise
       if (deadline === phase) return;
       clearTimeout(timer);
       deadline = phase;
+      const armed = ++armedDeadlines;
       timer = setTimeout(() => {
         if (phase === "launch") {
           finish(false, new Error(message));
@@ -1514,8 +1520,8 @@ function waitForInitialDispatch(conversationId: string, tempId: string): Promise
         // (a dropped stream, a sleeping laptop) would fail a ready runner's message.
         void adoptSnapshotModel(conversationId).then(() => {
           check();
-          // A launch that began during the read has its own deadline.
-          if (deadline === phase) finish(false, new Error(message));
+          // A launch during the read re-armed the deadlines; the newer one applies.
+          if (armedDeadlines === armed) finish(false, new Error(message));
         });
       }, ms);
     };
@@ -1583,6 +1589,8 @@ function snapshotModelPatch(
 
 /** Adopt the model a fresh session snapshot shows, in case this tab's stream missed it. */
 async function adoptSnapshotModel(conversationId: string): Promise<void> {
+  const entry = conversationRegistry.peek(conversationId);
+  if (entry === undefined) return;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS);
   let session: Session;
@@ -1593,7 +1601,9 @@ async function adoptSnapshotModel(conversationId: string): Promise<void> {
   } finally {
     clearTimeout(timeout);
   }
-  setterFor(conversationId)((s) => snapshotModelPatch(session, s));
+  // A conversation reopened under the same id during the read is a different entry.
+  if (entry.disposed) return;
+  entrySetter(entry)((s) => snapshotModelPatch(session, s));
 }
 
 /**
