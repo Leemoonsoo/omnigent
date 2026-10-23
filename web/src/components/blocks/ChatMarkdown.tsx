@@ -34,6 +34,7 @@ import { isRemoteVideoUrl, isVideoFile } from "@/lib/video";
 import { useThrottledValue } from "@/hooks/useThrottledValue";
 import { withBasePath } from "@/lib/basePath";
 import { copyText } from "@/lib/clipboard";
+import { absoluteWorkspacePath } from "@/lib/composerContext";
 import { followLinkWithPopupFallback } from "@/lib/openLinkInApp";
 import { cn } from "@/lib/utils";
 import {
@@ -70,11 +71,7 @@ interface WorkspaceFileOpener {
   unopenable: boolean;
   /** The path resolution produced, for feedback messaging; "" when none. */
   resolvedPath: string;
-  /**
-   * The path to put on the clipboard: host-absolute once the workspace root
-   * is known, so it still names the file when pasted into another session;
-   * otherwise the cited path as written.
-   */
+  /** Clipboard path: host-absolute when the root is known, else the cited path. */
   copyPath: string;
 }
 
@@ -104,12 +101,7 @@ function useWorkspaceFileOpener(text: string, explicitLink = false): WorkspaceFi
   // home, …) → never a link.
   const resolution = cited ? resolveChatFilePath(cited, root, home) : null;
   const linkPath = resolution?.path ?? null;
-  const copyPath =
-    linkPath === null
-      ? cited
-      : linkPath.startsWith("/") || !root
-        ? linkPath
-        : `${root.replace(/\/+$/, "")}/${linkPath}`;
+  const copyPath = linkPath === null ? cited : (absoluteWorkspacePath(linkPath, root) ?? linkPath);
 
   // Only relative paths can be in the changed-files list (it speaks
   // workspace-relative); an outside-workspace absolute is never a change.

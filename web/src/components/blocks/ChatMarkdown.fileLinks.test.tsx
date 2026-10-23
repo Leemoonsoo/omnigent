@@ -562,6 +562,7 @@ describe("copying a file link's path", () => {
     ["an absolute href", `${WORKSPACE}/docs/handoff.md`],
     ["a relative href", "docs/handoff.md"],
     ["a cited line", "docs/handoff.md:21"],
+    ["a home-relative href", "~/ws/docs/handoff.md"],
   ])("copies the host-absolute path of a link with %s", async (_label, href) => {
     renderMarkdown(`[Handoff](${href})`, ["docs/handoff.md"]);
 
@@ -569,6 +570,16 @@ describe("copying a file link's path", () => {
     expect(copyTextMock).toHaveBeenCalledWith(`${WORKSPACE}/docs/handoff.md`);
     expect(openFile).not.toHaveBeenCalled();
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Copied path"));
+  });
+
+  it("copies a relative path as written while the workspace root is unknown", async () => {
+    renderMarkdown("[Handoff](docs/handoff.md)", ["docs/handoff.md"], {
+      ...FILE_VIEWER,
+      workspaceRoot: null,
+    });
+
+    await copyFromMenu(screen.getByRole("button", { name: "Handoff" }));
+    expect(copyTextMock).toHaveBeenCalledWith("docs/handoff.md");
   });
 
   it("copies an unverified link's path", async () => {
