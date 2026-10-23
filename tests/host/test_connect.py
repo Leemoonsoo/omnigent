@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -6665,7 +6666,7 @@ def test_run_host_process_mirrors_structured_logs_on_foreground_tty(
     configure_logging.assert_called_once_with("host", log_to_stderr=True)
 
 
-@pytest.mark.parametrize("failing_step", [None, "startup", "exit"])
+@pytest.mark.parametrize("failing_step", [None, "startup", "serve", "exit"])
 def test_run_host_process_prints_to_its_terminal_through_a_writer_thread(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6679,6 +6680,8 @@ def test_run_host_process_prints_to_its_terminal_through_a_writer_thread(
     from omnigent.process_logging import TerminalWriter
 
     monkeypatch.setattr(process_logging, "_shared_terminal_writers", {})
+    monkeypatch.setattr(process_logging, "_live_terminal_writers", weakref.WeakSet())
+    monkeypatch.setattr(process_logging, "_threaded_terminal_mirrors", 0)
     original_streams = (sys.stdout, sys.stderr)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
@@ -6687,6 +6690,8 @@ def test_run_host_process_prints_to_its_terminal_through_a_writer_thread(
     def serve(*_args: object, **_kwargs: object) -> bool:
         streams_while_serving.append((sys.stdout, sys.stderr))
         print("✓ Connected as 'test-host'")
+        if failing_step == "serve":
+            raise KeyboardInterrupt
         return False
 
     def fail(message: str) -> None:
@@ -6703,6 +6708,8 @@ def test_run_host_process_prints_to_its_terminal_through_a_writer_thread(
             side_effect=lambda *_a, **_k: fail("logging setup failed"),
         )
         expected_error = pytest.raises(RuntimeError, match="logging setup failed")
+    elif failing_step == "serve":
+        expected_error = pytest.raises(KeyboardInterrupt)
     elif failing_step == "exit":
 
         def fail_restore() -> None:

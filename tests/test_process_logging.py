@@ -302,6 +302,20 @@ def test_terminal_writer_keeps_partial_lines_until_flush() -> None:
     assert terminal.getvalue() == "Waiting for login..."
 
 
+def test_terminal_writer_drains_even_when_its_character_count_is_off() -> None:
+    """An interrupt between queueing a chunk and counting it must not make drain() hang."""
+    terminal = _FakeTerminal()
+    writer = TerminalWriter(terminal)
+    writer.write("first\n")
+    assert writer.drain(5)
+    with writer._condition:  # as if interrupted after the append, before the count
+        writer._chunks.append("second\n")
+        writer._condition.notify_all()
+
+    assert writer.drain(5)
+    assert terminal.getvalue() == "first\nsecond\n"
+
+
 def test_terminal_writer_keeps_writing_after_a_refused_thread_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

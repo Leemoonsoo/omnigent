@@ -471,6 +471,7 @@ class TerminalWriter:
         self._chunks: deque[str] = deque()
         self._partial_line = ""
         self._queued_chars = 0
+        self._writing = False
         self._dropped_lines = 0
         self._stream_failed = False
         self._gave_up = False
@@ -524,8 +525,11 @@ class TerminalWriter:
         """
         self.flush()
         with self._condition:
+            # Not the character count, which only bounds the backlog: an interrupt between a
+            # queue and its count update must not make the writer look forever busy.
             drained = self._condition.wait_for(
-                lambda: self._queued_chars == 0 and not self._dropped_lines, timeout
+                lambda: not self._chunks and not self._writing and not self._dropped_lines,
+                timeout,
             )
             # Only an actual wait shows the terminal is not reading.
             if drained or timeout > 0:
@@ -535,7 +539,6 @@ class TerminalWriter:
     def _enqueue_locked(self, chunk: str) -> None:
         if self._stream_failed:
             return
-        # Past the backlog, drop new text; one oversized write into an empty queue still goes out.
         if self._queued_chars and self._queued_chars + len(chunk) > _TERMINAL_BACKLOG_CHARS:
             self._dropped_lines += max(1, chunk.count("\n"))
             return
@@ -572,6 +575,7 @@ class TerminalWriter:
 
     def _fail_locked(self) -> None:
         self._stream_failed = True
+        self._writing = False
         self._chunks.clear()
         self._queued_chars = 0
         self._dropped_lines = 0
@@ -582,6 +586,7 @@ class TerminalWriter:
             with self._condition:
                 self._condition.wait_for(lambda: bool(self._chunks))
                 chunk = self._chunks.popleft()
+                self._writing = True
             try:
                 self._stream.write(chunk)
                 self._stream.flush()
@@ -598,7 +603,8 @@ class TerminalWriter:
                 )
                 return
             with self._condition:
-                self._queued_chars -= len(chunk)
+                self._writing = False
+                self._queued_chars = max(0, self._queued_chars - len(chunk))
                 if not self._chunks:
                     # Caught up: report lines dropped since the last accepted one.
                     self._queue_dropped_notice_locked()
@@ -618,8 +624,8 @@ class TerminalWriter:
         return self._stream.fileno()
 
     @property
-    def encoding(self) -> str:
-        """Return the wrapped stream's encoding."""
+    def encoding(self) -> str | None:
+        """Return the wrapped stream's encoding, if it has one."""
         return self._stream.encoding
 
     @property
@@ -772,10 +778,9 @@ def nonblocking_terminal_stdio() -> Callable[[], None]:
     long-running process that prints and logs from an event loop calls this so
     a terminal that stops reading cannot stall the loop.
 
-    :returns: A callable that waits briefly for every writer, then restores the
-        original streams and handlers. While any terminal is still not reading
-        it changes nothing, so exit cannot block on it; once it has restored,
-        later calls do nothing.
+    :returns: A restore callable that waits briefly for queued output, leaves
+        the writers in place while a terminal is stalled, and does nothing once
+        it has restored. Nested installs must be restored latest first.
     """
     global _threaded_terminal_mirrors
     _threaded_terminal_mirrors += 1
