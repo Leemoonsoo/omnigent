@@ -7,6 +7,7 @@ import {
   PlayIcon,
   VideoIcon,
 } from "lucide-react";
+import { CopyPathContextMenu } from "@/components/CopyPathContextMenu";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -33,6 +34,8 @@ export type VideoPlayerProps = VideoSource & {
   className?: string;
   compact?: boolean;
   onOpenFile?: () => void;
+  /** Offer "Copy path" on the title; the video itself keeps the browser's menu. */
+  copyPath?: string;
 };
 
 /** Reset playback and release media when a transcript slot or file tab changes source. */
@@ -42,7 +45,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
 }
 
 function VideoPlayerContent(props: VideoPlayerProps) {
-  const { title, className, compact = false, onOpenFile } = props;
+  const { title, className, compact = false, onOpenFile, copyPath } = props;
   const remoteSrc = "src" in props ? props.src : undefined;
   const conversationId = "conversationId" in props ? props.conversationId : undefined;
   const path = "path" in props ? props.path : undefined;
@@ -120,6 +123,20 @@ function VideoPlayerContent(props: VideoPlayerProps) {
   }, [src, failed]);
 
   const loading = requested && !src && !failed;
+  const titleControl = onOpenFile ? (
+    <button
+      type="button"
+      className="min-w-0 flex-1 truncate text-left underline decoration-dotted underline-offset-2 hover:text-primary"
+      title={title}
+      onClick={onOpenFile}
+    >
+      {title}
+    </button>
+  ) : (
+    <span className="min-w-0 flex-1 truncate" title={title}>
+      {title}
+    </span>
+  );
 
   return (
     <span
@@ -133,19 +150,10 @@ function VideoPlayerContent(props: VideoPlayerProps) {
       <span className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] border-b border-border">
         <span className="flex min-h-12 min-w-0 items-center gap-2 px-3 py-2">
           <VideoIcon className="size-4 shrink-0 text-muted-foreground" />
-          {onOpenFile ? (
-            <button
-              type="button"
-              className="min-w-0 flex-1 truncate text-left underline decoration-dotted underline-offset-2 hover:text-primary"
-              title={title}
-              onClick={onOpenFile}
-            >
-              {title}
-            </button>
+          {copyPath ? (
+            <CopyPathContextMenu path={copyPath}>{titleControl}</CopyPathContextMenu>
           ) : (
-            <span className="min-w-0 flex-1 truncate" title={title}>
-              {title}
-            </span>
+            titleControl
           )}
         </span>
         <span className="flex min-h-12 items-center gap-2 px-3 py-2">

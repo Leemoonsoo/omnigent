@@ -62,6 +62,8 @@ describe("absoluteWorkspacePath", () => {
     ["docs/a.md", "/repo/", "/repo/docs/a.md"],
     ["notes.md", "/", "/notes.md"],
     ["docs\\a.md", "C:\\work\\", "C:\\work\\docs\\a.md"],
+    // Only the join uses the root's separator; the path keeps its own.
+    ["docs/a.md", "C:\\work", "C:\\work\\docs/a.md"],
     ["/tmp/a.md", "/repo", "/tmp/a.md"],
     ["C:\\tmp\\a.md", "/repo", "C:\\tmp\\a.md"],
   ])("joins %s onto root %s as %s", (path, root, expected) => {

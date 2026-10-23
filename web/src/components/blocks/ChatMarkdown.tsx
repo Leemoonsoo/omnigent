@@ -12,8 +12,7 @@
 
 import type React from "react";
 import { useMemo } from "react";
-import { CopyIcon, GitPullRequestIcon } from "lucide-react";
-import { toast } from "sonner";
+import { GitPullRequestIcon } from "lucide-react";
 import { defaultRemarkPlugins } from "streamdown";
 import remarkBreaks from "remark-breaks";
 import { normalizeExplicitMathDelimiters } from "@/components/ai-elements/mathMarkdown";
@@ -22,18 +21,12 @@ import {
   splitWorkspaceFileCitation,
   WORKSPACE_FILE_LINK_ATTR,
 } from "@/components/ai-elements/streamdown-security";
+import { CopyPathContextMenu } from "@/components/CopyPathContextMenu";
 import { ZoomableImage } from "@/components/ImageLightbox";
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuTrigger,
-} from "@/components/ui/context-menu";
 import { VideoPlayer } from "@/components/VideoPlayer";
 import { isRemoteVideoUrl, isVideoFile } from "@/lib/video";
 import { useThrottledValue } from "@/hooks/useThrottledValue";
 import { withBasePath } from "@/lib/basePath";
-import { copyText } from "@/lib/clipboard";
 import { absoluteWorkspacePath } from "@/lib/composerContext";
 import { followLinkWithPopupFallback } from "@/lib/openLinkInApp";
 import { cn } from "@/lib/utils";
@@ -267,9 +260,9 @@ function PullRequestLinkLabel({ children }: { children: React.ReactNode }) {
  * A marked path that names no workspace file renders as plain text: its href is
  * the parked fragment, so a live link there would go nowhere.
  *
- * A marked path rendered as a link or text offers "Copy path" on right-click
- * (long-press on touch): with no href, neither the browser nor the desktop shell
- * offers to copy it.
+ * Every marked path offers "Copy path" on right-click (long-press on touch), as
+ * nothing native can copy a link with no href. A video offers it on the player's
+ * title, so the video itself keeps the browser's own menu.
  */
 function WorkspaceFileLink({
   href,
@@ -353,7 +346,7 @@ function WorkspaceFileLink({
             : `Can't open ${path}: it doesn't resolve to an openable file path.`,
         );
       return (
-        <FileLinkContextMenu path={copyPath}>
+        <CopyPathContextMenu path={copyPath}>
           <span
             role="button"
             tabIndex={0}
@@ -372,17 +365,17 @@ function WorkspaceFileLink({
           >
             {children}
           </span>
-        </FileLinkContextMenu>
+        </CopyPathContextMenu>
       );
     }
     // Not verified yet (existence check still in flight, or it can't run):
     // plain text, with the path on hover so it stays discoverable.
     return (
-      <FileLinkContextMenu path={copyPath}>
+      <CopyPathContextMenu path={copyPath}>
         <span className={className} title={title ?? path}>
           {children}
         </span>
-      </FileLinkContextMenu>
+      </CopyPathContextMenu>
     );
   }
 
@@ -396,6 +389,7 @@ function WorkspaceFileLink({
           typeof children === "string" ? children : (resolvedPath.split("/").pop() ?? resolvedPath)
         }
         onOpenFile={openWorkspaceFile}
+        copyPath={copyPath}
       />
     );
   }
@@ -403,7 +397,7 @@ function WorkspaceFileLink({
   // No href: the parked fragment would still navigate on cmd/middle-click, and
   // no URL opens the FileViewer. role/tabIndex/onKeyDown restore button semantics.
   return (
-    <FileLinkContextMenu path={copyPath}>
+    <CopyPathContextMenu path={copyPath}>
       <a
         {...props}
         role="button"
@@ -424,27 +418,7 @@ function WorkspaceFileLink({
       >
         {children}
       </a>
-    </FileLinkContextMenu>
-  );
-}
-
-/** Right-click menu that copies the path a file link names. */
-function FileLinkContextMenu({ path, children }: { path: string; children: React.ReactElement }) {
-  const copyPath = () =>
-    void copyText(path).then(
-      () => toast.success("Copied path"),
-      () => toast.error("Couldn't copy the path"),
-    );
-  return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuItem onSelect={copyPath}>
-          <CopyIcon />
-          Copy path
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
+    </CopyPathContextMenu>
   );
 }
 

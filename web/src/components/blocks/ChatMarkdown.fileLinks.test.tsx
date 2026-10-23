@@ -604,6 +604,26 @@ describe("copying a file link's path", () => {
     expect(copyTextMock).toHaveBeenCalledWith(`${WORKSPACE}/../../etc/hosts`);
   });
 
+  it("drops a cited position from an unresolvable path", async () => {
+    renderMarkdown(`[trap](${WORKSPACE}/../x.md:21)`);
+
+    await copyFromMenu(screen.getByRole("button", { name: "trap" }));
+    expect(copyTextMock).toHaveBeenCalledWith(`${WORKSPACE}/../x.md`);
+  });
+
+  it("copies a workspace recording's path from the player title", async () => {
+    renderMarkdown("[Screen recording](demo.webm)", ["demo.webm"], FILE_VIEWER_WITH_SESSION);
+
+    // The video controls keep the browser's own menu.
+    const play = screen.getByRole("button", { name: "Play video: Screen recording" });
+    expect(fireEvent.contextMenu(play)).toBe(true);
+    expect(screen.queryByRole("menuitem")).toBeNull();
+
+    await copyFromMenu(screen.getByRole("button", { name: "Screen recording" }));
+    expect(copyTextMock).toHaveBeenCalledWith(`${WORKSPACE}/demo.webm`);
+    expect(openFile).not.toHaveBeenCalled();
+  });
+
   it("reports a failed copy", async () => {
     copyTextMock.mockRejectedValue(new Error("denied"));
     renderMarkdown("[Handoff](docs/handoff.md)", ["docs/handoff.md"]);
