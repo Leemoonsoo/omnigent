@@ -3075,16 +3075,13 @@ def _decode_imported_local_session(raw: object) -> HostImportedLocalSession:
     source = raw.get("source", "")
     if not isinstance(source, str):
         raise ValueError("session 'source' must be a string")
-    archived = raw.get("archived", False)
-    if not isinstance(archived, bool):
-        raise ValueError("session 'archived' must be a boolean")
     return HostImportedLocalSession(
         external_session_id=_required_str(raw, "external_session_id"),
         workspace=workspace,
         items=items,
         title=title,
         source=source,
-        archived=archived,
+        archived=_required_bool(raw, "archived") if "archived" in raw else False,
     )
 
 

@@ -48,11 +48,12 @@ trimming only ever drops records the agent has already summarized away.
 
 ## Importing Codex rollouts
 
-`load_codex_session` imports the whole transcript, whatever its byte size. Every
-`response_item` stays a visible message, and each `compacted` record becomes a
-`compaction` item whose `compacted_messages` carry that record's
-`replacement_history` — the same item a live codex-native session persists when
-Codex compacts in the terminal. The imported session therefore shows the history
+`load_codex_session` imports the whole transcript, whatever its byte size.
+Messages, tool calls and tool output become items (reasoning and other record
+types are skipped), and each `compacted` record becomes a `compaction` item
+whose `compacted_messages` carry that record's `replacement_history` — the same
+kind of item a live codex-native session persists when Codex compacts in the
+terminal. The imported session therefore shows the history
 the user could still read in Codex, while a cold resume rebuilds the rollout
 from the last compaction item and so starts with the same context Codex itself
 would hold. A `compacted` record with no usable `replacement_history` is
@@ -65,4 +66,6 @@ with no compaction stays whole, and a trimmed suffix still over the cap is not
 cut further, so the API rejects either one.
 
 A thread Codex archived (`threads.archived`, or a rollout under
-`archived_sessions/`) imports as an archived session.
+`archived_sessions/`) imports as an archived session, archived at the import
+time. Importing a thread again without `force` leaves the existing copy and its
+archive state unchanged.

@@ -1,4 +1,10 @@
-"""Build Codex rollout JSONL files and thread-store rows for import tests."""
+"""Build Codex rollout JSONL files and thread-store rows for import tests.
+
+The layout follows codex-rs: ``rollout/src/ordinal.rs`` numbers a paginated rollout's
+records from its ``history_base.end_ordinal_exclusive``, and
+``thread-store/src/local/rollout_lineage.rs`` follows ``history_base.thread_id`` as a
+rollout id. The ``threads`` columns come from ``state/migrations/0001_threads.sql``.
+"""
 
 from __future__ import annotations
 
@@ -66,7 +72,7 @@ def write_codex_thread_store(
 ) -> None:
     """Write ``codex_home/state_5.sqlite`` with ``rows`` in its ``threads`` table.
 
-    ``legacy_schema`` writes an older table without the ``rollout_path``/``archived`` columns.
+    ``legacy_schema`` writes a minimal table without the ``rollout_path``/``archived`` columns.
     """
     con = sqlite3.connect(codex_home / "state_5.sqlite")
     try:
