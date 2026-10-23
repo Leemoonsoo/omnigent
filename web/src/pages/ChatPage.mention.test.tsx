@@ -4,6 +4,7 @@ import type * as UseHostsModule from "@/hooks/useHosts";
 import type * as RunnerHealthProviderModule from "@/hooks/RunnerHealthProvider";
 import type * as AgentLabelsModule from "@/lib/agentLabels";
 import type * as UseChildSessionsModule from "@/hooks/useChildSessions";
+import type * as UseHarnessInventoryModule from "@/hooks/useHarnessInventory";
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ReactElement } from "react";
@@ -66,6 +67,10 @@ vi.mock("@/hooks/useComposerGitStatus", () => ({
 vi.mock("@/hooks/useSkills", () => ({
   useSkills: () => ({ skills: [], skillsStatus: "ready", refetch: vi.fn() }),
 }));
+vi.mock("@/hooks/useHarnessInventory", async (importOriginal) => ({
+  ...(await importOriginal<typeof UseHarnessInventoryModule>()),
+  useHostMcpServers: () => ({ data: [], isLoading: false, isError: false }),
+}));
 vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
   ...(await importOriginal<typeof UseChildSessionsModule>()),
   useChildSessions: () => ({ children: [] }),
@@ -105,6 +110,7 @@ function composerProps(overrides: Partial<Parameters<typeof Composer>[0]> = {}) 
     isWorking: false,
     disabled: false,
     onSend: vi.fn(),
+    onNewSession: vi.fn(),
     onStop: vi.fn(),
     agents: undefined,
     agentsLoading: false,

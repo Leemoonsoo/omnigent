@@ -29,6 +29,8 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { VideoPlayer } from "@/components/VideoPlayer";
+import { isRemoteVideoUrl, isVideoFile } from "@/lib/video";
 import { useThrottledValue } from "@/hooks/useThrottledValue";
 import { withBasePath } from "@/lib/basePath";
 import { copyText } from "@/lib/clipboard";
@@ -116,7 +118,7 @@ function useWorkspaceFileOpener(text: string, explicitLink = false): WorkspaceFi
   const { exists, settled } = useWorkspaceFileExists(
     conversationId,
     openFile && linkPath && !isChanged ? linkPath : null,
-    explicitLink || (resolution?.trusted ?? false),
+    explicitLink || (resolution?.trusted ?? false) || isVideoFile(cited),
   );
 
   if (!openFile || !linkPath || !(isChanged || exists)) {
@@ -273,8 +275,9 @@ function PullRequestLinkLabel({ children }: { children: React.ReactNode }) {
  * A marked path that names no workspace file renders as plain text: its href is
  * the parked fragment, so a live link there would go nowhere.
  *
- * Every marked variant offers "Copy path" on right-click (long-press on touch):
- * with no href, neither the browser nor the desktop shell offers to copy it.
+ * A marked path rendered as a link or text offers "Copy path" on right-click
+ * (long-press on touch): with no href, neither the browser nor the desktop shell
+ * offers to copy it.
  */
 function WorkspaceFileLink({
   href,
@@ -296,6 +299,15 @@ function WorkspaceFileLink({
   const conversationId = useFileViewerConversationId();
 
   if (!path) {
+    if (typeof href === "string" && isRemoteVideoUrl(href)) {
+      return (
+        <VideoPlayer
+          compact
+          src={href}
+          title={typeof children === "string" ? children : "Video recording"}
+        />
+      );
+    }
     // Rebase an app-internal link (e.g. an agent's `/clear` "the new chat"
     // `/c/<id>`) under the deployment base path; no-op for external URLs, `#`
     // fragments, and at the origin root. The router basename does not reach raw
@@ -379,6 +391,20 @@ function WorkspaceFileLink({
           {children}
         </span>
       </FileLinkContextMenu>
+    );
+  }
+
+  if (conversationId && isVideoFile(resolvedPath)) {
+    return (
+      <VideoPlayer
+        compact
+        conversationId={conversationId}
+        path={resolvedPath}
+        title={
+          typeof children === "string" ? children : (resolvedPath.split("/").pop() ?? resolvedPath)
+        }
+        onOpenFile={openWorkspaceFile}
+      />
     );
   }
 
