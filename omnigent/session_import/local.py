@@ -304,11 +304,7 @@ class _CodexRolloutFile(NamedTuple):
 
 
 def _codex_rollout_candidates(homes: Sequence[Path]) -> list[_CodexRolloutFile]:
-    """Return the rollout files across Codex homes, keyed by the ids in their filenames.
-
-    A rollout is listed under the thread id in its filename, which a reverted
-    thread's ``<thread>_<rollout>`` file shares. Codex names every rollout this way.
-    """
+    """Return rollout files with the thread and rollout ids parsed from their filenames."""
     candidates: list[_CodexRolloutFile] = []
     for home in homes:
         for path in _codex_rollout_paths(home):
@@ -701,7 +697,11 @@ _CODEX_ROLLOUT_NAME_RE = re.compile(rf"^rollout-.+-({_CODEX_UUID})(?:_({_CODEX_U
 
 
 def _codex_rollout_ids(path: Path) -> tuple[str, str] | None:
-    """``(thread id, rollout id)`` from a rollout filename; they differ only after a revert."""
+    """``(thread id, rollout id)`` from a rollout filename; they differ only after a revert.
+
+    Codex names every rollout for its thread, so a reverted thread's ``<thread>_<rollout>``
+    file lists under the thread id.
+    """
     match = _CODEX_ROLLOUT_NAME_RE.match(path.name)
     if match is None:
         return None
@@ -822,8 +822,8 @@ def _codex_thread_location(
     """Return a thread's newest rollout across Codex homes, with its home and thread row.
 
     Within a home, the thread store's ``rollout_path`` wins over the filename match.
-    Only the first home and the homes holding a rollout named for the thread are read,
-    since Codex names every rollout file for its thread.
+    Thread stores are read in the first home and in each home holding a rollout named
+    for the thread; a later home whose only rollout has another name is not searched.
     """
     named = [rollout for rollout in rollouts if rollout.thread_id == session_id]
     selected: tuple[Path, Path, dict[str, object] | None] | None = None

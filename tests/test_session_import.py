@@ -1571,15 +1571,21 @@ def test_load_codex_session_ignores_a_rollout_path_outside_the_rollout_directori
 
 
 @pytest.mark.parametrize(
-    ("newest_store", "older_answers"),
-    [("corrupt", False), ("no-threads-table", False), ("without-the-thread", True)],
+    ("newest_store", "title", "archived"),
+    [
+        ("corrupt", None, False),
+        ("no-threads-table", None, False),
+        ("without-the-thread", "Stale title", True),
+        ("with-the-thread", "Current title", False),
+    ],
 )
 def test_load_codex_session_reads_an_older_store_only_for_a_thread_the_newest_lacks(
-    tmp_path: Path, newest_store: str, older_answers: bool
+    tmp_path: Path, newest_store: str, title: str | None, archived: bool
 ) -> None:
     """An older ``state_<n>.sqlite`` answers only when the newest is readable and lacks the row.
 
-    An unreadable newest store leaves no row rather than the older store's stale one.
+    The newest store's row wins over a conflicting older one, and an unreadable newest
+    store leaves no row rather than the older store's stale one.
     """
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     _write_codex_rollout(tmp_path, session_id, first_message="current question")
@@ -1595,19 +1601,23 @@ def test_load_codex_session_reads_an_older_store_only_for_a_thread_the_newest_la
         newest.write_bytes(b"not a sqlite database" * 64)
     else:
         con = sqlite3.connect(newest)
-        con.execute(
-            "CREATE TABLE threads (id TEXT, title TEXT, first_user_message TEXT)"
-            if newest_store == "without-the-thread"
-            else "CREATE TABLE other (id TEXT)"
-        )
+        if newest_store == "no-threads-table":
+            con.execute("CREATE TABLE other (id TEXT)")
+        else:
+            con.execute("CREATE TABLE threads (id TEXT, title TEXT, first_user_message TEXT)")
+        if newest_store == "with-the-thread":
+            con.execute(
+                "INSERT INTO threads VALUES (?, ?, ?)",
+                (session_id, "Current title", "current question"),
+            )
         con.commit()
         con.close()
 
     imported = load_codex_session(session_id, codex_home=tmp_path)
 
     assert _codex_item_texts(imported) == ["current question"]
-    assert imported.native_title == ("Stale title" if older_answers else None)
-    assert imported.archived is older_answers
+    assert imported.native_title == title
+    assert imported.archived is archived
 
 
 def test_load_codex_session_follows_a_symlinked_sessions_root(tmp_path: Path) -> None:

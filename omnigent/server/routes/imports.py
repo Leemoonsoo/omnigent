@@ -332,11 +332,9 @@ async def _stream_local_sessions_from_host(
 
 
 def _anchor_compactions(items: list[NewConversationItem]) -> list[NewConversationItem]:
-    """Point each compaction's ``last_item_id`` at the item stored before it.
+    """Point each imported compaction at the stored item it follows, or itself when first.
 
-    Imported compactions predate any stored id, so without this a history loader
-    finds no anchor. Only anchors get a minted ``stable_id``, since the store
-    looks up every stable id before appending. A leading compaction names itself.
+    Only anchors get a minted ``stable_id``, since the store looks up every stable id.
     """
     anchored = list(items)
     for index, item in enumerate(items):

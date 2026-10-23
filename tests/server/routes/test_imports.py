@@ -1261,7 +1261,8 @@ async def test_import_session_archives_when_requested(
 ) -> None:
     """The CLI's ``archived`` flag files the imported session under Archived sessions.
 
-    A forced re-import of an active copy replaces it with an archived one.
+    A forced re-import of an active copy replaces it with an archived one; a re-import
+    without ``force`` is refused and leaves the archived copy as it is.
     """
     _seed_claude_agent(db_uri)
     payload: dict[str, object] = {
@@ -1290,6 +1291,11 @@ async def test_import_session_archives_when_requested(
     conversation = SqlAlchemyConversationStore(db_uri).get_conversation(
         created.json()["session_id"]
     )
+    assert conversation is not None
+    assert conversation.archived is True
+    again = await client.post("/v1/imports", json={**payload, "archived": False})
+    assert again.status_code == 409
+    conversation = SqlAlchemyConversationStore(db_uri).get_conversation(conversation.id)
     assert conversation is not None
     assert conversation.archived is True
 

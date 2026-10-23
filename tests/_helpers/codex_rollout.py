@@ -1,9 +1,6 @@
 """Build Codex rollout JSONL files and thread-store rows for import tests.
 
-The layout follows codex-rs: ``rollout/src/ordinal.rs`` numbers a paginated rollout's
-records from its ``history_base.end_ordinal_exclusive``, and
-``thread-store/src/local/rollout_lineage.rs`` follows ``history_base.thread_id`` as a
-rollout id. The ``threads`` columns come from ``state/migrations/0001_threads.sql``.
+Paginated records and ``history_base`` lineage follow codex-rs ``rollout/src/ordinal.rs``.
 """
 
 from __future__ import annotations
