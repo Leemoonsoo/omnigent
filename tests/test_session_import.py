@@ -1570,11 +1570,17 @@ def test_load_codex_session_ignores_a_rollout_path_outside_the_rollout_directori
     assert _codex_item_texts(imported) == ["inside question", "inside answer"]
 
 
-@pytest.mark.parametrize("newest_store", ["corrupt", "no-threads-table"])
-def test_load_codex_session_does_not_read_an_older_store_when_the_newest_fails(
-    tmp_path: Path, newest_store: str
+@pytest.mark.parametrize(
+    ("newest_store", "older_answers"),
+    [("corrupt", False), ("no-threads-table", False), ("without-the-thread", True)],
+)
+def test_load_codex_session_reads_an_older_store_only_for_a_thread_the_newest_lacks(
+    tmp_path: Path, newest_store: str, older_answers: bool
 ) -> None:
-    """An unreadable newest ``state_<n>.sqlite`` leaves no row, not an older store's stale one."""
+    """An older ``state_<n>.sqlite`` answers only when the newest is readable and lacks the row.
+
+    An unreadable newest store leaves no row rather than the older store's stale one.
+    """
     session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     _write_codex_rollout(tmp_path, session_id, first_message="current question")
     _write_codex_threads_db(
@@ -1589,15 +1595,47 @@ def test_load_codex_session_does_not_read_an_older_store_when_the_newest_fails(
         newest.write_bytes(b"not a sqlite database" * 64)
     else:
         con = sqlite3.connect(newest)
-        con.execute("CREATE TABLE other (id TEXT)")
+        con.execute(
+            "CREATE TABLE threads (id TEXT, title TEXT, first_user_message TEXT)"
+            if newest_store == "without-the-thread"
+            else "CREATE TABLE other (id TEXT)"
+        )
         con.commit()
         con.close()
 
     imported = load_codex_session(session_id, codex_home=tmp_path)
 
     assert _codex_item_texts(imported) == ["current question"]
-    assert imported.native_title is None
-    assert imported.archived is False
+    assert imported.native_title == ("Stale title" if older_answers else None)
+    assert imported.archived is older_answers
+
+
+def test_load_codex_session_follows_a_symlinked_sessions_root(tmp_path: Path) -> None:
+    """A ``sessions/`` root linked to another disk still holds the recorded rollout."""
+    session_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    home = tmp_path / "codex"
+    disk = tmp_path / "disk" / "sessions"
+    day = disk / "2026" / "10" / "02"
+    _write_codex_turns(
+        day / f"rollout-2026-10-02T09-00-00-{session_id}.jsonl",
+        session_id,
+        [("question 1", "answer 1")],
+    )
+    current = day / "rollout-2026-10-02T09-30-00-019f680e-3edc-7fa3-9d50-1c4be395fa27.jsonl"
+    _write_codex_turns(current, session_id, [("question 1", "answer 1"), ("question 2", "linked")])
+    home.mkdir()
+    (home / "sessions").symlink_to(disk, target_is_directory=True)
+    _write_codex_threads_db(
+        home,
+        session_id,
+        title="question 1",
+        first_user_message="question 1",
+        rollout_path=home / "sessions" / "2026" / "10" / "02" / current.name,
+    )
+
+    imported = load_codex_session(session_id, codex_home=home)
+
+    assert _codex_item_texts(imported)[-1] == "linked"
 
 
 def test_load_codex_session_imports_metadata_only_fork_from_its_base(tmp_path: Path) -> None:
@@ -1631,30 +1669,26 @@ def test_load_codex_session_imports_metadata_only_fork_from_its_base(tmp_path: P
     assert imported.title == "parent question 1"
 
 
+_CODEX_ROOT_TEXTS = ["root question 1", "root answer 1", "root question 2", "root answer 2"]
+
+
 @pytest.mark.parametrize(
-    ("cut_inside_root", "inherited"),
+    ("leaf_cut", "legacy_middle", "inherited"),
     [
-        (
-            False,
-            [
-                "root question 1",
-                "root answer 1",
-                "root question 2",
-                "root answer 2",
-                "middle question",
-                "middle answer",
-            ],
-        ),
-        (True, ["root question 1", "root answer 1"]),
+        ("middle-end", False, [*_CODEX_ROOT_TEXTS, "middle question 1", "middle answer 1"]),
+        ("inside-root", False, ["root question 1", "root answer 1"]),
+        ("after-middle-turn-1", True, [*_CODEX_ROOT_TEXTS, "middle question 1"]),
     ],
-    ids=["whole-lineage", "cutoff-inside-the-base-inherited-range"],
+    ids=["whole-lineage", "cutoff-inside-the-base-inherited-range", "legacy-middle-fork"],
 )
 def test_load_codex_session_follows_fork_lineage_through_intermediate_forks(
-    tmp_path: Path, cut_inside_root: bool, inherited: list[str]
+    tmp_path: Path, leaf_cut: str, legacy_middle: bool, inherited: list[str]
 ) -> None:
     """A fork of a fork inherits the lineage, each rollout cut at its history_base ordinal.
 
-    A leaf cutoff inside the middle fork's inherited range also bounds the root.
+    A leaf cutoff inside the middle fork's inherited range also bounds the root. Codex
+    links only paginated rollouts, but a middle fork without ``ordinal`` fields is still
+    numbered from its own cutoff.
     """
     root_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     middle_id = "019f680e-3edc-7fa3-9d50-1c4be395fa27"
@@ -1665,14 +1699,28 @@ def test_load_codex_session_follows_fork_lineage_through_intermediate_forks(
         root_id,
         [("root question 1", "root answer 1"), ("root question 2", "root answer 2")],
     )
+    middle = sessions / f"rollout-2026-10-02T10-30-00-{middle_id}.jsonl"
     middle_end = _write_codex_turns(
-        sessions / f"rollout-2026-10-02T10-30-00-{middle_id}.jsonl",
+        middle,
         middle_id,
-        [("middle question", "middle answer")],
+        [("middle question 1", "middle answer 1")],
         start_ordinal=root_end,
         history_base={"thread_id": root_id, "end_ordinal_exclusive": root_end},
     )
-    leaf_cutoff = _codex_turn_end(0, 1) if cut_inside_root else middle_end
+    if legacy_middle:
+        records = [json.loads(line) for line in middle.read_text().splitlines()]
+        middle.write_text(
+            "".join(
+                json.dumps({k: v for k, v in r.items() if k != "ordinal"}) + "\n" for r in records
+            ),
+            encoding="utf-8",
+        )
+    leaf_cutoff = {
+        "middle-end": middle_end,
+        "inside-root": _codex_turn_end(0, 1),
+        # Ends after the middle fork's user message; line positions alone keep its answer too.
+        "after-middle-turn-1": root_end + 3,
+    }[leaf_cut]
     _write_codex_turns(
         sessions / f"rollout-2026-10-02T11-00-00-{leaf_id}.jsonl",
         leaf_id,
@@ -2092,7 +2140,11 @@ def test_list_recent_codex_sessions_uses_the_id_the_loader_resolves(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rollout whose filename uuid differs from ``session_meta.id`` lists under the former."""
+    """A rollout whose filename uuid differs from ``session_meta.id`` lists under the former.
+
+    The filename's thread id is the identity: Codex names each rollout for its thread, and a
+    reverted thread's new rollout records a different ``session_meta.id``.
+    """
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "omnigent-data"))
