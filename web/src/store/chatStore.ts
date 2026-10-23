@@ -1518,14 +1518,18 @@ function waitForInitialDispatch(conversationId: string, tempId: string): Promise
         }
         // The stream does not replay `session.model`, so a report this tab missed
         // (a dropped stream, a sleeping laptop) would fail a ready runner's message.
-        void adoptSnapshotModel(conversationId).then(() => {
-          check();
-          // A launch during the read re-armed the deadlines; the newer one applies.
-          if (armedDeadlines === armed) finish(false, new Error(message));
-        });
+        // `catch` first: a failed read must still reach the final check below.
+        void adoptSnapshotModel(conversationId)
+          .catch(() => undefined)
+          .then(() => {
+            check();
+            // A launch during the read re-armed the deadlines; the newer one applies.
+            if (armedDeadlines === armed) finish(false, new Error(message));
+          });
       }, ms);
     };
     const check = () => {
+      if (settled) return;
       const entry = conversationRegistry.peek(conversationId);
       const state = entry?.getState();
       if (
@@ -1574,10 +1578,7 @@ function waitForInitialDispatch(conversationId: string, tempId: string): Promise
   });
 }
 
-/**
- * Settle a seeded model once the session snapshot shows one, on the same terms
- * `sessionBindingPatch` applies at bind.
- */
+/** Settle a seeded model from a snapshot, under the condition `sessionBindingPatch` uses at bind. */
 function snapshotModelPatch(
   session: Session,
   s: Pick<ConversationState, "sessionModelSeeded">,

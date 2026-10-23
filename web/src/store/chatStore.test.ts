@@ -4682,6 +4682,9 @@ describe("chatStore — first message during native model startup", () => {
     expect(eventBodies()).toEqual([]);
     expect(state?.failedSendDraft).toBeNull();
     expect(state?.pendingUserMessages[0]?.initialDraft).toBeDefined();
+    reportModel();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(eventBodies()).toHaveLength(1);
   });
 
   it("abandons the waiting send when its conversation is disposed", async () => {
