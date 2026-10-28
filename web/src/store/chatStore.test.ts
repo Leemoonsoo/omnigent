@@ -17923,8 +17923,45 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     expect(cards[0]!.status).toBe("responded");
     expect(cards[0]!.response?.action).toBe("accept");
 
+    // The verdict arrived: once the POST returns, a fresh snapshot no longer
+    // lists the prompt, so the card stays answered.
     releaseResolves();
     await submitted;
+    await drainAsync();
+    expect(elicitationCards()[0]!.status).toBe("responded");
+    expect(elicitationCards()[0]!.response?.action).toBe("accept");
+
+    await abortLoop(sinks, controller, loop);
+  });
+
+  it("rechecks a re-publish ignored during the verdict POST once it returns", async () => {
+    seedSession("conv_suppressed", []);
+    seedPendingElicitations("conv_suppressed", [
+      pendingElicitationRaw("elic_sup", "Pick an option?"),
+    ]);
+    const { sinks, controller, loop } = await openLoop("conv_suppressed");
+    sinks[0]!.push(elicitationReqFrame("elic_sup", "Pick an option?"));
+    await drainAsync();
+
+    const releaseResolves = holdElicitationResolves();
+    const submitted = useChatStore.getState().submitApproval("elic_sup", "decline");
+    await drainAsync();
+    // Ignored for now: the verdict may not have reached the server yet.
+    sinks[0]!.push(elicitationReqFrame("elic_sup", "Pick an option?"));
+    await drainAsync();
+    expect(elicitationCards()[0]!.status).toBe("responded");
+
+    // The POST returns and a fresh snapshot still lists the prompt, so the
+    // verdict never reached the hook; no further re-publish arrives.
+    releaseResolves();
+    await submitted;
+    await drainAsync();
+
+    const cards = elicitationCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.status).toBe("pending");
+    expect(cards[0]!.response).toBeNull();
+
     await abortLoop(sinks, controller, loop);
   });
 
@@ -18029,6 +18066,43 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     await closeLoop(sinks, loop);
   });
 
+  it("rechecks an answered card when its POST overlaps a reconnect that started first", async () => {
+    seedSession("conv_overlap", []);
+    seedPendingElicitations("conv_overlap", [
+      pendingElicitationRaw("elic_overlap", "Pick an option?"),
+    ]);
+    const { sinks, loop } = await openLoop("conv_overlap");
+    sinks[0]!.push(elicitationReqFrame("elic_overlap", "Pick an option?"));
+    await drainAsync();
+
+    // The reconnect captures the card while it is still pending.
+    const releaseSnapshot = holdNextSessionSnapshot("conv_overlap");
+    sinks[0]!.error();
+    await drainAsync();
+    expect(sinks).toHaveLength(2);
+
+    // The user answers while that reconcile waits, and the reconcile then
+    // finishes while the verdict POST is still in flight.
+    const releaseResolves = holdElicitationResolves();
+    const submitted = useChatStore.getState().submitApproval("elic_overlap", "decline");
+    await drainAsync();
+    releaseSnapshot();
+    await drainAsync();
+    expect(elicitationCards()[0]!.status).toBe("responded");
+
+    // The POST returns with the prompt still parked: the card reopens.
+    releaseResolves();
+    await submitted;
+    await drainAsync();
+
+    const cards = elicitationCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.status).toBe("pending");
+    expect(cards[0]!.response).toBeNull();
+
+    await closeLoop(sinks, loop);
+  });
+
   it("keeps a rechecked card answered when the prompt resolves during the recheck", async () => {
     seedSession("conv_recheck_resolved", []);
     seedPendingElicitations("conv_recheck_resolved", [
@@ -18051,6 +18125,9 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     releaseResolves();
     await submitted;
     await drainAsync();
+    // The server drops a prompt from its pending list before publishing its
+    // resolution, so later snapshots no longer list it.
+    seedPendingElicitations("conv_recheck_resolved", []);
     sinks[1]!.push(sse("response.elicitation_resolved", { elicitation_id: "elic_rr" }));
     await drainAsync();
     releaseSnapshot();
@@ -18081,6 +18158,9 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     sinks[0]!.error();
     await drainAsync();
     expect(sinks).toHaveLength(2);
+    // The server drops a prompt from its pending list before publishing its
+    // resolution, so later snapshots no longer list it.
+    seedPendingElicitations("conv_gap_resolved", []);
     sinks[1]!.push(sse("response.elicitation_resolved", { elicitation_id: "elic_gr" }));
     await drainAsync();
     releaseSnapshot();

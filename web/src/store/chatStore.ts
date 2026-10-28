@@ -3455,14 +3455,13 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       status: action === "accept" ? "success" : action === "decline" ? "failure" : "cancelled",
     });
     elicitationVerdictsInFlight.add(elicitationId);
-    const reconcilesBeforePost = reconnectReconcileCounts.get(sessionId) ?? 0;
     try {
       await approveElicitation(targetSessionId, elicitationId, {
         action,
         ...(content === undefined ? {} : { content }),
         ...(meta === undefined ? {} : { _meta: meta }),
       });
-      if ((reconnectReconcileCounts.get(sessionId) ?? 0) !== reconcilesBeforePost) {
+      if (elicitationRechecksAfterVerdict.delete(elicitationId)) {
         void recheckAnsweredElicitation(sessionId, elicitationId);
       }
     } catch {
@@ -3490,6 +3489,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       }));
     } finally {
       elicitationVerdictsInFlight.delete(elicitationId);
+      elicitationRechecksAfterVerdict.delete(elicitationId);
     }
   },
 
@@ -5754,6 +5754,7 @@ async function rehydrateWindowOnReconnect(
       historyGeneration: s.historyGeneration + 1,
     };
   });
+  queueAnsweredElicitationRechecks(id, snapshotPending, get().blocks);
 }
 
 /**
@@ -5790,7 +5791,6 @@ async function reconcileOnReconnect(
   ignoredNativeMessageIds: Set<string> = new Set<string>(),
 ): Promise<void> {
   if (queryClient === null) return;
-  reconnectReconcileCounts.set(id, (reconnectReconcileCounts.get(id) ?? 0) + 1);
   const launchBeforeFetch = mcpStartupBeforeSnapshot(id, get());
   // Captured before any await: the ids rendered BEFORE the gap. The overlap
   // check below must not be satisfied by items the reconnected pump appends
@@ -5948,6 +5948,7 @@ async function reconcileOnReconnect(
     if (nextBlocks !== s.blocks) patch.blocks = nextBlocks;
     return patch;
   });
+  queueAnsweredElicitationRechecks(id, snapshotPending, get().blocks);
 }
 
 // ── Presence idle reporting ─────────────────────────────────────────
@@ -6819,16 +6820,44 @@ function elicitationResolutionRevision(elicitationId: string): number {
 }
 
 /**
- * Reconnect reconciles started per conversation. `submitApproval` compares
- * the count across its POST to learn whether a reconcile ran while its
- * verdict was in flight, which `isRevivableElicitation` excludes.
+ * Elicitation ids to re-check once their verdict POST returns: the server
+ * showed the prompt waiting while the POST was in flight (a re-publish, or a
+ * reconnect snapshot), which `isRevivableElicitation` must ignore.
  */
-const reconnectReconcileCounts = new Map<string, number>();
+const elicitationRechecksAfterVerdict = new Set<string>();
 
 /**
- * Re-check an answered card once its verdict POST returns, when a reconnect
- * reconcile ran during the POST and so could not revive it. Reads a fresh
- * snapshot: one fetched while the POST was in flight may predate the verdict.
+ * Route answered cards that a reconnect snapshot still lists, but that the
+ * reconcile did not revive, through the fresh-snapshot recheck: the snapshot
+ * may predate the verdict (its POST overlapped the reconcile) or the card was
+ * answered after the pre-fetch capture. A card whose POST is still in flight
+ * is re-checked once the POST returns.
+ */
+function queueAnsweredElicitationRechecks(
+  conversationId: string,
+  snapshotPending: AnyBlock[],
+  blocks: AnyBlock[],
+): void {
+  const listed = new Set(
+    snapshotPending
+      .filter((b): b is ElicitationBlock => b.type === "elicitation")
+      .map((b) => b.elicitationId),
+  );
+  for (const b of blocks) {
+    if (b.type !== "elicitation" || b.status !== "responded" || b.nativeDelivery) continue;
+    if (b.response?.action === "auto_resolved" || !listed.has(b.elicitationId)) continue;
+    if (elicitationVerdictsInFlight.has(b.elicitationId)) {
+      elicitationRechecksAfterVerdict.add(b.elicitationId);
+    } else {
+      void recheckAnsweredElicitation(conversationId, b.elicitationId);
+    }
+  }
+}
+
+/**
+ * Re-check an answered card the server may still show as waiting. Reads a
+ * fresh snapshot, since one fetched while its verdict POST was in flight may
+ * predate the verdict.
  */
 async function recheckAnsweredElicitation(
   conversationId: string,
@@ -7102,6 +7131,8 @@ export async function pumpStreamEvents(
           continue;
         }
         if (get().blocks.some((b) => b.type === "elicitation" && b.elicitationId === eid)) {
+          // Ignored while its verdict POST is in flight; re-check once it returns.
+          if (elicitationVerdictsInFlight.has(eid)) elicitationRechecksAfterVerdict.add(eid);
           revivePendingElicitationBlock(set, eid, block);
           continue;
         }
