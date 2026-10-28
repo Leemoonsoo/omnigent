@@ -17987,6 +17987,40 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     await closeLoop(sinks, loop);
   });
 
+  it("rechecks an answered card after its verdict POST when a reconnect ran during it", async () => {
+    seedSession("conv_recheck", []);
+    seedPendingElicitations("conv_recheck", [
+      pendingElicitationRaw("elic_recheck", "Pick an option?"),
+    ]);
+    const { sinks, loop } = await openLoop("conv_recheck");
+    sinks[0]!.push(elicitationReqFrame("elic_recheck", "Pick an option?"));
+    await drainAsync();
+
+    const releaseResolves = holdElicitationResolves();
+    const submitted = useChatStore.getState().submitApproval("elic_recheck", "decline");
+    await drainAsync();
+
+    // A reconnect while the POST is in flight still sees the prompt pending,
+    // but must leave the card answered: the verdict may not have arrived yet.
+    sinks[0]!.error();
+    await drainAsync();
+    expect(sinks).toHaveLength(2);
+    expect(elicitationCards()[0]!.status).toBe("responded");
+
+    // The POST returns and the prompt is still parked (the verdict never
+    // reached the hook). The card reopens with no further stream event.
+    releaseResolves();
+    await submitted;
+    await drainAsync();
+
+    const cards = elicitationCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.status).toBe("pending");
+    expect(cards[0]!.response).toBeNull();
+
+    await closeLoop(sinks, loop);
+  });
+
   it("revives an answered card the reconnect snapshot still lists", async () => {
     seedSession("conv_lost_gap", []);
     seedPendingElicitations("conv_lost_gap", [

@@ -3455,12 +3455,16 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       status: action === "accept" ? "success" : action === "decline" ? "failure" : "cancelled",
     });
     elicitationVerdictsInFlight.add(elicitationId);
+    const reconcilesBeforePost = reconnectReconcileCounts.get(sessionId) ?? 0;
     try {
       await approveElicitation(targetSessionId, elicitationId, {
         action,
         ...(content === undefined ? {} : { content }),
         ...(meta === undefined ? {} : { _meta: meta }),
       });
+      if ((reconnectReconcileCounts.get(sessionId) ?? 0) !== reconcilesBeforePost) {
+        void recheckAnsweredElicitation(sessionId, elicitationId);
+      }
     } catch {
       // Roll back to pending so the user can retry. Surfacing the
       // error is a future affordance — for now, the buttons
@@ -5783,6 +5787,7 @@ async function reconcileOnReconnect(
   ignoredNativeMessageIds: Set<string> = new Set<string>(),
 ): Promise<void> {
   if (queryClient === null) return;
+  reconnectReconcileCounts.set(id, (reconnectReconcileCounts.get(id) ?? 0) + 1);
   const launchBeforeFetch = mcpStartupBeforeSnapshot(id, get());
   // Captured before any await: the ids rendered BEFORE the gap. The overlap
   // check below must not be satisfied by items the reconnected pump appends
@@ -6796,6 +6801,35 @@ function isRevivableElicitation(block: ElicitationBlock): boolean {
     block.response?.action === "auto_resolved" ||
     !elicitationVerdictsInFlight.has(block.elicitationId)
   );
+}
+
+/**
+ * Reconnect reconciles started per conversation. `submitApproval` compares
+ * the count across its POST to learn whether a reconcile ran while its
+ * verdict was in flight, which `isRevivableElicitation` excludes.
+ */
+const reconnectReconcileCounts = new Map<string, number>();
+
+/**
+ * Re-check an answered card once its verdict POST returns, when a reconnect
+ * reconcile ran during the POST and so could not revive it. Reads a fresh
+ * snapshot: one fetched while the POST was in flight may predate the verdict.
+ */
+async function recheckAnsweredElicitation(
+  conversationId: string,
+  elicitationId: string,
+): Promise<void> {
+  let session: Session;
+  try {
+    session = await getSessionSlim(conversationId);
+  } catch {
+    return;
+  }
+  if (isConversationDisposed(conversationId)) return;
+  const stillPending = pendingElicitationBlocksFromSnapshot(session).some(
+    (b) => b.type === "elicitation" && b.elicitationId === elicitationId,
+  );
+  if (stillPending) revivePendingElicitationBlock(setterFor(conversationId), elicitationId);
 }
 
 /**

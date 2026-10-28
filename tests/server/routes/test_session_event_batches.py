@@ -457,15 +457,33 @@ class _FailingCallLookupStore(_RecordingStore):
         raise RuntimeError("test-induced list_items failure")
 
 
-def test_failed_mirrored_call_lookup_does_not_stop_batch_delivery() -> None:
-    """A failed store lookup for a tool result's call leaves later items published."""
-    # A parked prompt in this session makes each uncached tool result look its call up.
+def _park_prompt_for_session() -> None:
+    """Park a prompt here, so each uncached tool result looks its call up."""
     _harness_parked_elicitations["e_parked"] = _ParkedHarnessElicitation(
         session_id=_SESSION_ID,
         tool_name="bash",
         tool_input={},
         resolved_elsewhere=asyncio.Event(),
     )
+
+
+def test_failed_mirrored_call_lookup_does_not_stop_single_item_delivery() -> None:
+    """A single-event POST still publishes its tool result when the lookup fails."""
+    _park_prompt_for_session()
+    store = _FailingCallLookupStore(_make_conv())
+    recorder = _SideEffectRecorder()
+
+    with recorder.patch():
+        resp, _ = _post(_tool_output_event("toolu_single"), store=store)
+
+    assert resp.status_code == 202, resp.text
+    assert store.list_calls == 1
+    assert len(recorder.published) == 1
+
+
+def test_failed_mirrored_call_lookup_does_not_stop_batch_delivery() -> None:
+    """A failed store lookup for a tool result's call leaves later items published."""
+    _park_prompt_for_session()
     store = _FailingCallLookupStore(_make_conv())
     recorder = _SideEffectRecorder()
 
