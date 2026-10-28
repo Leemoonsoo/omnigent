@@ -17597,6 +17597,30 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     return release;
   }
 
+  /** Hold the next GET of `id`'s session snapshot until the returned release
+   *  runs. The response is built when the request is made, so it reflects the
+   *  server state at that moment. */
+  function holdNextSessionSnapshot(id: string): () => void {
+    const route = fetchMock.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holdNext = true;
+    const snapshotUrl = new RegExp(`^/v1/sessions/${id}(?:\\?.*)?$`);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (holdNext && snapshotUrl.test(url) && (init?.method ?? "GET") === "GET") {
+        holdNext = false;
+        const response = route(input, init);
+        await held;
+        return response;
+      }
+      return route(input, init);
+    });
+    return release;
+  }
+
   /** Drain the pump + reconcile's sequential await chain under fake timers. */
   async function drainAsync(turns = 25): Promise<void> {
     /* oxlint-disable no-await-in-loop */
@@ -17940,23 +17964,7 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
 
     // A shared session request starts while the prompt is pending, and its
     // response (still listing the prompt) is held.
-    const route = fetchMock.getMockImplementation()!;
-    let releaseSnapshot!: () => void;
-    const snapshotHeld = new Promise<void>((resolve) => {
-      releaseSnapshot = resolve;
-    });
-    let holdNext = true;
-    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
-      const isSnapshot = /^\/v1\/sessions\/conv_old_snapshot(?:\?.*)?$/.test(url);
-      if (holdNext && isSnapshot && (init?.method ?? "GET") === "GET") {
-        holdNext = false;
-        const response = route(input, init);
-        await snapshotHeld;
-        return response;
-      }
-      return route(input, init);
-    });
+    const releaseSnapshot = holdNextSessionSnapshot("conv_old_snapshot");
     const olderRequest = client
       .fetchQuery({
         queryKey: ["session", "conv_old_snapshot"],
@@ -18017,6 +18025,71 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     expect(cards).toHaveLength(1);
     expect(cards[0]!.status).toBe("pending");
     expect(cards[0]!.response).toBeNull();
+
+    await closeLoop(sinks, loop);
+  });
+
+  it("keeps a rechecked card answered when the prompt resolves during the recheck", async () => {
+    seedSession("conv_recheck_resolved", []);
+    seedPendingElicitations("conv_recheck_resolved", [
+      pendingElicitationRaw("elic_rr", "Pick an option?"),
+    ]);
+    const { sinks, loop } = await openLoop("conv_recheck_resolved");
+    sinks[0]!.push(elicitationReqFrame("elic_rr", "Pick an option?"));
+    await drainAsync();
+
+    const releaseResolves = holdElicitationResolves();
+    const submitted = useChatStore.getState().submitApproval("elic_rr", "decline");
+    await drainAsync();
+    sinks[0]!.error();
+    await drainAsync();
+    expect(sinks).toHaveLength(2);
+
+    // The POST returns; the recheck's snapshot is read while the prompt is
+    // still parked, then the prompt resolves before that snapshot arrives.
+    const releaseSnapshot = holdNextSessionSnapshot("conv_recheck_resolved");
+    releaseResolves();
+    await submitted;
+    await drainAsync();
+    sinks[1]!.push(sse("response.elicitation_resolved", { elicitation_id: "elic_rr" }));
+    await drainAsync();
+    releaseSnapshot();
+    await drainAsync();
+
+    // Reopened = the recheck trusted a snapshot that predates the resolution.
+    const cards = elicitationCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.status).toBe("responded");
+    expect(cards[0]!.response?.action).toBe("decline");
+
+    await closeLoop(sinks, loop);
+  });
+
+  it("keeps an answered card closed when the prompt resolves during the reconnect", async () => {
+    seedSession("conv_gap_resolved", []);
+    seedPendingElicitations("conv_gap_resolved", [
+      pendingElicitationRaw("elic_gr", "Pick an option?"),
+    ]);
+    const { sinks, loop } = await openLoop("conv_gap_resolved");
+    sinks[0]!.push(elicitationReqFrame("elic_gr", "Pick an option?"));
+    await drainAsync();
+    await useChatStore.getState().submitApproval("elic_gr", "decline");
+
+    // The reconnect's snapshot is read while the prompt is still parked, then
+    // the prompt resolves on the new stream before that snapshot arrives.
+    const releaseSnapshot = holdNextSessionSnapshot("conv_gap_resolved");
+    sinks[0]!.error();
+    await drainAsync();
+    expect(sinks).toHaveLength(2);
+    sinks[1]!.push(sse("response.elicitation_resolved", { elicitation_id: "elic_gr" }));
+    await drainAsync();
+    releaseSnapshot();
+    await drainAsync();
+
+    const cards = elicitationCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.status).toBe("responded");
+    expect(cards[0]!.response?.action).toBe("decline");
 
     await closeLoop(sinks, loop);
   });
