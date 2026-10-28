@@ -405,6 +405,13 @@ create or select a closable Browser soft tab automatically.
 recent sessions. Continue pressing Tab (or Shift+Tab) to cycle, release Control
 to switch, or press Escape to cancel.
 
+**History arrows, desktop app:** the Back and Forward arrows sit at the left of
+the page header, next to the sidebar toggle. On macOS they follow the title-bar
+Search/Settings/collapse controls when the sidebar is collapsed and start the
+main pane's header when it is open; on Windows and Linux they follow the
+sidebar toggle. **iOS and Android apps:** the arrows sit next to the header's
+menu button on phones and at the left of the header on tablets.
+
 ## Driving it with the repro environment
 
 Preconditions: a running instance (`verify-env start`, then `verify-env
@@ -771,6 +778,15 @@ plain `uv run pytest`, which starts a private server for the test.
 - **`recent-switcher` (manual Electron):** open at least six sessions, hold
   Control and press Tab to show the five most recent, cycle with Tab and
   Shift+Tab, release Control to switch, then reopen and press Escape to cancel.
+- **`history-navigation` (component):**
+  `web/src/shell/HistoryNavigationButtons.test.tsx` (shell gating, router
+  stepping, and the mount-path boundary) and the `shell history navigation`
+  cases in `web/src/shell/ChatHeader.test.tsx`. **Manual, desktop and phone
+  apps:** open sessions A, B, and C from the sidebar; Back is enabled and
+  Forward disabled. Press Back twice to reach A (Back is now disabled), Forward
+  once to reach B, then open Settings and press Back to return to B. Switching
+  Chat/Terminal is not a step. Against a workspace-hosted server, Back on the
+  first app page stays disabled instead of returning to the workspace root.
 - **`browser-storage` (real Electron, own environment):**
   `web/electron/e2e/desktop_cookie_isolation.e2e.js`. Sign into a site in one
   tab, open it in another tab and the agent browser, and confirm both are signed
@@ -858,6 +874,9 @@ plain `uv run pytest`, which starts a private server for the test.
 
 ## Gotchas
 
+- History arrows render only in the native shells. A browser tab shows none, so
+  a browser run with an injected bridge marker checks layout and stepping but
+  not the packaged app's Navigation API or its root redirect.
 - Existing side chats on separate runners must still be closed individually.
   Hostless CLI Stop keeps its existing per-conversation behavior.
 - Starting a side chat after its parent stopped relaunches the parent. The new
