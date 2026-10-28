@@ -3972,15 +3972,11 @@ async def _drive_terminal_resolved_elicitation_from_store(
     """
     Resolve a parked prompt from a mirrored result whose call this replica never saw.
 
-    :data:`_recent_mirrored_tool_calls` is per process. When the session's
-    traffic moves to another replica between a gated tool call and its
-    result (a rolling deploy moves it to the slice's new owner), the result
-    arrives where the call was never cached, and
-    :func:`_drive_terminal_resolved_elicitation` cannot recover the tool
-    identity. The prompt the hook re-parked here then stays open, and is
-    re-published as pending, until the hook gives up. Read the call from
-    the store instead. This runs only on a cache miss while the session has
-    a parked prompt here, so ordinary results cost no store read.
+    :data:`_recent_mirrored_tool_calls` is per process, so a result can arrive
+    on a replica that never cached its call (the session moved replicas in
+    between). On a process-cache miss, load the mirrored call only while this
+    session has a parked prompt. Best effort: a failed lookup is logged and
+    must not interrupt transcript delivery.
 
     :param session_id: Omnigent conversation id the item was mirrored for,
         e.g. ``"conv_abc123"``.
@@ -3998,13 +3994,19 @@ async def _drive_terminal_resolved_elicitation_from_store(
         for parked in _harness_parked_elicitations.values()
     ):
         return
-    page = await asyncio.to_thread(
-        conversation_store.list_items,
-        session_id,
-        limit=_MIRRORED_TOOL_CALL_STORE_LOOKBACK,
-        order="desc",
-        type="function_call",
-    )
+    try:
+        page = await asyncio.to_thread(
+            conversation_store.list_items,
+            session_id,
+            limit=_MIRRORED_TOOL_CALL_STORE_LOOKBACK,
+            order="desc",
+            type="function_call",
+        )
+    except Exception:  # noqa: BLE001 — optional correlation must not interrupt delivery
+        _logger.warning(
+            "Could not load the mirrored call for a tool result in %s", session_id, exc_info=True
+        )
+        return
     for item in page.data:
         call = item.data
         if isinstance(call, FunctionCallData) and call.call_id == data.call_id:

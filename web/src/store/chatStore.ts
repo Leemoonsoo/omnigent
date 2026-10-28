@@ -5802,13 +5802,15 @@ async function reconcileOnReconnect(
   const stale = (): boolean => isConversationDisposed(id) || get().historyGeneration !== generation;
   let session: Session;
   let page: SessionItemsPage;
+  const client = queryClient;
   try {
     [session, page] = await Promise.all([
-      queryClient.fetchQuery({
-        queryKey: ["session", id],
-        queryFn: () => getSessionSlim(id),
-        staleTime: 0,
-        retry: false,
+      // Read fresh rather than join the shared ["session", id] request: one
+      // started before an answered card's verdict POST returned can still list
+      // that prompt as pending, and the reconcile would reopen the card.
+      getSessionSlim(id).then((fresh) => {
+        client.setQueryData(["session", id], fresh);
+        return fresh;
       }),
       fetchSessionItemsPage(id),
     ]);

@@ -8,6 +8,7 @@ conversation_store.append once per run instead of once per item.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import uuid as _uuid_mod
 from itertools import count
@@ -24,6 +25,10 @@ from omnigent.entities import NewConversationItem
 from omnigent.entities.conversation import Conversation, ConversationItem
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.runtime import pending_inputs
+from omnigent.server._elicitation_registry import (
+    _harness_parked_elicitations,
+    _ParkedHarnessElicitation,
+)
 from omnigent.server.routes.sessions import create_sessions_router
 
 _SESSION_ID = "conv_test"
@@ -426,6 +431,55 @@ def test_dedup_items_not_elicitation_driven() -> None:
     assert resp.status_code == 202
     assert len(recorder.driven) == 2
     assert _stable_id(src_b) not in recorder.driven
+
+
+def _tool_output_event(call_id: str, *, response_id: str = "resp_1") -> dict:
+    return {
+        "type": "external_conversation_item",
+        "data": {
+            "item_type": "function_call_output",
+            "item_data": {"call_id": call_id, "output": "ok"},
+            "response_id": response_id,
+        },
+    }
+
+
+class _FailingCallLookupStore(_RecordingStore):
+    """Store whose item listing fails, as a database outage would."""
+
+    def __init__(self, conv: Conversation) -> None:
+        super().__init__(conv)
+        self.list_calls = 0
+
+    def list_items(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            self.list_calls += 1
+        raise RuntimeError("test-induced list_items failure")
+
+
+def test_failed_mirrored_call_lookup_does_not_stop_batch_delivery() -> None:
+    """A failed store lookup for a tool result's call leaves later items published."""
+    # A parked prompt in this session makes each uncached tool result look its call up.
+    _harness_parked_elicitations["e_parked"] = _ParkedHarnessElicitation(
+        session_id=_SESSION_ID,
+        tool_name="bash",
+        tool_input={},
+        resolved_elsewhere=asyncio.Event(),
+    )
+    store = _FailingCallLookupStore(_make_conv())
+    recorder = _SideEffectRecorder()
+
+    with recorder.patch():
+        resp, _ = _post(
+            [_tool_output_event("toolu_a"), _tool_output_event("toolu_b"), _assistant_event()],
+            store=store,
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert store.list_calls == 2
+    assert len(resp.json()) == 3
+    # Every committed item reached live subscribers despite both failed lookups.
+    assert len(recorder.published) == 3
 
 
 # ── tests: invalid source_id ──────────────────────────────────────────────────

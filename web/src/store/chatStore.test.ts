@@ -17929,6 +17929,64 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     await abortLoop(sinks, controller, loop);
   });
 
+  it("keeps an answered card closed when reconnect could join an older snapshot request", async () => {
+    seedSession("conv_old_snapshot", []);
+    seedPendingElicitations("conv_old_snapshot", [
+      pendingElicitationRaw("elic_old", "Pick an option?"),
+    ]);
+    const { sinks, loop } = await openLoop("conv_old_snapshot");
+    sinks[0]!.push(elicitationReqFrame("elic_old", "Pick an option?"));
+    await drainAsync();
+
+    // A shared session request starts while the prompt is pending, and its
+    // response (still listing the prompt) is held.
+    const route = fetchMock.getMockImplementation()!;
+    let releaseSnapshot!: () => void;
+    const snapshotHeld = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    let holdNext = true;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const isSnapshot = /^\/v1\/sessions\/conv_old_snapshot(?:\?.*)?$/.test(url);
+      if (holdNext && isSnapshot && (init?.method ?? "GET") === "GET") {
+        holdNext = false;
+        const response = route(input, init);
+        await snapshotHeld;
+        return response;
+      }
+      return route(input, init);
+    });
+    const olderRequest = client
+      .fetchQuery({
+        queryKey: ["session", "conv_old_snapshot"],
+        queryFn: () => getSessionSlim("conv_old_snapshot"),
+        staleTime: 0,
+      })
+      .catch(() => undefined);
+    await drainAsync();
+
+    // The answer is accepted and the server clears the prompt.
+    await useChatStore.getState().submitApproval("elic_old", "decline");
+    seedPendingElicitations("conv_old_snapshot", []);
+
+    // Reconnect while the older request is still in flight, then let it return.
+    sinks[0]!.error();
+    await drainAsync();
+    releaseSnapshot();
+    await olderRequest;
+    await drainAsync();
+    expect(sinks).toHaveLength(2);
+
+    // Reopened = the reconcile used the older snapshot, which predates the answer.
+    const cards = elicitationCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.status).toBe("responded");
+    expect(cards[0]!.response?.action).toBe("decline");
+
+    await closeLoop(sinks, loop);
+  });
+
   it("revives an answered card the reconnect snapshot still lists", async () => {
     seedSession("conv_lost_gap", []);
     seedPendingElicitations("conv_lost_gap", [
