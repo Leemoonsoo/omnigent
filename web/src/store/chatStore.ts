@@ -3454,6 +3454,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       phase: "complete",
       status: action === "accept" ? "success" : action === "decline" ? "failure" : "cancelled",
     });
+    elicitationVerdictsInFlight.add(elicitationId);
     try {
       await approveElicitation(targetSessionId, elicitationId, {
         action,
@@ -3483,6 +3484,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
             : b,
         ),
       }));
+    } finally {
+      elicitationVerdictsInFlight.delete(elicitationId);
     }
   },
 
@@ -5487,9 +5490,11 @@ async function reconcileActiveSessionStatus(
  * - A rendered pending card absent from the snapshot → flip to
  *   "Resolved elsewhere" (it was answered during the gap), mirroring
  *   the missed `response.elicitation_resolved` event.
- * - A rendered auto-resolved card present in the snapshot → flip back
- *   to pending in place (the prompt re-parked after its deferred clear
- *   fired), so the user can still answer it.
+ * - A rendered auto-resolved or answered card present in the snapshot
+ *   → flip back to pending in place (the prompt re-parked after its
+ *   deferred clear fired, or the answer never reached the waiting
+ *   hook), so the user can still answer it. See
+ *   `isRevivableElicitation`.
  *
  * The two flips are restricted to cards captured in the `preGap*` sets
  * — cards the caller saw BEFORE fetching the snapshot. Cards the live
@@ -5502,7 +5507,7 @@ function reconcileElicitationBlocks(
   blocks: AnyBlock[],
   snapshotPending: AnyBlock[],
   preGapPendingIds: Set<string>,
-  preGapAutoResolvedIds: Set<string>,
+  preGapRevivableIds: Set<string>,
   preGapCards: Map<string, ElicitationBlock>,
 ): AnyBlock[] | null {
   const pendingNow = new Set(
@@ -5542,10 +5547,8 @@ function reconcileElicitationBlocks(
       return updated;
     }
     if (
-      b.status === "responded" &&
-      b.response?.action === "auto_resolved" &&
-      !b.nativeDelivery &&
-      preGapAutoResolvedIds.has(b.elicitationId) &&
+      isRevivableElicitation(b) &&
+      preGapRevivableIds.has(b.elicitationId) &&
       pendingNow.has(b.elicitationId)
     ) {
       changed = true;
@@ -5600,26 +5603,26 @@ function withoutRebuiltUserInputCards(
 /**
  * Snapshot the ids of currently rendered elicitation cards, split by
  * answerable state, BEFORE a snapshot fetch. `pending` cards are
- * eligible for the gap-resolved flip; `autoResolved` cards are
+ * eligible for the gap-resolved flip; `revivable` cards are
  * eligible for the re-parked revival. See
  * `reconcileElicitationBlocks` for why eligibility is captured ahead
  * of the fetch.
  */
 function captureElicitationIdsByStatus(blocks: AnyBlock[]): {
   pending: Set<string>;
-  autoResolved: Set<string>;
+  revivable: Set<string>;
   cards: Map<string, ElicitationBlock>;
 } {
   const cards = new Map<string, ElicitationBlock>();
   const pending = new Set<string>();
-  const autoResolved = new Set<string>();
+  const revivable = new Set<string>();
   for (const b of blocks) {
     if (b.type !== "elicitation") continue;
     cards.set(b.elicitationId, b);
     if (b.status === "pending") pending.add(b.elicitationId);
-    else if (b.response?.action === "auto_resolved") autoResolved.add(b.elicitationId);
+    else if (isRevivableElicitation(b)) revivable.add(b.elicitationId);
   }
-  return { pending, autoResolved, cards };
+  return { pending, revivable, cards };
 }
 
 function blockWallClockS(block: AnyBlock): number | undefined {
@@ -5727,7 +5730,7 @@ async function rehydrateWindowOnReconnect(
         merged,
         snapshotPending,
         preGapElicitations.pending,
-        preGapElicitations.autoResolved,
+        preGapElicitations.revivable,
         preGapElicitations.cards,
       ) ?? merged;
     return {
@@ -5926,7 +5929,7 @@ async function reconcileOnReconnect(
       nextBlocks,
       snapshotPending,
       preGapElicitations.pending,
-      preGapElicitations.autoResolved,
+      preGapElicitations.revivable,
       preGapElicitations.cards,
     );
     if (reconciled !== null) nextBlocks = reconciled;
@@ -6766,16 +6769,37 @@ export function isStaleCompletedResponse(s: { activeResponse: ActiveResponse | n
 }
 
 /**
- * Flip an auto-resolved ApprovalCard back to answerable, in place.
+ * Elicitation ids whose verdict POST (`submitApproval`) has not returned yet.
+ * While one is in flight, a re-publish may predate the server receiving the
+ * verdict, so the card must stay answered; `submitApproval` rolls it back if
+ * the POST fails.
+ */
+const elicitationVerdictsInFlight = new Set<string>();
+
+/**
+ * Whether a responded card may flip back to pending when the server shows
+ * its prompt waiting again (a re-published request, or the reconnect
+ * snapshot's pending list).
  *
- * Used when the server re-publishes `response.elicitation_request` for
- * an id whose card was already flipped to "Resolved elsewhere" (the
- * deferred clear after a severed harness wait fired before the retry
- * re-parked) — the re-publish proves the prompt is parked again and
- * still waiting for a verdict. Only an `auto_resolved` card is
- * revived: a card carrying a real user verdict means an answer is
- * already in flight, and `submitApproval` owns rolling that back if
- * its POST fails.
+ * The server adopts a stored verdict before it publishes a re-parked
+ * prompt, so a prompt published after its verdict POST returned is still
+ * waiting: the deferred clear fired before the retry re-parked
+ * ("Resolved elsewhere"), or the verdict never reached the waiting hook
+ * (it landed on a replica that had none). A verdict still in flight is
+ * excluded. Native-delivery cards follow their own delivery state.
+ */
+function isRevivableElicitation(block: ElicitationBlock): boolean {
+  if (block.status !== "responded" || block.nativeDelivery) return false;
+  return (
+    block.response?.action === "auto_resolved" ||
+    !elicitationVerdictsInFlight.has(block.elicitationId)
+  );
+}
+
+/**
+ * Flip a responded ApprovalCard back to answerable, in place, when the
+ * server re-publishes `response.elicitation_request` for its id; see
+ * `isRevivableElicitation` for which cards qualify.
  */
 function revivePendingElicitationBlock(
   set: Setter,
@@ -6794,7 +6818,7 @@ function revivePendingElicitationBlock(
       const updated = { ...incoming, ctx: target.ctx };
       return { blocks: [...s.blocks.slice(0, idx), updated, ...s.blocks.slice(idx + 1)] };
     }
-    if (target.status !== "responded" || target.response?.action !== "auto_resolved") return {};
+    if (!isRevivableElicitation(target)) return {};
     const updated: ElicitationBlock = { ...target, status: "pending", response: null };
     return { blocks: [...s.blocks.slice(0, idx), updated, ...s.blocks.slice(idx + 1)] };
   });
@@ -7012,9 +7036,8 @@ export async function pumpStreamEvents(
       // server re-publishes the same id whenever a severed harness wait
       // re-parks (hook retries reuse their id), so an already-rendered
       // id must not append a second card: a pending card (or one
-      // carrying an in-flight user verdict) stays untouched, and a card
-      // the deferred clear flipped to "Resolved elsewhere" is revived
-      // to answerable in place.
+      // carrying an in-flight user verdict) stays untouched, and a
+      // responded card is revived to answerable in place.
       if (block.type === "elicitation") {
         const eid = block.elicitationId;
         const buffered = buffer.findIndex(

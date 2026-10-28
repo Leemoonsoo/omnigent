@@ -17582,6 +17582,21 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
       .blocks.filter((b): b is ElicitationBlock => b.type === "elicitation");
   }
 
+  /** Hold every elicitation resolve POST until the returned release runs. */
+  function holdElicitationResolves(): () => void {
+    const route = fetchMock.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (/\/elicitations\/[^/]+\/resolve$/.test(url)) await held;
+      return route(input, init);
+    });
+    return release;
+  }
+
   /** Drain the pump + reconcile's sequential await chain under fake timers. */
   async function drainAsync(turns = 25): Promise<void> {
     /* oxlint-disable no-await-in-loop */
@@ -17865,15 +17880,17 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
   it("does not clobber an in-flight user verdict with a re-publish", async () => {
     seedSession("conv_verdict", []);
     const { sinks, controller, loop } = await openLoop("conv_verdict");
+    const releaseResolves = holdElicitationResolves();
 
     sinks[0]!.push(elicitationReqFrame("elic_v", "Approve verdict?"));
     await drainAsync();
-    await useChatStore.getState().submitApproval("elic_v", "accept");
+    const submitted = useChatStore.getState().submitApproval("elic_v", "accept");
+    await drainAsync();
     expect(elicitationCards()[0]!.response?.action).toBe("accept");
 
-    // A re-publish racing the verdict POST must not re-open the card —
-    // the user already answered; submitApproval owns rolling back its
-    // own optimistic flip if the POST fails.
+    // A re-publish racing the verdict POST may predate the server receiving
+    // the verdict, so it must not re-open the card; submitApproval owns
+    // rolling back its own optimistic flip if the POST fails.
     sinks[0]!.push(elicitationReqFrame("elic_v", "Approve verdict?"));
     await drainAsync();
 
@@ -17882,7 +17899,60 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     expect(cards[0]!.status).toBe("responded");
     expect(cards[0]!.response?.action).toBe("accept");
 
+    releaseResolves();
+    await submitted;
     await abortLoop(sinks, controller, loop);
+  });
+
+  it("revives an answered card when its prompt re-publishes after the verdict POST", async () => {
+    seedSession("conv_lost_verdict", []);
+    const { sinks, controller, loop } = await openLoop("conv_lost_verdict");
+
+    sinks[0]!.push(elicitationReqFrame("elic_lost", "Pick an option?"));
+    await drainAsync();
+    await useChatStore.getState().submitApproval("elic_lost", "decline");
+    expect(elicitationCards()[0]!.response?.action).toBe("decline");
+
+    // The server adopts a stored verdict before re-publishing, so a
+    // re-publish after the POST returned means the verdict never reached
+    // the waiting hook (it landed on a replica with no waiter).
+    sinks[0]!.push(elicitationReqFrame("elic_lost", "Pick an option?"));
+    await drainAsync();
+
+    const cards = elicitationCards();
+    // Answerable again, in place. Left "responded" = the prompt the agent
+    // is still blocked on has no card the user can answer.
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.status).toBe("pending");
+    expect(cards[0]!.response).toBeNull();
+
+    await abortLoop(sinks, controller, loop);
+  });
+
+  it("revives an answered card the reconnect snapshot still lists", async () => {
+    seedSession("conv_lost_gap", []);
+    seedPendingElicitations("conv_lost_gap", [
+      pendingElicitationRaw("elic_gap_lost", "Pick an option?"),
+    ]);
+    const { sinks, loop } = await openLoop("conv_lost_gap");
+
+    sinks[0]!.push(elicitationReqFrame("elic_gap_lost", "Pick an option?"));
+    await drainAsync();
+    await useChatStore.getState().submitApproval("elic_gap_lost", "decline");
+    expect(elicitationCards()[0]!.response?.action).toBe("decline");
+
+    // The stream drops; the prompt re-parked during the gap, so the
+    // snapshot still lists it after the verdict POST returned.
+    sinks[0]!.error();
+    await drainAsync();
+    expect(sinks).toHaveLength(2);
+
+    const cards = elicitationCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.status).toBe("pending");
+    expect(cards[0]!.response).toBeNull();
+
+    await closeLoop(sinks, loop);
   });
 });
 
