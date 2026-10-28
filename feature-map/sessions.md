@@ -102,6 +102,13 @@ the header menu), and each place is a separate entry point.
 - `resume-imported`: an imported session can be resumed onto a chosen local host.
 - `recent-switcher`: the desktop app opens the five most recent sessions with
   Control+Tab; Tab and Shift+Tab cycle, releasing Control switches, and Escape cancels.
+- `history-navigation`: the desktop app and the iOS/Android apps show Back and
+  Forward arrows at the left of the page header. They step through the pages
+  visited in that window (sessions, sub-agent sessions, Inbox, Settings);
+  switching Chat/Terminal or opening a file is not a step. An arrow is disabled
+  when there is nothing in its direction. Browser tabs, WebViews without the
+  Navigation API, and phone app builds without the sidebar server picker show
+  no arrows.
 - `browser-storage`: browser soft tabs, including one opened by the agent, share
   cookies within a session; different sessions stay isolated. Navigation stays
   per-tab. On macOS the browser toolbar can also import the current site's

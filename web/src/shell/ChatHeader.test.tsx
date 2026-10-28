@@ -322,6 +322,32 @@ describe("ChatHeader — workspace pane shortcut", () => {
   });
 });
 
+describe("ChatHeader — shell history navigation", () => {
+  afterEach(() => {
+    const shellWindow = window as { omnigentDesktop?: unknown; navigation?: unknown };
+    delete shellWindow.omnigentDesktop;
+    delete shellWindow.navigation;
+  });
+
+  it.each([true, false])("shows Back/Forward in the shell (sidebarOpen=%s)", (sidebarOpen) => {
+    (window as { omnigentDesktop?: unknown }).omnigentDesktop = { kind: "electron" };
+    Object.defineProperty(window, "navigation", {
+      configurable: true,
+      value: Object.assign(new EventTarget(), { canGoBack: true, canGoForward: false }),
+    });
+    renderHeader({ sidebarOpen });
+
+    expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Open sidebar" }) !== null).toBe(!sidebarOpen);
+  });
+
+  it("leaves the header unchanged in a browser tab", () => {
+    renderHeader({ sidebarOpen: true });
+    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+  });
+});
+
 describe("ChatHeader — open-sidebar toggle visibility", () => {
   it("hides the toggle entirely when the sidebar is open", () => {
     renderHeader({ sidebarOpen: true });
