@@ -329,7 +329,7 @@ describe("ChatHeader — shell history navigation", () => {
     delete shellWindow.navigation;
   });
 
-  it.each([true, false])("shows Back/Forward in the shell (sidebarOpen=%s)", (sidebarOpen) => {
+  function installShellHistory() {
     (window as { omnigentDesktop?: unknown }).omnigentDesktop = { kind: "electron" };
     const entries = ["/c/first", "/c/second"].map((path, index) => ({
       index,
@@ -339,11 +339,27 @@ describe("ChatHeader — shell history navigation", () => {
       configurable: true,
       value: Object.assign(new EventTarget(), { entries: () => entries, currentEntry: entries[1] }),
     });
+  }
+
+  it.each([true, false])("shows Back/Forward in the shell (sidebarOpen=%s)", (sidebarOpen) => {
+    installShellHistory();
     renderHeader({ sidebarOpen });
 
     expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Open sidebar" }) !== null).toBe(!sidebarOpen);
+  });
+
+  it.each([
+    [false, true],
+    [true, false],
+  ])("shows Back/Forward in Settings only off phones (mobile=%s)", (mobile, shown) => {
+    installShellHistory();
+    isMobileMock.mockReturnValue(mobile);
+    renderHeader({ sidebarOpen: false, settingsMode: true });
+
+    expect(screen.getByRole("button", { name: "Back to settings menu" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Back" }) !== null).toBe(shown);
   });
 });
 

@@ -572,7 +572,8 @@ export function ChatHeader({
                 componentId="chat.header.open_sidebar"
               />
             )}
-            <HistoryNavigationButtons />
+            {/* Phone Settings has its own back control and centers a fixed title over this slot. */}
+            {!(settingsMode && isMobile) && <HistoryNavigationButtons />}
           </div>
         )}
         {canvas?.compact && (

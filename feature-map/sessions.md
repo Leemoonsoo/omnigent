@@ -108,8 +108,9 @@ the header menu), and each place is a separate entry point.
   switching Chat/Terminal or opening a file is not a step. An arrow is disabled
   when there is nothing in its direction or the next page is outside the app,
   such as the workspace root of a workspace-hosted server. Browser tabs,
-  WebViews without the Navigation API, and phone app builds without the sidebar
-  server picker show no arrows.
+  WebViews without the Navigation API, phone app builds without the sidebar
+  server picker, and phone-width Settings pages, which keep their own back
+  arrow, show no arrows.
 - `browser-storage`: browser soft tabs, including one opened by the agent, share
   cookies within a session; different sessions stay isolated. Navigation stays
   per-tab. On macOS the browser toolbar can also import the current site's
@@ -410,7 +411,8 @@ the page header, next to the sidebar toggle. On macOS they follow the title-bar
 Search/Settings/collapse controls when the sidebar is collapsed and start the
 main pane's header when it is open; on Windows and Linux they follow the
 sidebar toggle. **iOS and Android apps:** the arrows sit next to the header's
-menu button on phones and at the left of the header on tablets.
+menu button on phones (except on Settings pages) and at the left of the
+header on tablets.
 
 ## Driving it with the repro environment
 

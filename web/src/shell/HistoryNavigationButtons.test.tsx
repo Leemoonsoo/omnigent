@@ -150,10 +150,15 @@ describe("HistoryNavigationButtons", () => {
   ])("stops at a same-origin page outside the app when %s", (_mount, root, setUpMount) => {
     (window as ShellWindow).omnigentDesktop = { kind: "electron" };
     // The desktop shell redirects the workspace root into the app.
-    installNavigation(["/", `${root}/c/first`, `${root}/c/second`], 1);
+    const navigation = installNavigation(["/", `${root}/c/first`, `${root}-other/c/first`], 1);
     renderButtons(["/c/first"], setUpMount());
 
     expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+    // A sibling path that only shares the mount's prefix is outside the app too.
+    expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled();
+
+    navigation.paths[2] = `${root}/c/second`;
+    act(() => navigation.moveTo(1));
     expect(screen.getByRole("button", { name: "Forward" })).toBeEnabled();
   });
 });
