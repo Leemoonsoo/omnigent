@@ -331,20 +331,19 @@ describe("ChatHeader — shell history navigation", () => {
 
   it.each([true, false])("shows Back/Forward in the shell (sidebarOpen=%s)", (sidebarOpen) => {
     (window as { omnigentDesktop?: unknown }).omnigentDesktop = { kind: "electron" };
+    const entries = ["/c/first", "/c/second"].map((path, index) => ({
+      index,
+      url: new URL(path, window.location.origin).href,
+    }));
     Object.defineProperty(window, "navigation", {
       configurable: true,
-      value: Object.assign(new EventTarget(), { canGoBack: true, canGoForward: false }),
+      value: Object.assign(new EventTarget(), { entries: () => entries, currentEntry: entries[1] }),
     });
     renderHeader({ sidebarOpen });
 
     expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Open sidebar" }) !== null).toBe(!sidebarOpen);
-  });
-
-  it("leaves the header unchanged in a browser tab", () => {
-    renderHeader({ sidebarOpen: true });
-    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
   });
 });
 

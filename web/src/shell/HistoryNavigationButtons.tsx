@@ -3,13 +3,14 @@ import { useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { withBasePath } from "@/lib/basePath";
 import {
   isAndroidShell,
   isIOSShell,
   isNativeShell,
   supportsNativeServerPicker,
 } from "@/lib/nativeBridge";
-import { useNavigate } from "@/lib/routing";
+import { useNavigate, useRebasePath } from "@/lib/routing";
 
 /**
  * The Navigation API inside a native shell, or undefined in a browser tab
@@ -20,7 +21,7 @@ function shellNavigation(): Navigation | undefined {
   // Phone shells without the sidebar server picker float a switcher over the header.
   if ((isIOSShell() || isAndroidShell()) && !supportsNativeServerPicker()) return undefined;
   const navigation = (window as { navigation?: Navigation }).navigation;
-  return typeof navigation?.canGoBack === "boolean" ? navigation : undefined;
+  return typeof navigation?.entries === "function" ? navigation : undefined;
 }
 
 function subscribeToHistory(onChange: () => void): () => void {
@@ -29,18 +30,34 @@ function subscribeToHistory(onChange: () => void): () => void {
   return () => navigation?.removeEventListener("currententrychange", onChange);
 }
 
-const canGoBack = () => shellNavigation()?.canGoBack ?? false;
-const canGoForward = () => shellNavigation()?.canGoForward ?? false;
+/**
+ * Whether the history entry `offset` steps away is a page of this app: same
+ * origin and under `appRoot`. A workspace-hosted app shares its origin with
+ * pages outside its mount, such as the workspace root the desktop shell
+ * redirects from.
+ */
+function canStep(offset: -1 | 1, appRoot: string): boolean {
+  const navigation = shellNavigation();
+  const current = navigation?.currentEntry;
+  if (!navigation || !current) return false;
+  const target = navigation.entries()[current.index + offset]?.url;
+  if (!target) return false;
+  const url = new URL(target);
+  if (url.origin !== window.location.origin) return false;
+  return !appRoot || url.pathname === appRoot || url.pathname.startsWith(`${appRoot}/`);
+}
 
 /**
  * In-app Back / Forward for the desktop and mobile shells, which have no
- * browser toolbar. They step through this window's page history; the
- * Navigation API counts only same-origin entries, so Back never leaves the app.
+ * browser toolbar. They step through this window's page history and stop at
+ * the first entry outside the app.
  */
 export function HistoryNavigationButtons() {
   const navigate = useNavigate();
-  const backEnabled = useSyncExternalStore(subscribeToHistory, canGoBack);
-  const forwardEnabled = useSyncExternalStore(subscribeToHistory, canGoForward);
+  // The mount path: the server's base path, or the embedding host's basename.
+  const appRoot = withBasePath(useRebasePath()("/")).replace(/\/+$/, "");
+  const backEnabled = useSyncExternalStore(subscribeToHistory, () => canStep(-1, appRoot));
+  const forwardEnabled = useSyncExternalStore(subscribeToHistory, () => canStep(1, appRoot));
   if (!shellNavigation()) return null;
   return (
     <div className="flex items-center gap-0.5" data-testid="history-navigation">
