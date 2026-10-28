@@ -111,11 +111,8 @@ def test_uv_lock_cryptography_at_fixed_version() -> None:
 
 @pytest.mark.parametrize("name", ["mlflow", "mlflow-skinny", "mlflow-tracing"])
 def test_uv_lock_mlflow_at_fixed_version(name: str) -> None:
-    # 3.17.2 is the first release outside CVE-2026-53995 (FileStore path
-    # traversal, <= 3.17.1); 3.17.0 already fixed CVE-2026-116692 (scorer RCE)
-    # and CVE-2026-116690 / CVE-2026-116691 / CVE-2026-115886. The release
-    # train cross-pins all three packages. mlflow is transitive (via
-    # databricks-mcp in the databricks extra), so absence also passes.
+    # MLflow cross-pins these three packages, so enforce the fixed floor on
+    # each. They are transitive (databricks extra), so absence also passes.
     _assert_no_vulnerable_pin(
         "uv.lock",
         name,
