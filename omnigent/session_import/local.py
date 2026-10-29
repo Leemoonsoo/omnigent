@@ -40,6 +40,7 @@ from omnigent.session_import.models import (
     ImportSource,
     LocalSessionImport,
     SessionImportNotFoundError,
+    from_last_compaction,
     import_item_payload,
 )
 
@@ -1016,16 +1017,16 @@ def _codex_items_within_import_cap(
     """Trim an import too large to send whole to its last compaction onward.
 
     Within ``MAX_IMPORT_ITEMS`` items and the server's session-size cap, the whole history
-    imports. Past either, keep the last compaction item and everything after it, the
-    context a cold resume rebuilds from. Without a compaction, nothing is trimmed.
+    imports. Past either, keep the last compaction item and everything after it.
+    Without a compaction, nothing is trimmed.
     """
     if (
         len(items) <= MAX_IMPORT_ITEMS
         and _import_items_json_chars(items) <= _MAX_IMPORT_ITEMS_JSON_CHARS
     ):
         return items
-    compactions = [index for index, item in enumerate(items) if item.type == "compaction"]
-    return items[compactions[-1] :] if compactions else items
+    trimmed = from_last_compaction(items)
+    return items if trimmed is None else list(trimmed)
 
 
 def load_codex_session(

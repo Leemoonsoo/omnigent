@@ -73,6 +73,12 @@ full history exceeds either cap is trimmed to its last compaction item and
 everything after it. A thread with no compaction stays whole, and a trimmed
 suffix still over a cap is not cut further, so its import fails.
 
+A deployment can also cap request bodies below these limits, for example a
+proxy in front of the server. When `omnigent import` gets HTTP 413, or a
+"exceeds maximum allowed content length" rejection, it resends the session
+from its last compaction onward and says so in its output. A session with no
+compaction still fails.
+
 A thread Codex archived (`threads.archived`, or a rollout under
 `archived_sessions/`) imports as an archived session, archived at the import
 time. Importing a thread again without `force` leaves the existing copy and its

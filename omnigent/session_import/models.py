@@ -25,6 +25,20 @@ def import_item_payload(item: NewConversationItem) -> dict[str, object]:
     }
 
 
+def from_last_compaction(
+    items: Sequence[NewConversationItem],
+) -> tuple[NewConversationItem, ...] | None:
+    """The last compaction item and everything after it, or ``None`` if that drops nothing.
+
+    This is the context a cold resume rebuilds from, so a session too large to import
+    whole falls back to it.
+    """
+    for index in range(len(items) - 1, 0, -1):
+        if items[index].type == "compaction":
+            return tuple(items[index:])
+    return None
+
+
 IMPORT_SOURCE_LABEL_KEY = "omnigent.import.source"
 IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY = "omnigent.import.external_session_id"
 IMPORT_PROVENANCE_LABEL_KEYS = frozenset(
