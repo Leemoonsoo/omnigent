@@ -5988,6 +5988,66 @@ def test_fork_conversation_up_to_last_response_keeps_external_directive(
     )
 
 
+@pytest.mark.parametrize(
+    ("parent_external_session_id", "fork_kwargs", "expected_directive"),
+    [
+        pytest.param("claude-uuid-parent", {}, "claude-uuid-parent", id="full"),
+        pytest.param(
+            "claude-uuid-parent", {"up_to_response_id": "resp_001"}, None, id="truncated"
+        ),
+        pytest.param(
+            "claude-uuid-parent",
+            {"resume_source_native_session": False},
+            None,
+            id="cross_family",
+        ),
+        pytest.param(None, {}, None, id="parent_never_launched"),
+    ],
+)
+def test_fork_of_fork_never_inherits_grandparent_directive(
+    conversation_store: SqlAlchemyConversationStore,
+    agent_store: SqlAlchemyAgentStore,
+    parent_external_session_id: str | None,
+    fork_kwargs: dict[str, Any],
+    expected_directive: str | None,
+) -> None:
+    """A fork of a fork takes its resume directive only from its own source.
+
+    The parent fork carries the grandparent's native session id as its own
+    directive. Copying that onto the child would make the runner resume the
+    grandparent's transcript, whose turns differ from the child's copied
+    items. Without a directive the runner rebuilds from those items.
+    """
+    from omnigent.stores.conversation_store import (
+        FORK_CARRY_HISTORY_LABEL_KEY,
+        FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
+    )
+
+    agent_store.create(
+        agent_id="476e7544698c423e9281b329fcd58113",
+        name="fork-of-fork",
+        bundle_location="476e7544698c423e9281b329fcd58113/fakehash",
+    )
+    grandparent = conversation_store.create_conversation(
+        agent_id="476e7544698c423e9281b329fcd58113"
+    )
+    conversation_store.set_external_session_id(grandparent.id, "claude-uuid-grandparent")
+    _append_three_responses(conversation_store, grandparent.id)
+    parent = conversation_store.fork_conversation(grandparent.id, carry_history_into_native=True)
+    assert parent.labels[FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY] == "claude-uuid-grandparent"
+    if parent_external_session_id is not None:
+        conversation_store.set_external_session_id(parent.id, parent_external_session_id)
+
+    child = conversation_store.fork_conversation(
+        parent.id, carry_history_into_native=True, **fork_kwargs
+    )
+
+    assert child.labels.get(FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY) == expected_directive, (
+        f"fork of a fork must not inherit the grandparent's directive, got {child.labels!r}"
+    )
+    assert child.labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
+
+
 def test_fork_conversation_up_to_unknown_response_raises(
     conversation_store: SqlAlchemyConversationStore,
     agent_store: SqlAlchemyAgentStore,
