@@ -124,37 +124,24 @@ class CompressedText(TypeDecorator[str]):
     impl = LargeBinary
     cache_ok = True
 
-    def __init__(self, max_bytes: int | None = None, max_stored_bytes: int | None = None) -> None:
+    def __init__(self, max_stored_bytes: int | None = None) -> None:
         """
-        :param max_bytes: Largest UTF-8 text accepted on write and returned on
-            read, e.g. ``500 * 1024``; ``None`` leaves text size unbounded.
-        :param max_stored_bytes: Largest framed (compressed) value written or
-            read, e.g. ``65_535`` for a MySQL ``BLOB``; ``None`` falls back to
-            ``max_bytes``. Legacy unframed values are checked against
-            ``max_bytes`` only.
+        :param max_stored_bytes: Largest framed (compressed) value to write, e.g.
+            ``65_535`` for a MySQL ``BLOB``; ``None`` leaves writes unbounded.
         """
         super().__init__()
-        self.max_bytes = max_bytes
         self.max_stored_bytes = max_stored_bytes
 
-    def _check_size(self, value: bytes | str | memoryview | None, *, stored: bool = False) -> None:
-        """Raise ``ValueError`` if *value* exceeds the text or stored-size limit."""
-        limit = (
-            self.max_stored_bytes
-            if stored and self.max_stored_bytes is not None
-            else self.max_bytes
-        )
-        if value is not None and limit is not None:
-            size = len(value.encode("utf-8")) if isinstance(value, str) else len(value)
-            if size > limit:
-                raise ValueError("Compressed text exceeds size limit")
-
     def process_bind_param(self, value: str | None, dialect: object) -> bytes | None:
-        """Compress on the way into the database."""
+        """Compress on the way into the database, enforcing ``max_stored_bytes``."""
         del dialect
-        self._check_size(value)
         encoded = encode(value)
-        self._check_size(encoded, stored=True)
+        if (
+            encoded is not None
+            and self.max_stored_bytes is not None
+            and len(encoded) > self.max_stored_bytes
+        ):
+            raise ValueError("Compressed text exceeds size limit")
         return encoded
 
     def process_result_value(
@@ -162,13 +149,4 @@ class CompressedText(TypeDecorator[str]):
     ) -> str | None:
         """Decompress on the way out of the database."""
         del dialect
-        # Legacy unframed text can predate the compressed-column storage cap.
-        # Keep it readable within the decoded bound; writes enforce both caps.
-        framed = (
-            not isinstance(value, str)
-            and value is not None
-            and len(value) > 0
-            and value[0] == _SENTINEL
-        )
-        self._check_size(value, stored=framed)
-        return decode(value, max_decoded_bytes=self.max_bytes)
+        return decode(value)

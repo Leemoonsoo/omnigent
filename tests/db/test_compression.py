@@ -112,19 +112,7 @@ def test_compressed_text_without_limits_accepts_any_size() -> None:
     assert codec.process_result_value(codec.process_bind_param(value, None), None) == value
 
 
-def test_compressed_text_max_bytes_bounds_text_on_write_and_read() -> None:
-    codec = CompressedText(max_bytes=1024)
-    value = "x" * 1024
-    assert codec.process_result_value(codec.process_bind_param(value, None), None) == value
-    with pytest.raises(ValueError, match="size limit"):
-        codec.process_bind_param(value + "x", None)
-    with pytest.raises(ValueError, match="size limit"):
-        codec.process_result_value(encode(value + "x"), None)
-    with pytest.raises(ValueError, match="size limit"):
-        codec.process_result_value(b"x" * 1025, None)
-
-
-def test_compressed_text_max_stored_bytes_bounds_framed_values() -> None:
+def test_compressed_text_max_stored_bytes_bounds_framed_writes() -> None:
     codec = CompressedText(max_stored_bytes=65_535)
     # Compressible text far above the stored limit still fits once compressed.
     value = "x" * (1024 * 1024)
@@ -133,8 +121,14 @@ def test_compressed_text_max_stored_bytes_bounds_framed_values() -> None:
     assert len(encode(value)) > 65_535
     with pytest.raises(ValueError, match="size limit"):
         codec.process_bind_param(value, None)
-    with pytest.raises(ValueError, match="size limit"):
-        codec.process_result_value(encode(value), None)
-    # Legacy unframed values are only checked against max_bytes, which is unset.
+    # Reads are not size-checked: legacy and framed values already stored still decode.
     assert codec.process_result_value(b"x" * 65_536, None) == "x" * 65_536
-    assert codec.process_result_value("x" * 65_536, None) == "x" * 65_536
+    assert codec.process_result_value(encode(value), None) == value
+
+
+@pytest.mark.parametrize("value", ["x" * 10, _incompressible_text(2048)], ids=["raw", "zstd"])
+def test_compressed_text_max_stored_bytes_is_inclusive(value: str) -> None:
+    stored = len(encode(value))
+    assert CompressedText(max_stored_bytes=stored).process_bind_param(value, None) == encode(value)
+    with pytest.raises(ValueError, match="size limit"):
+        CompressedText(max_stored_bytes=stored - 1).process_bind_param(value, None)
