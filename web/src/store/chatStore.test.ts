@@ -17976,8 +17976,9 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
 
     // The server adopts a stored verdict before re-publishing, so a
     // re-publish after the POST returned means the verdict never reached
-    // the waiting hook (it landed on a replica with no waiter).
-    sinks[0]!.push(elicitationReqFrame("elic_lost", "Pick an option?"));
+    // the waiting hook (it landed on a replica with no waiter). Ids can
+    // recur, so this one carries a different request.
+    sinks[0]!.push(elicitationReqFrame("elic_lost", "Pick another option?"));
     await drainAsync();
 
     const cards = elicitationCards();
@@ -17986,6 +17987,8 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     expect(cards).toHaveLength(1);
     expect(cards[0]!.status).toBe("pending");
     expect(cards[0]!.response).toBeNull();
+    // The reopened card shows the request an answer would now approve.
+    expect(cards[0]!.message).toBe("Pick another option?");
 
     await abortLoop(sinks, controller, loop);
   });
@@ -18080,6 +18083,47 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     },
   );
 
+  it("keeps a newer answer when an older recheck's snapshot returns late", async () => {
+    seedSession("conv_newer_answer", []);
+    seedPendingElicitations("conv_newer_answer", [
+      pendingElicitationRaw("elic_na", "Pick an option?"),
+    ]);
+    const { sinks, controller, loop } = await openLoop("conv_newer_answer");
+    sinks[0]!.push(elicitationReqFrame("elic_na", "Pick an option?"));
+    await drainAsync();
+
+    // Answer 1: a re-publish arrives during its POST, so a recheck runs
+    // once it returns. That recheck's snapshot (still pending) is held.
+    const releaseResolves = holdElicitationResolves();
+    const first = useChatStore.getState().submitApproval("elic_na", "decline");
+    await drainAsync();
+    sinks[0]!.push(elicitationReqFrame("elic_na", "Pick an option?"));
+    await drainAsync();
+    const releaseSnapshot = holdNextSessionSnapshot("conv_newer_answer");
+    releaseResolves();
+    await first;
+    await drainAsync();
+
+    // A live re-publish reopens the card, and answer 2 completes.
+    sinks[0]!.push(elicitationReqFrame("elic_na", "Pick an option?"));
+    await drainAsync();
+    expect(elicitationCards()[0]!.status).toBe("pending");
+    await useChatStore.getState().submitApproval("elic_na", "accept");
+    await drainAsync();
+
+    // The old snapshot returns with no resolution event in between.
+    releaseSnapshot();
+    await drainAsync();
+
+    // Reopened = the stale recheck erased answer 2.
+    const cards = elicitationCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.status).toBe("responded");
+    expect(cards[0]!.response?.action).toBe("accept");
+
+    await abortLoop(sinks, controller, loop);
+  });
+
   it("keeps a rechecked card answered when the prompt resolves during the recheck", async () => {
     seedSession("conv_recheck_resolved", []);
     seedPendingElicitations("conv_recheck_resolved", [
@@ -18163,8 +18207,12 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     await useChatStore.getState().submitApproval("elic_gap_lost", "decline");
     expect(elicitationCards()[0]!.response?.action).toBe("decline");
 
-    // The stream drops; the prompt re-parked during the gap, so the
-    // snapshot still lists it after the verdict POST returned.
+    // The stream drops; a prompt re-parked during the gap under the same
+    // id (with a different request), so the snapshot lists it after the
+    // verdict POST returned.
+    seedPendingElicitations("conv_lost_gap", [
+      pendingElicitationRaw("elic_gap_lost", "Pick another option?"),
+    ]);
     sinks[0]!.error();
     await drainAsync();
     expect(sinks).toHaveLength(2);
@@ -18173,6 +18221,7 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     expect(cards).toHaveLength(1);
     expect(cards[0]!.status).toBe("pending");
     expect(cards[0]!.response).toBeNull();
+    expect(cards[0]!.message).toBe("Pick another option?");
 
     await closeLoop(sinks, loop);
   });

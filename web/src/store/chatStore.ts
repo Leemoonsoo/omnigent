@@ -3455,6 +3455,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       status: action === "accept" ? "success" : action === "decline" ? "failure" : "cancelled",
     });
     elicitationVerdictsInFlight.add(elicitationId);
+    bumpElicitationVerdictRevision(sessionId, elicitationId);
     try {
       await approveElicitation(targetSessionId, elicitationId, {
         action,
@@ -5498,8 +5499,9 @@ async function reconcileActiveSessionStatus(
  *   → flip back to pending in place (the prompt re-parked after its
  *   deferred clear fired, or the answer never reached the waiting
  *   hook), so the user can still answer it. See
- *   `isRevivableElicitation`. A resolution event received since the
- *   capture means the snapshot may predate it, so that card stays.
+ *   `isRevivableElicitation`, rebuilt from the snapshot's request. A
+ *   resolution event or newer answer since the capture means the
+ *   snapshot may predate it, so that card stays.
  *
  * The two flips are restricted to cards captured in the `preGap*` sets
  * — cards the caller saw BEFORE fetching the snapshot. Cards the live
@@ -5553,14 +5555,14 @@ function reconcileElicitationBlocks(
       return updated;
     }
     if (
+      currentDelivery !== undefined &&
       isRevivableElicitation(b) &&
       preGapRevivable.get(b.elicitationId) ===
-        elicitationResolutionRevision(conversationId, b.elicitationId) &&
-      pendingNow.has(b.elicitationId)
+        elicitationVerdictRevision(conversationId, b.elicitationId)
     ) {
+      // Rebuilt from the snapshot: a recurring id can carry a different request.
       changed = true;
-      const updated: ElicitationBlock = { ...b, status: "pending", response: null };
-      return updated;
+      return { ...currentDelivery, ctx: b.ctx };
     }
     return b;
   });
@@ -5611,7 +5613,7 @@ function withoutRebuiltUserInputCards(
  * Snapshot the ids of currently rendered elicitation cards, split by
  * answerable state, BEFORE a snapshot fetch. `pending` cards are
  * eligible for the gap-resolved flip; `revivable` cards, mapped to their
- * resolution revision, are eligible for the re-parked revival. See
+ * verdict revision, are eligible for the re-parked revival. See
  * `reconcileElicitationBlocks` for why eligibility is captured ahead
  * of the fetch.
  */
@@ -5631,10 +5633,7 @@ function captureElicitationIdsByStatus(
     cards.set(b.elicitationId, b);
     if (b.status === "pending") pending.add(b.elicitationId);
     else if (isRevivableElicitation(b)) {
-      revivable.set(
-        b.elicitationId,
-        elicitationResolutionRevision(conversationId, b.elicitationId),
-      );
+      revivable.set(b.elicitationId, elicitationVerdictRevision(conversationId, b.elicitationId));
     }
   }
   return { pending, revivable, cards };
@@ -6813,23 +6812,24 @@ function isRevivableElicitation(block: ElicitationBlock): boolean {
 }
 
 /**
- * Per conversation, `response.elicitation_resolved` events received per
- * elicitation id, counted even when the card already shows an answer.
- * Snapshot-driven revival compares the count across its fetch, so a snapshot
- * read before the prompt was resolved cannot reopen it.
+ * Per conversation and elicitation id, the count of `response.elicitation_resolved`
+ * events received (even when the card already shows an answer) and verdicts
+ * submitted. Snapshot-driven revival compares it across its fetch, so a
+ * snapshot read before the prompt was resolved, or before a newer answer,
+ * cannot reopen the card.
  */
-const elicitationResolutionRevisions = new Map<string, Map<string, number>>();
-conversationRegistry.subscribeDisposed((id) => elicitationResolutionRevisions.delete(id));
+const elicitationVerdictRevisions = new Map<string, Map<string, number>>();
+conversationRegistry.subscribeDisposed((id) => elicitationVerdictRevisions.delete(id));
 
-function elicitationResolutionRevision(conversationId: string, elicitationId: string): number {
-  return elicitationResolutionRevisions.get(conversationId)?.get(elicitationId) ?? 0;
+function elicitationVerdictRevision(conversationId: string, elicitationId: string): number {
+  return elicitationVerdictRevisions.get(conversationId)?.get(elicitationId) ?? 0;
 }
 
-function recordElicitationResolution(conversationId: string, elicitationId: string): void {
-  let revisions = elicitationResolutionRevisions.get(conversationId);
+function bumpElicitationVerdictRevision(conversationId: string, elicitationId: string): void {
+  let revisions = elicitationVerdictRevisions.get(conversationId);
   if (revisions === undefined) {
     revisions = new Map();
-    elicitationResolutionRevisions.set(conversationId, revisions);
+    elicitationVerdictRevisions.set(conversationId, revisions);
   }
   revisions.set(elicitationId, (revisions.get(elicitationId) ?? 0) + 1);
 }
@@ -6870,7 +6870,7 @@ async function recheckAnsweredElicitation(
   conversationId: string,
   elicitationId: string,
 ): Promise<void> {
-  const revisionBeforeFetch = elicitationResolutionRevision(conversationId, elicitationId);
+  const revisionBeforeFetch = elicitationVerdictRevision(conversationId, elicitationId);
   let session: Session;
   try {
     session = await getSessionSlim(conversationId);
@@ -6878,12 +6878,12 @@ async function recheckAnsweredElicitation(
     return;
   }
   if (isConversationDisposed(conversationId)) return;
-  // A resolution event during the fetch means the snapshot may predate it.
-  if (elicitationResolutionRevision(conversationId, elicitationId) !== revisionBeforeFetch) return;
-  const stillPending = pendingElicitationBlocksFromSnapshot(session).some(
-    (b) => b.type === "elicitation" && b.elicitationId === elicitationId,
+  // A resolution event or newer answer during the fetch means the snapshot may predate it.
+  if (elicitationVerdictRevision(conversationId, elicitationId) !== revisionBeforeFetch) return;
+  const current = pendingElicitationBlocksFromSnapshot(session).find(
+    (b): b is ElicitationBlock => b.type === "elicitation" && b.elicitationId === elicitationId,
   );
-  if (stillPending) revivePendingElicitationBlock(setterFor(conversationId), elicitationId);
+  if (current) revivePendingElicitationBlock(setterFor(conversationId), elicitationId, current);
 }
 
 /**
@@ -6894,7 +6894,7 @@ async function recheckAnsweredElicitation(
 function revivePendingElicitationBlock(
   set: Setter,
   elicitationId: string,
-  incoming?: ElicitationBlock,
+  incoming: ElicitationBlock,
 ): void {
   set((s) => {
     const idx = s.blocks.findIndex(
@@ -6903,13 +6903,20 @@ function revivePendingElicitationBlock(
     if (idx === -1) return {};
     const target = s.blocks[idx] as ElicitationBlock;
     if (target.nativeDeliveryResolved) return {};
-    if (incoming?.nativeDelivery) {
+    if (incoming.nativeDelivery) {
       if (target.status === "responded" && target.response?.action !== "auto_resolved") return {};
       const updated = { ...incoming, ctx: target.ctx };
       return { blocks: [...s.blocks.slice(0, idx), updated, ...s.blocks.slice(idx + 1)] };
     }
     if (!isRevivableElicitation(target)) return {};
-    const updated: ElicitationBlock = { ...target, status: "pending", response: null };
+    // Rebuilt from the incoming request: a recurring id can carry a different
+    // request, and the reopened card must show what an answer would approve.
+    const updated: ElicitationBlock = {
+      ...incoming,
+      ctx: target.ctx,
+      status: "pending",
+      response: null,
+    };
     return { blocks: [...s.blocks.slice(0, idx), updated, ...s.blocks.slice(idx + 1)] };
   });
 }
@@ -9120,7 +9127,7 @@ async function* tapSessionEvents(
       beforeTurnEdge?.();
     }
     if (event.type === "elicitation_resolved") {
-      recordElicitationResolution(conversationId, event.elicitationId);
+      bumpElicitationVerdictRevision(conversationId, event.elicitationId);
     }
     handleSessionEvent(event, conversationId);
     if (event.type === "elicitation_resolved") {
