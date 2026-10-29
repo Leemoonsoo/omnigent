@@ -6001,22 +6001,26 @@ def test_fork_conversation_up_to_last_response_keeps_external_directive(
             None,
             id="cross_family",
         ),
-        pytest.param(None, {}, None, id="parent_never_launched"),
+        pytest.param(None, {}, "claude-uuid-grandparent", id="parent_never_launched"),
+        pytest.param(
+            None, {"up_to_response_id": "resp_001"}, None, id="parent_never_launched_truncated"
+        ),
     ],
 )
-def test_fork_of_fork_never_inherits_grandparent_directive(
+def test_fork_of_fork_inherits_directive_only_when_still_valid(
     conversation_store: SqlAlchemyConversationStore,
     agent_store: SqlAlchemyAgentStore,
     parent_external_session_id: str | None,
     fork_kwargs: dict[str, Any],
     expected_directive: str | None,
 ) -> None:
-    """A fork of a fork takes its resume directive only from its own source.
+    """A fork of a fork keeps the parent's directive only for a full copy of it.
 
     The parent fork carries the grandparent's native session id as its own
-    directive. Copying that onto the child would make the runner resume the
-    grandparent's transcript, whose turns differ from the child's copied
-    items. Without a directive, rebuild-capable runners rebuild from those items.
+    directive. Once the parent has its own native session, or when the child
+    is truncated or cross-family, resuming the grandparent's transcript would
+    not match the child's copied items. A full fork of a parent that never
+    launched keeps the directive, which names the transcript its items came from.
     """
     from omnigent.stores.conversation_store import (
         FORK_CARRY_HISTORY_LABEL_KEY,
@@ -6043,7 +6047,7 @@ def test_fork_of_fork_never_inherits_grandparent_directive(
     )
 
     assert child.labels.get(FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY) == expected_directive, (
-        f"fork of a fork must not inherit the grandparent's directive, got {child.labels!r}"
+        f"unexpected resume directive on a fork of a fork: {child.labels!r}"
     )
     assert child.labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
 
