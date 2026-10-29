@@ -364,10 +364,8 @@ async def test_store_fallback_resolves_prompt_whose_call_another_replica_mirrore
     assert not other.resolved_elsewhere.is_set()
 
 
-async def test_store_fallback_skips_store_without_a_parked_prompt(db_uri: str) -> None:
-    """With nothing parked for the session, a cache miss reads nothing."""
-    store, session_id = _store_with_mirrored_call(db_uri, "toolu_q", "Bash", {"command": "ls"})
-    _park("e_elsewhere", "Bash", {"command": "ls"}, session_id="conv_other")
+def _record_list_items(store: SqlAlchemyConversationStore) -> list[str]:
+    """Record the session id of every ``list_items`` call on ``store``."""
     reads: list[str] = []
     original = store.list_items
 
@@ -376,11 +374,38 @@ async def test_store_fallback_skips_store_without_a_parked_prompt(db_uri: str) -
         return original(*args, **kwargs)
 
     store.list_items = recording_list_items  # type: ignore[method-assign]
+    return reads
+
+
+async def test_store_fallback_skips_store_without_a_parked_prompt(db_uri: str) -> None:
+    """With nothing parked for the session, a cache miss reads nothing."""
+    store, session_id = _store_with_mirrored_call(db_uri, "toolu_q", "Bash", {"command": "ls"})
+    _park("e_elsewhere", "Bash", {"command": "ls"}, session_id="conv_other")
+    reads = _record_list_items(store)
 
     await sessions_route._drive_terminal_resolved_elicitation_from_store(
         session_id, _function_call_output_item("toolu_q"), store
     )
 
+    assert reads == []
+
+
+async def test_store_fallback_skips_store_on_a_cache_hit(db_uri: str) -> None:
+    """A result whose call this replica cached resolves through the cache alone."""
+    store, session_id = _store_with_mirrored_call(db_uri, "toolu_q", "Bash", {"command": "ls"})
+    parked = _park("e_q", "Bash", {"command": "ls"}, session_id=session_id)
+    # Another prompt stays parked, so only the cache hit keeps the store unread.
+    _park("e_other", "Bash", {"command": "pwd"}, session_id=session_id)
+    reads = _record_list_items(store)
+    sessions_route._drive_terminal_resolved_elicitation(
+        session_id, _function_call_item("toolu_q", "Bash", {"command": "ls"})
+    )
+    output = _function_call_output_item("toolu_q")
+
+    sessions_route._drive_terminal_resolved_elicitation(session_id, output)
+    await sessions_route._drive_terminal_resolved_elicitation_from_store(session_id, output, store)
+
+    assert parked.resolved_elsewhere.is_set()
     assert reads == []
 
 

@@ -18032,76 +18032,53 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     await closeLoop(sinks, loop);
   });
 
-  it("rechecks an answered card after its verdict POST when a reconnect ran during it", async () => {
-    seedSession("conv_recheck", []);
-    seedPendingElicitations("conv_recheck", [
-      pendingElicitationRaw("elic_recheck", "Pick an option?"),
-    ]);
-    const { sinks, loop } = await openLoop("conv_recheck");
-    sinks[0]!.push(elicitationReqFrame("elic_recheck", "Pick an option?"));
-    await drainAsync();
+  it.each([
+    { order: "starts during the verdict POST", reconnectFirst: false },
+    { order: "starts first and ends during the verdict POST", reconnectFirst: true },
+  ])(
+    "rechecks an answered card after its verdict POST when a reconnect $order",
+    async ({ reconnectFirst }) => {
+      const id = reconnectFirst ? "conv_overlap" : "conv_recheck";
+      seedSession(id, []);
+      seedPendingElicitations(id, [pendingElicitationRaw("elic_recheck", "Pick an option?")]);
+      const { sinks, loop } = await openLoop(id);
+      sinks[0]!.push(elicitationReqFrame("elic_recheck", "Pick an option?"));
+      await drainAsync();
 
-    const releaseResolves = holdElicitationResolves();
-    const submitted = useChatStore.getState().submitApproval("elic_recheck", "decline");
-    await drainAsync();
+      // Either way, the reconnect sees the prompt still pending while the
+      // verdict POST is in flight, so it must leave the card answered: the
+      // verdict may not have arrived yet.
+      const releaseSnapshot = reconnectFirst ? holdNextSessionSnapshot(id) : undefined;
+      if (reconnectFirst) {
+        sinks[0]!.error();
+        await drainAsync();
+      }
+      const releaseResolves = holdElicitationResolves();
+      const submitted = useChatStore.getState().submitApproval("elic_recheck", "decline");
+      await drainAsync();
+      if (reconnectFirst) {
+        releaseSnapshot!();
+      } else {
+        sinks[0]!.error();
+      }
+      await drainAsync();
+      expect(sinks).toHaveLength(2);
+      expect(elicitationCards()[0]!.status).toBe("responded");
 
-    // A reconnect while the POST is in flight still sees the prompt pending,
-    // but must leave the card answered: the verdict may not have arrived yet.
-    sinks[0]!.error();
-    await drainAsync();
-    expect(sinks).toHaveLength(2);
-    expect(elicitationCards()[0]!.status).toBe("responded");
+      // The POST returns and the prompt is still parked (the verdict never
+      // reached the hook). The card reopens with no further stream event.
+      releaseResolves();
+      await submitted;
+      await drainAsync();
 
-    // The POST returns and the prompt is still parked (the verdict never
-    // reached the hook). The card reopens with no further stream event.
-    releaseResolves();
-    await submitted;
-    await drainAsync();
+      const cards = elicitationCards();
+      expect(cards).toHaveLength(1);
+      expect(cards[0]!.status).toBe("pending");
+      expect(cards[0]!.response).toBeNull();
 
-    const cards = elicitationCards();
-    expect(cards).toHaveLength(1);
-    expect(cards[0]!.status).toBe("pending");
-    expect(cards[0]!.response).toBeNull();
-
-    await closeLoop(sinks, loop);
-  });
-
-  it("rechecks an answered card when its POST overlaps a reconnect that started first", async () => {
-    seedSession("conv_overlap", []);
-    seedPendingElicitations("conv_overlap", [
-      pendingElicitationRaw("elic_overlap", "Pick an option?"),
-    ]);
-    const { sinks, loop } = await openLoop("conv_overlap");
-    sinks[0]!.push(elicitationReqFrame("elic_overlap", "Pick an option?"));
-    await drainAsync();
-
-    // The reconnect captures the card while it is still pending.
-    const releaseSnapshot = holdNextSessionSnapshot("conv_overlap");
-    sinks[0]!.error();
-    await drainAsync();
-    expect(sinks).toHaveLength(2);
-
-    // The user answers while that reconcile waits, and the reconcile then
-    // finishes while the verdict POST is still in flight.
-    const releaseResolves = holdElicitationResolves();
-    const submitted = useChatStore.getState().submitApproval("elic_overlap", "decline");
-    await drainAsync();
-    releaseSnapshot();
-    await drainAsync();
-    expect(elicitationCards()[0]!.status).toBe("responded");
-
-    // The POST returns with the prompt still parked: the card reopens.
-    releaseResolves();
-    await submitted;
-    await drainAsync();
-
-    const cards = elicitationCards();
-    expect(cards).toHaveLength(1);
-    expect(cards[0]!.status).toBe("pending");
-    expect(cards[0]!.response).toBeNull();
-
-    await closeLoop(sinks, loop);
-  });
+      await closeLoop(sinks, loop);
+    },
+  );
 
   it("keeps a rechecked card answered when the prompt resolves during the recheck", async () => {
     seedSession("conv_recheck_resolved", []);

@@ -5514,6 +5514,7 @@ function reconcileElicitationBlocks(
   preGapPendingIds: Set<string>,
   preGapRevivable: Map<string, number>,
   preGapCards: Map<string, ElicitationBlock>,
+  conversationId: string,
 ): AnyBlock[] | null {
   const pendingNow = new Set(
     snapshotPending
@@ -5553,7 +5554,8 @@ function reconcileElicitationBlocks(
     }
     if (
       isRevivableElicitation(b) &&
-      preGapRevivable.get(b.elicitationId) === elicitationResolutionRevision(b.elicitationId) &&
+      preGapRevivable.get(b.elicitationId) ===
+        elicitationResolutionRevision(conversationId, b.elicitationId) &&
       pendingNow.has(b.elicitationId)
     ) {
       changed = true;
@@ -5613,7 +5615,10 @@ function withoutRebuiltUserInputCards(
  * `reconcileElicitationBlocks` for why eligibility is captured ahead
  * of the fetch.
  */
-function captureElicitationIdsByStatus(blocks: AnyBlock[]): {
+function captureElicitationIdsByStatus(
+  blocks: AnyBlock[],
+  conversationId: string,
+): {
   pending: Set<string>;
   revivable: Map<string, number>;
   cards: Map<string, ElicitationBlock>;
@@ -5626,7 +5631,10 @@ function captureElicitationIdsByStatus(blocks: AnyBlock[]): {
     cards.set(b.elicitationId, b);
     if (b.status === "pending") pending.add(b.elicitationId);
     else if (isRevivableElicitation(b)) {
-      revivable.set(b.elicitationId, elicitationResolutionRevision(b.elicitationId));
+      revivable.set(
+        b.elicitationId,
+        elicitationResolutionRevision(conversationId, b.elicitationId),
+      );
     }
   }
   return { pending, revivable, cards };
@@ -5739,6 +5747,7 @@ async function rehydrateWindowOnReconnect(
         preGapElicitations.pending,
         preGapElicitations.revivable,
         preGapElicitations.cards,
+        id,
       ) ?? merged;
     return {
       ...statusPatch,
@@ -5804,7 +5813,7 @@ async function reconcileOnReconnect(
   // Same pre-gap capture for elicitation cards: only cards rendered
   // before the snapshot fetch are eligible for its flips — see
   // `reconcileElicitationBlocks`.
-  const preGapElicitations = captureElicitationIdsByStatus(get().blocks);
+  const preGapElicitations = captureElicitationIdsByStatus(get().blocks, id);
   // A window reset mid-fetch (A→B→A revisit, rebind) defeats the id check alone.
   const generation = get().historyGeneration;
   const stale = (): boolean => isConversationDisposed(id) || get().historyGeneration !== generation;
@@ -5941,6 +5950,7 @@ async function reconcileOnReconnect(
       preGapElicitations.pending,
       preGapElicitations.revivable,
       preGapElicitations.cards,
+      id,
     );
     if (reconciled !== null) nextBlocks = reconciled;
     nextBlocks =
@@ -6779,25 +6789,20 @@ export function isStaleCompletedResponse(s: { activeResponse: ActiveResponse | n
   );
 }
 
-/**
- * Elicitation ids whose verdict POST (`submitApproval`) has not returned yet.
- * While one is in flight, a re-publish may predate the server receiving the
- * verdict, so the card must stay answered; `submitApproval` rolls it back if
- * the POST fails.
- */
+/** Elicitation ids whose verdict POST (`submitApproval`) has not returned. */
 const elicitationVerdictsInFlight = new Set<string>();
 
 /**
  * Whether a responded card may flip back to pending when the server shows
- * its prompt waiting again (a re-published request, or the reconnect
+ * its prompt waiting again (a re-published request, or a reconnect
  * snapshot's pending list).
  *
  * The server adopts a stored verdict before it publishes a re-parked
- * prompt, so a prompt published after its verdict POST returned is still
- * waiting: the deferred clear fired before the retry re-parked
- * ("Resolved elsewhere"), or the verdict never reached the waiting hook
- * (it landed on a replica that had none). A verdict still in flight is
- * excluded. Native-delivery cards follow their own delivery state.
+ * prompt, so a prompt shown waiting after its verdict POST returned never
+ * got that verdict (it landed on a replica with no waiter), or was
+ * auto-cleared before the hook re-parked ("Resolved elsewhere"). While the
+ * POST is in flight, the evidence may predate the verdict. Native-delivery
+ * cards follow their own delivery state.
  */
 function isRevivableElicitation(block: ElicitationBlock): boolean {
   if (block.status !== "responded" || block.nativeDelivery) return false;
@@ -6808,30 +6813,36 @@ function isRevivableElicitation(block: ElicitationBlock): boolean {
 }
 
 /**
- * Resolution events (`response.elicitation_resolved`) received per elicitation
- * id, counted even when the card already shows an answer. Snapshot-driven
- * revival compares the count across its fetch, so a snapshot read before the
- * prompt was resolved cannot reopen it.
+ * Per conversation, `response.elicitation_resolved` events received per
+ * elicitation id, counted even when the card already shows an answer.
+ * Snapshot-driven revival compares the count across its fetch, so a snapshot
+ * read before the prompt was resolved cannot reopen it.
  */
-const elicitationResolutionRevisions = new Map<string, number>();
+const elicitationResolutionRevisions = new Map<string, Map<string, number>>();
+conversationRegistry.subscribeDisposed((id) => elicitationResolutionRevisions.delete(id));
 
-function elicitationResolutionRevision(elicitationId: string): number {
-  return elicitationResolutionRevisions.get(elicitationId) ?? 0;
+function elicitationResolutionRevision(conversationId: string, elicitationId: string): number {
+  return elicitationResolutionRevisions.get(conversationId)?.get(elicitationId) ?? 0;
+}
+
+function recordElicitationResolution(conversationId: string, elicitationId: string): void {
+  let revisions = elicitationResolutionRevisions.get(conversationId);
+  if (revisions === undefined) {
+    revisions = new Map();
+    elicitationResolutionRevisions.set(conversationId, revisions);
+  }
+  revisions.set(elicitationId, (revisions.get(elicitationId) ?? 0) + 1);
 }
 
 /**
- * Elicitation ids to re-check once their verdict POST returns: the server
- * showed the prompt waiting while the POST was in flight (a re-publish, or a
- * reconnect snapshot), which `isRevivableElicitation` must ignore.
+ * Snapshot-check pending evidence received while the verdict POST was in
+ * flight, once the POST returns.
  */
 const elicitationRechecksAfterVerdict = new Set<string>();
 
 /**
- * Route answered cards that a reconnect snapshot still lists, but that the
- * reconcile did not revive, through the fresh-snapshot recheck: the snapshot
- * may predate the verdict (its POST overlapped the reconcile) or the card was
- * answered after the pre-fetch capture. A card whose POST is still in flight
- * is re-checked once the POST returns.
+ * Recheck answered cards a reconnect snapshot still lists but the reconcile
+ * did not revive: now, or once their verdict POST returns.
  */
 function queueAnsweredElicitationRechecks(
   conversationId: string,
@@ -6854,16 +6865,12 @@ function queueAnsweredElicitationRechecks(
   }
 }
 
-/**
- * Re-check an answered card the server may still show as waiting. Reads a
- * fresh snapshot, since one fetched while its verdict POST was in flight may
- * predate the verdict.
- */
+/** Reopen an answered card if a fresh snapshot still lists its prompt. */
 async function recheckAnsweredElicitation(
   conversationId: string,
   elicitationId: string,
 ): Promise<void> {
-  const revisionBeforeFetch = elicitationResolutionRevision(elicitationId);
+  const revisionBeforeFetch = elicitationResolutionRevision(conversationId, elicitationId);
   let session: Session;
   try {
     session = await getSessionSlim(conversationId);
@@ -6872,7 +6879,7 @@ async function recheckAnsweredElicitation(
   }
   if (isConversationDisposed(conversationId)) return;
   // A resolution event during the fetch means the snapshot may predate it.
-  if (elicitationResolutionRevision(elicitationId) !== revisionBeforeFetch) return;
+  if (elicitationResolutionRevision(conversationId, elicitationId) !== revisionBeforeFetch) return;
   const stillPending = pendingElicitationBlocksFromSnapshot(session).some(
     (b) => b.type === "elicitation" && b.elicitationId === elicitationId,
   );
@@ -9113,10 +9120,7 @@ async function* tapSessionEvents(
       beforeTurnEdge?.();
     }
     if (event.type === "elicitation_resolved") {
-      elicitationResolutionRevisions.set(
-        event.elicitationId,
-        elicitationResolutionRevision(event.elicitationId) + 1,
-      );
+      recordElicitationResolution(conversationId, event.elicitationId);
     }
     handleSessionEvent(event, conversationId);
     if (event.type === "elicitation_resolved") {
