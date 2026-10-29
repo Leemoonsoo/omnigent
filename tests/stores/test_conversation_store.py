@@ -6016,7 +6016,7 @@ def test_fork_of_fork_never_inherits_grandparent_directive(
     The parent fork carries the grandparent's native session id as its own
     directive. Copying that onto the child would make the runner resume the
     grandparent's transcript, whose turns differ from the child's copied
-    items. Without a directive the runner rebuilds from those items.
+    items. Without a directive, rebuild-capable runners rebuild from those items.
     """
     from omnigent.stores.conversation_store import (
         FORK_CARRY_HISTORY_LABEL_KEY,
