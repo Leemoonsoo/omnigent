@@ -433,22 +433,45 @@ def test_dedup_items_not_elicitation_driven() -> None:
     assert _stable_id(src_b) not in recorder.driven
 
 
-def _tool_output_event(call_id: str, *, response_id: str = "resp_1") -> dict:
-    return {
-        "type": "external_conversation_item",
-        "data": {
-            "item_type": "function_call_output",
-            "item_data": {"call_id": call_id, "output": "ok"},
-            "response_id": response_id,
-        },
+def test_dedup_tool_result_skips_mirrored_call_lookup() -> None:
+    """A deduplicated tool result does not look its call up in the store."""
+    _park_prompt_for_session()
+    src_new, src_dup = "src_out_new", "src_out_dup"
+    store = _FailingCallLookupStore(_make_conv(), dedup_item_ids={_stable_id(src_dup)})
+    recorder = _SideEffectRecorder()
+
+    with recorder.patch():
+        resp, _ = _post(
+            [
+                _tool_output_event("toolu_new", source_id=src_new),
+                _tool_output_event("toolu_dup", source_id=src_dup),  # dedup
+            ],
+            store=store,
+        )
+
+    assert resp.status_code == 202, resp.text
+    # Only the new result looked its call up; the duplicate was not re-driven.
+    assert store.list_calls == 1
+
+
+def _tool_output_event(
+    call_id: str, *, response_id: str = "resp_1", source_id: str | None = None
+) -> dict:
+    data: dict[str, Any] = {
+        "item_type": "function_call_output",
+        "item_data": {"call_id": call_id, "output": "ok"},
+        "response_id": response_id,
     }
+    if source_id is not None:
+        data["source_id"] = source_id
+    return {"type": "external_conversation_item", "data": data}
 
 
 class _FailingCallLookupStore(_RecordingStore):
     """Store whose item listing fails, as a database outage would."""
 
-    def __init__(self, conv: Conversation) -> None:
-        super().__init__(conv)
+    def __init__(self, conv: Conversation, *, dedup_item_ids: set[str] | None = None) -> None:
+        super().__init__(conv, dedup_item_ids=dedup_item_ids)
         self.list_calls = 0
 
     def list_items(self, *args: Any, **kwargs: Any) -> Any:
