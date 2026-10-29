@@ -232,9 +232,8 @@ _SANDBOX_REPO_LABEL_KEY = "omnigent.sandbox.repo"
 # source's id would route the fork to the wrong host. Mirrors the server's
 # ``REQUESTED_HOST_ID_LABEL_KEY`` (cross-checked by a store test).
 _SANDBOX_REQUESTED_HOST_ID_LABEL_KEY = "omnigent.sandbox.requested_host_id"
-# A fork's resume directive names its parent's native transcript; a further fork
-# gets one only from its source's own native session id, so truncated and
-# cross-family forks of a fork rebuild from their copied items.
+# Never inherit the native resume directive; eligible forks set it from their
+# immediate source's native session id.
 _FORK_ONLY_DROPPED_LABEL_KEYS = IMPORT_PROVENANCE_LABEL_KEYS | {
     CREATED_BY_SESSION_LABEL_KEY,
     ARCHIVED_AT_LABEL_KEY,
